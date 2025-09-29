@@ -165,6 +165,23 @@ class StateDiagram:
         self.title_text = canvas.create_text(title_text_x, title_text_y, text=self.state_id, fill="black", font=("Arial", 12, "bold"))
         return width, height
 
+class TransitionDiagram:
+    def __init__(self, points):
+        self.coords = [(points[i], points[i+1]) for i in range(0, len(points), 2)]
+        remove = []
+        prev = False
+        curr = False
+        for i in range(1, len(self.coords)):
+            curr = self.coords[i-1][0] == self.coords[i][0]
+            if i > 1 and (prev == curr):
+                remove.append(i-1-len(remove))
+            prev = curr
+        print(self.coords)
+        print(remove)
+        for i in range (0, len(remove)):
+            self.coords.pop(remove[i])
+        print(self.coords)
+
 
 class StateMachineDiagrammer:
     """
@@ -210,6 +227,7 @@ class StateMachineDiagrammer:
         self.states = {}
         self.transitions = {}
         self.state_diagrams = {}
+        self.transition_diagrams = []
 
         self.context_menu = tk.Menu(master, tearoff=0)
         self.context_menu.add_command(label="Draw State (Rectangle)", command=self.show_rectangle_dialog)
@@ -251,7 +269,7 @@ class StateMachineDiagrammer:
                     all_points = self.curve_points
                 self.arrow_tip_x = all_points[-2]
                 self.arrow_tip_y = all_points[-1]
-                self.canvas.coords(self.temp_arrow_id, *all_points)
+                self.canvas.coords(self.temp_arrow_id, all_points)
         
     def on_left_click(self, event):
         """
@@ -280,6 +298,8 @@ class StateMachineDiagrammer:
                     self.curve_points += [self.curve_points[-2], y2, x2, y2]
                 self.canvas.delete(self.temp_arrow_id)
                 self.draw_curved_arrow(self.first_shape_id, second_shape_id)
+                tran_diag = TransitionDiagram(self.curve_points)
+                self.transition_diagrams.append(tran_diag)
                 self.reset_arrow_state()
             else:
                 dx = abs(self.curve_points[-2]-event.x)
