@@ -2,10 +2,7 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox, ttk
 import json
 
-# from hsm_parser import State
-# from hsm_parser import Transition
-
-# top_state = State(id="Top", super_state=None)
+from hsm_action_manager import ActionManagerDialog
 
 class RectangleDialog(tk.Toplevel):
     """
@@ -117,6 +114,7 @@ class StateDiagram:
         self.rect = None
         self.title_rect = None
         self.title_text = None
+        self.event_handlers = [{"sig":"ENTER", "action":f"{self.state_id}_enter"}, {"sig":"EXIT", "action":f"{self.state_id}_exit"}]
     def add_child(self, child):
         self.children.append(child)
     def get_rect(self):
@@ -147,11 +145,6 @@ class StateDiagram:
             width = 200
         else:
             width += 20
-        self.rect = canvas.create_rectangle(
-            self.x, self.y,
-            self.x + width, self.y + height,
-            outline="black", width=4, tags="state_rectangle"
-        )
         padx = 5
         pady = 5
         title_height = 25
@@ -163,6 +156,20 @@ class StateDiagram:
         title_text_x = (title_x1 + title_x2) / 2
         title_text_y = (title_y1 + title_y2) / 2
         self.title_text = canvas.create_text(title_text_x, title_text_y, text=self.state_id, fill="black", font=("Arial", 12, "bold"))
+        sig_x1 = self.x
+        sig_x2 = sig_x1 + 150
+        sig_y = title_y2 + 20
+        for handler in self.event_handlers:
+            canvas.create_text(sig_x1+10, sig_y-10, text=f"{handler['sig']}:{handler['action']}", fill = "black", font=("Arial", 8), anchor='w')
+            canvas.create_line(sig_x1, sig_y, sig_x2, sig_y, width=2)
+            canvas.create_rectangle(sig_x2, sig_y-5, sig_x2+10, sig_y+5, fill="black")
+            sig_y +=20
+            height +=20
+        self.rect = canvas.create_rectangle(
+            self.x, self.y,
+            self.x + width, self.y + height,
+            outline="black", width=4, tags="state_rectangle"
+        )
         return width, height
 
 class TransitionDiagram:
