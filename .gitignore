@@ -1,0 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# TypeScript/Compilation Output
+/out
+/dist
+.tscache/
+*.tsbuildinfo
+
+# Optional vscode files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# FreeActors Pipeline Testing Overrides
+# Uncomment the next lines if you want to keep your project workspace clean 
+# of any local test artifacts generated while hitting the Export button.
+# *_hsm.hpp
+# *_impl.hpp
+# /freeactors/

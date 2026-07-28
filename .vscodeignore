@@ -1,0 +1,10 @@
+.vscode/**
+.vscode-test/**
+src/**
+.gitignore
+.yarnrc
+vscode-extension.iml
+*.tsbuildinfo
+!freeactors_lib/
+!out/freeactors_lib/
+
