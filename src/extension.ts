@@ -724,6 +724,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                         background-image: radial-gradient(var(--vscode-panel-border, #444) 1px, transparent 1px);
                         background-size: 20px 20px;
                         cursor: grab;
+                        z-index: 1; /* FIX: Keeps canvas layers behind top-level workspace modals */
                     }
                     #canvas-container:active {
                         cursor: grabbing;
@@ -886,7 +887,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                         top: 0;
                         left: 0;
                         width: 100vw;
-                        height: 100vw;
+                        height: 100vh; /* FIX: Force to view height, not width! */
                         background: rgba(0, 0, 0, 0.6);
                         display: none;
                         justify-content: center;
@@ -898,11 +899,12 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                         border: 1px solid var(--vscode-panel-border);
                         border-radius: 6px;
                         padding: 16px;
-                        width: 280px;
+                        width: 320px; /* Slightly wider for clear input padding fields */
                         display: flex;
                         flex-direction: column;
                         gap: 12px;
                         box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+                        box-sizing: border-box; /* FIX: Prevents inner inputs from bleeding over borders */
                     }
                     .modal-box h3 {
                         margin: 0;
