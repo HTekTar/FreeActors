@@ -1,5 +1,13 @@
 import * as vscode from 'vscode';
 
+function stringToUint8Array(str: string): Uint8Array {
+    const arr = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) {
+        arr[i] = str.charCodeAt(i) & 0xFF;
+    }
+    return arr;
+}
+
 export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionContext, folderUri: vscode.Uri) {
     // 1. Point to the 'freeactors' subfolder directly inside the active HSM file's directory path
     const destinationDirUri = vscode.Uri.joinPath(folderUri, 'freeactors');
@@ -57,47 +65,154 @@ function generateCppBlueprintString(jsonText: string): string {
     
     const rawSignals = (hsm.signals || []) as string[];
     const normalizedSignals = rawSignals.map(s => s.trim()).filter(s => s.length > 0);
-    
+    const states = (hsm.states || []) as any[];
+
+    // Helper to format string tokens to PascalCase for C++ Struct Names
+    const toPascalCase = (str: string): string => {
+        const clean = str.replace(/[^a-zA-Z0-9_]/g, "");
+        if (!clean) return "Unnamed";
+        return clean.charAt(0).toUpperCase() + clean.slice(1);
+    };
+
+    // --- Scrape & Catalog Unique Guards and Actions for Predicate Structs ---
+    const guardCatalog = new Map<string, { pascalName: string; rawMethod: string }>();
+    const actionCatalog = new Map<string, { pascalName: string; rawMethod: string }>();
+
+    // 1. Scrape Guards
+    ((hsm.guards || []) as string[]).forEach(g => {
+        const trimmed = g.trim();
+        if (trimmed) {
+            const raw = trimmed.replace(/[^a-zA-Z0-9_]/g, "");
+            guardCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+        }
+    });
+
+    // 2. Scrape Actions & Entry/Exit Routines
+    ((hsm.actions || []) as string[]).forEach(a => {
+        const trimmed = a.trim();
+        if (trimmed) {
+            const raw = trimmed.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
+            actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+        }
+    });
+
+    states.forEach((s: any) => {
+        if (s.entry) {
+            const raw = s.entry.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+        }
+        if (s.exit) {
+            const raw = s.exit.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+        }
+
+        if (s.transitions && Array.isArray(s.transitions)) {
+            s.transitions.forEach((t: any) => {
+                if (t.guard) {
+                    const raw = t.guard.trim().replace(/[^a-zA-Z0-9_]/g, "");
+                    if (raw) guardCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+                }
+                if (t.event && t.event.includes('/')) {
+                    const raw = t.event.split('/')[1].replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
+                    if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+                }
+            });
+        }
+
+        if (s.local_events && Array.isArray(s.local_events)) {
+            s.local_events.forEach((rawEv: string) => {
+                if (typeof rawEv !== 'string') return;
+                const cleanEv = rawEv.replace('·', '').trim();
+                if (cleanEv.includes('/')) {
+                    const rawActionToken = cleanEv.split('/')[1] || "";
+                    const raw = rawActionToken.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
+                    if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+                }
+            });
+        }
+    });
+
     let out = `// ==========================================================================\n`;
     out += `// AUTO-GENERATED FREEACTORS HSM BLUEPRINT - DO NOT HAND-EDIT THIS FILE\n`;
     out += `// ==========================================================================\n\n`;
     
-    // Updated Include Guard to align with Option 2
+    out += `#pragma once\n`;
     out += `#ifndef ${upperMachineName}_HSM_HPP\n`;
     out += `#define ${upperMachineName}_HSM_HPP\n\n`;
     
     out += `#include "fa_core.hpp"\n`;
+    out += `#include "fa_ops.hpp"\n`;
     out += `#include <iostream>\n\n`;
 
-    // --- 1. Event Payloads (Forward Declarations Only) ---
-    out += `// --- 1. Event Payloads (Forward Declarations) ---\n`;
+    // --- TOP-LEVEL MACHINE NAMESPACE ---
+    out += `namespace ${machineName} {\n\n`;
+
+    // --- 1. Signals & Event Variant ---
+    out += `    // --- 1. Event Payloads (Forward Declarations) ---\n`;
     normalizedSignals.forEach(sig => {
-        out += `struct ${sig};\n`;
+        out += `    struct ${sig};\n`;
     });
     out += `\n`;
 
-    out += `using AppEvents = std::variant<\n`;
-    out += `    Enter_sig,\n`;
-    out += `    Exit_sig,\n`;
-    out += `    Init_sig,\n`;
-    out += `    ExitToParent_sig`;
+    out += `    using AppEvents = std::variant<\n`;
+    out += `        Enter_sig,\n`;
+    out += `        Exit_sig,\n`;
+    out += `        Init_sig,\n`;
+    out += `        ExitToParent_sig`;
     normalizedSignals.forEach(sig => {
-        out += `,\n    ${sig}`;
+        out += `,\n        ${sig}`;
     });
-    out += `\n>;\n\n`;
+    out += `\n    >;\n\n`;
 
-    // --- 2. Forward Declarations of States ---
-    out += `// --- 2. Forward Declarations of States ---\n`;
-    const states = (hsm.states || []) as any[];
+    // --- 2. Predicate Struct Wrappers (Guards & Actions) ---
+    out += `    // --- 2. Traceable Predicate Wrappers ---\n`;
+    let elementIdCounter = 1;
+
+    if (guardCatalog.size === 0) {
+        out += `    // No conditional guards detected.\n`;
+    } else {
+        guardCatalog.forEach(({ pascalName, rawMethod }) => {
+            const currentId = elementIdCounter++;
+            out += `    struct ${pascalName} {\n`;
+            out += `        static constexpr const char* name = "${pascalName}";\n`;
+            out += `        static constexpr uint16_t id = ${currentId};\n\n`;
+            out += `        template <typename M>\n`;
+            out += `        static bool eval(M const &m) { return m.${rawMethod}(); }\n\n`;
+            out += `        template <typename M, typename E>\n`;
+            out += `        static bool eval(M const &m, E const &e) { return m.${rawMethod}(e); }\n`;
+            out += `    };\n\n`;
+            guardCatalog.get(rawMethod)!.pascalName = pascalName; // Store for lookup inside handler
+        });
+    }
+
+    if (actionCatalog.size === 0) {
+        out += `    // No action routines detected.\n`;
+    } else {
+        actionCatalog.forEach(({ pascalName, rawMethod }) => {
+            const currentId = elementIdCounter++;
+            out += `    struct ${pascalName} {\n`;
+            out += `        static constexpr const char* name = "${pascalName}";\n`;
+            out += `        static constexpr uint16_t id = ${currentId};\n\n`;
+            out += `        template <typename M>\n`;
+            out += `        static void execute(M &m) { m.${rawMethod}(); }\n\n`;
+            out += `        template <typename M, typename E>\n`;
+            out += `        static void execute(M &m, E const &e) { m.${rawMethod}(e); }\n`;
+            out += `    };\n\n`;
+            actionCatalog.get(rawMethod)!.pascalName = pascalName; // Store for lookup inside handler
+        });
+    }
+
+    // --- 3. Forward Declarations of States ---
+    out += `    // --- 3. Forward Declarations of States ---\n`;
     states.forEach((s: any) => {
         if (s.name) {
-            out += `struct ${s.name};\n`;
+            out += `    struct ${s.name};\n`;
         }
     });
     out += `\n`;
 
-    // --- 3. Structural Tree Blueprint ---
-    out += `// --- 3. Structural Inheritance Tree ---\n`;
+    // --- 4. Structural Tree Blueprint ---
+    out += `    // --- 4. Structural Inheritance Tree ---\n`;
     states.forEach((s: any) => {
         if (!s.name) return;
         
@@ -109,13 +224,199 @@ function generateCppBlueprintString(jsonText: string): string {
             }
         }
         
-        out += `struct ${s.name} : public StateInterface<${s.name}, AppEvents, ${parentClassName}> {\n`;
-        out += `    template <typename M> static Status handle(M &m, AppEvents const &e);\n`;
-        out += `};\n\n`;
+        out += `    struct ${s.name} : public StateInterface<${s.name}, AppEvents, ${parentClassName}> {\n`;
+        out += `        template <typename M> static Status handle(M &m, AppEvents const &e);\n`;
+        out += `    };\n\n`;
     });
 
-    // --- 4. Compile-Time State Machine Traits Configuration ---
-    out += `// --- 4. Compile-Time State Machine Traits Configuration ---\n`;
+    // --- 5. Unified State Handler Implementations ---
+    out += `    // --- 5. State Handler Implementations ---\n`;
+    states.forEach((s: any) => {
+        if (!s.name) return;
+
+        out += `    template <typename M>\n`;
+        out += `    Status ${s.name}::handle(M &m, AppEvents const &e) {\n`;
+        out += `        switch(e.index()) {\n`;
+
+        // Handle Entry Action Hook
+        out += `            case get_index_v<Enter_sig, AppEvents>:\n`;
+        if (s.entry) {
+            const raw = s.entry.replace(/[^a-zA-Z0-9_]/g, "");
+            const entryWrapper = actionCatalog.get(raw)?.pascalName;
+            if (entryWrapper) {
+                out += `                Fa::Action<${entryWrapper}>::execute(m);\n`;
+            }
+        }
+        out += `                break;\n`;
+
+        // Handle Exit Action Hook
+        out += `            case get_index_v<Exit_sig, AppEvents>:\n`;
+        if (s.exit) {
+            const raw = s.exit.replace(/[^a-zA-Z0-9_]/g, "");
+            const exitWrapper = actionCatalog.get(raw)?.pascalName;
+            if (exitWrapper) {
+                out += `                Fa::Action<${exitWrapper}>::execute(m);\n`;
+            }
+        }
+        out += `                break;\n`;
+
+        // Separate out Initialization transitions
+        const allTransitions = (s.transitions || []) as any[];
+        const initTransitions = allTransitions.filter((t: any) => t.event === 'Init_sig');
+        
+        if (initTransitions.length > 0) {
+            out += `            case get_index_v<Init_sig, AppEvents>:\n`;
+            const sortedInit = [...initTransitions].sort((a: any, b: any) => (a.guard && !b.guard) ? -1 : (!a.guard && b.guard) ? 1 : 0);
+            let isFirst = true;
+            sortedInit.forEach((t: any) => {
+                const targetStateObj = states.find((tgt: any) => tgt.id === t.target);
+                if (!targetStateObj || !targetStateObj.name) return;
+
+                if (t.guard) {
+                    const cleanGuard = t.guard.replace(/[^a-zA-Z0-9_]/g, "");
+                    const guardWrapper = guardCatalog.get(cleanGuard)?.pascalName || cleanGuard;
+                    out += `                ${isFirst ? "if" : "else if"} (Fa::Guard<${guardWrapper}>::eval(m)) {\n`;
+                    out += `                    Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, AppEvents>(m);\n`;
+                    out += `                    return Status::Handled;\n`;
+                    out += `                }\n`;
+                    isFirst = false;
+                } else {
+                    out += `                ${isFirst ? "" : "else "}{\n`;
+                    out += `                    Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, AppEvents>(m);\n`;
+                    out += `                    return Status::Handled;\n`;
+                    out += `                }\n`;
+                }
+            });
+            if (!sortedInit.some((t: any) => !t.guard)) {
+                out += `                break;\n`;
+            }
+        }
+
+        // =========================================================================
+        // UNIFIED REACTION COMPILER PIPELINE
+        // =========================================================================
+        const reactionGroups: { [signal: string]: any[] } = {};
+
+        // 1. Process regular graphical routing wire arrows
+        allTransitions.filter((t: any) => t.event !== 'Init_sig').forEach((t: any) => {
+            if (!t.event || !t.target) return;
+            let signalToken = t.event.trim().split('/')[0].trim();
+            let actionToken = t.event.includes('/') ? t.event.split('/')[1].trim() : "";
+            
+            if (!signalToken) return;
+            
+            (reactionGroups[signalToken] = reactionGroups[signalToken] || []).push({
+                guard: t.guard ? t.guard.trim() : null,
+                action: actionToken,
+                target: t.target,
+                isExternal: true
+            });
+        });
+
+        // 2. Process card compartment text elements (local handled events)
+        if (s.local_events && Array.isArray(s.local_events)) {
+            s.local_events.forEach((rawEv: string) => {
+                if (typeof rawEv !== 'string') return;
+                const cleanEv = rawEv.replace('·', '').trim();
+                if (!cleanEv || cleanEv.startsWith('Init_sig')) return;
+
+                const localParts = cleanEv.split('/');
+                const signalToken = (localParts[0] || "").trim();
+                const actionToken = cleanEv.includes('/') ? (localParts[1] || "").trim() : "";
+                
+                if (!signalToken) return;
+
+                (reactionGroups[signalToken] = reactionGroups[signalToken] || []).push({
+                    guard: null,
+                    action: actionToken,
+                    target: null,
+                    isExternal: false
+                });
+            });
+        }
+
+        // Emit switch branches
+        Object.keys(reactionGroups).forEach((signalToken) => {
+            const list = reactionGroups[signalToken] || [];
+            out += `            case get_index_v<${signalToken}, AppEvents>:\n`;
+
+            const sortedReactions = [...list].sort((a: any, b: any) => (a.guard && !b.guard) ? -1 : (!a.guard && b.guard) ? 1 : 0);
+            
+            let isFirstBranch = true;
+            let holdsCatchallFallback = false;
+
+            sortedReactions.forEach((react: any) => {
+                let actionCode = "";
+                if (react.action) {
+                    const isParameterless = react.action.endsWith('()');
+                    const rawAction = react.action.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
+                    const actionWrapper = actionCatalog.get(rawAction)?.pascalName || rawAction;
+
+                    if (isParameterless) {
+                        actionCode = `                    Fa::Action<${actionWrapper}>::execute(m);\n`;
+                    } else {
+                        actionCode = `                    Fa::Action<${actionWrapper}>::execute(m, std::get<${signalToken}>(e));\n`;
+                    }
+                }
+
+                if (react.guard) {
+                    const cleanGuard = react.guard.replace(/[^a-zA-Z0-9_]/g, "");
+                    const guardWrapper = guardCatalog.get(cleanGuard)?.pascalName || cleanGuard;
+
+                    out += `                ${isFirstBranch ? "if" : "else if"} (Fa::Guard<${guardWrapper}>::eval(m, e)) {\n`;
+                    if (actionCode) out += actionCode;
+                    
+                    if (react.isExternal) {
+                        const targetObj = states.find((tgt: any) => tgt.id === react.target);
+                        out += `                    Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, AppEvents>(m);\n`;
+                        out += `                    return Status::Handled;\n`;
+                    } else {
+                        out += `                    return Status::Handled;\n`;
+                    }
+                    out += `                }\n`;
+                    isFirstBranch = false;
+                } else {
+                    holdsCatchallFallback = true;
+                    if (isFirstBranch) {
+                        if (actionCode) out += actionCode;
+                        if (react.isExternal) {
+                            const targetObj = states.find((tgt: any) => tgt.id === react.target);
+                            out += `                Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, AppEvents>(m);\n`;
+                            out += `                return Status::Handled;\n`;
+                        } else {
+                            out += `                return Status::Handled;\n`;
+                        }
+                    } else {
+                        out += `                else {\n`;
+                        if (actionCode) out += "    " + actionCode;
+                        if (react.isExternal) {
+                            const targetObj = states.find((tgt: any) => tgt.id === react.target);
+                            out += `                    Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, AppEvents>(m);\n`;
+                            out += `                    return Status::Handled;\n`;
+                        } else {
+                            out += `                    return Status::Handled;\n`;
+                        }
+                        out += `                }\n`;
+                    }
+                }
+            });
+
+            if (!holdsCatchallFallback) {
+                out += `                return Super(m, e);\n`;
+            }
+        });
+
+        out += `            default:\n`;
+        out += `                return Super(m, e);\n`;
+        out += `        }\n`;
+        out += `    }\n\n`;
+    });
+
+    // Close Machine Namespace
+    out += `} // namespace ${machineName}\n\n`;
+
+    // --- 6. Compile-Time State Machine Traits Configuration ---
+    out += `// --- 6. Compile-Time State Machine Traits Configuration ---\n`;
     
     let initialSelectedStateName = "ROOT";
     const rootState = states.find((s: any) => !s.parent);
@@ -131,211 +432,8 @@ function generateCppBlueprintString(jsonText: string): string {
 
     out += `template <>\n`;
     out += `struct HsmTraits<${concreteMachineName}> {\n`;
-    out += `    static constexpr auto InitialState = &${initialSelectedStateName}::template Dispatch<${concreteMachineName}>;\n`;
+    out += `    static constexpr auto InitialState = &${machineName}::${initialSelectedStateName}::template Dispatch<${concreteMachineName}>;\n`;
     out += `};\n\n`;
-
-    // --- 5. State Handler Implementations ---
-    out += `// --- 5. State Handler Implementations ---\n`;
-    states.forEach((s: any) => {
-        if (!s.name) return;
-
-        out += `template <typename M>\n`;
-        out += `Status ${s.name}::handle(M &m, AppEvents const &e) {\n`;
-        out += `    switch(e.index()) {\n`;
-
-        // Handle Entry Action Hook
-        out += `        case get_index_v<Enter_sig, AppEvents>:\n`;
-        if (s.entry) {
-            out += `            m.${s.entry.replace(/[^a-zA-Z0-9_]/g, "")}();\n`;
-        }
-        out += `            break;\n`;
-
-        // Handle Exit Action Hook
-        out += `        case get_index_v<Exit_sig, AppEvents>:\n`;
-        if (s.exit) {
-            out += `            m.${s.exit.replace(/[^a-zA-Z0-9_]/g, "")}();\n`;
-        }
-        out += `            break;\n`;
-
-        // --- UNIFIED INIT_SIG SEPARATION & BLOCK GENERATION ---
-        const allTransitions = (s.transitions || []) as any[];
-        const initTransitions = allTransitions.filter((t: any) => t.event === 'Init_sig');
-        const regularTransitions = allTransitions.filter((t: any) => t.event !== 'Init_sig');
-
-        if (initTransitions.length > 0) {
-            out += `        case get_index_v<Init_sig, AppEvents>:\n`;
-            
-            const sortedInit = [...initTransitions].sort((a: any, b: any) => {
-                if (a.guard && !b.guard) return -1;
-                if (!a.guard && b.guard) return 1;
-                return 0;
-            });
-
-            let isFirst = true;
-            sortedInit.forEach((t: any) => {
-                const targetStateObj = states.find((tgt: any) => tgt.id === t.target);
-                if (!targetStateObj || !targetStateObj.name) return;
-
-                if (t.guard) {
-                    const cleanGuard = t.guard.replace(/[^a-zA-Z0-9_]/g, "");
-                    if (isFirst) {
-                        out += `            if (m.${cleanGuard}()) {\n`;
-                        isFirst = false;
-                    } else {
-                        out += `            else if (m.${cleanGuard}()) {\n`;
-                    }
-                    out += `                return TransitionTo<${targetStateObj.name}>(m);\n`;
-                    out += `            }\n`;
-                } else {
-                    if (isFirst) {
-                        out += `            return TransitionTo<${targetStateObj.name}>(m);\n`;
-                    } else {
-                        out += `            else {\n`;
-                        out += `                return TransitionTo<${targetStateObj.name}>(m);\n`;
-                        out += `            }\n`;
-                    }
-                }
-            });
-            
-            const hasUnconditionalFallback = sortedInit.some((t: any) => !t.guard);
-            if (!hasUnconditionalFallback) {
-                out += `            break;\n`;
-            }
-        }
-
-        // Handle Local Handled Internal Events Array
-        if (s.local_events && Array.isArray(s.local_events)) {
-            s.local_events.forEach((rawEv: string) => {
-                if (typeof rawEv !== 'string') return;
-                
-                const cleanEv = rawEv.replace('·', '').trim();
-                let signalToken = cleanEv;
-                let actionToken = "";
-                
-                if (cleanEv.includes('/')) {
-                    const parts = cleanEv.split('/');
-                    signalToken = parts[0] ? parts[0].trim() : "";
-                    actionToken = parts[1] ? parts[1].trim() : "";
-                }
-                
-                if (!signalToken || signalToken === 'Init_sig') return;
-                
-                out += `        case get_index_v<${signalToken}, AppEvents>:\n`;
-                if (actionToken) {
-                    const isParameterless = actionToken.endsWith('()');
-                    const cleanActionRoutine = actionToken.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
-
-                    if (isParameterless) {
-                        out += `            m.${cleanActionRoutine}();\n`;
-                    } else {
-                        out += `            {\n`;
-                        out += `                auto const &payload = std::get<${signalToken}>(e);\n`;
-                        out += `                m.${cleanActionRoutine}(payload);\n`;
-                        out += `            }\n`;
-                    }
-                }
-                out += `            return Status::Handled;\n`;
-            });
-        }
-
-        // --- UNIFIED REGULAR SIGNAL GROUPING & CHAIN GENERATION ---
-        const regularGroups: { [signal: string]: any[] } = {};
-        regularTransitions.forEach((t: any) => {
-            if (!t.event || !t.target) return;
-            
-            let baseSignal = t.event.trim();
-            if (baseSignal.includes('/')) {
-                baseSignal = baseSignal.split('/')[0].trim();
-            }
-            
-            if (!baseSignal) return;
-
-            if (!regularGroups[baseSignal]) {
-                regularGroups[baseSignal] = [];
-            }
-            
-            const targetGroup = regularGroups[baseSignal];
-            if (targetGroup) {
-                targetGroup.push(t);
-            }
-        });
-
-        Object.keys(regularGroups).forEach((signalToken) => {
-            const transitionsInGroup = regularGroups[signalToken] || [];
-            
-            out += `        case get_index_v<${signalToken}, AppEvents>:\n`;
-
-            const sortedGroup = [...transitionsInGroup].sort((a: any, b: any) => {
-                if (a.guard && !b.guard) return -1;
-                if (!a.guard && b.guard) return 1;
-                return 0;
-            });
-
-            let isFirstBranch = true;
-            let endedWithUnconditionalFallback = false;
-
-            sortedGroup.forEach((t: any) => {
-                const targetStateObj = states.find((tgt: any) => tgt.id === t.target);
-                if (!targetStateObj || !targetStateObj.name) return;
-
-                let rawActionRoutine = "";
-                if (t.event.includes('/')) {
-                    rawActionRoutine = t.event.split('/')[1]?.trim() || "";
-                }
-
-                const isParameterless = rawActionRoutine.endsWith('()');
-                const cleanActionRoutine = rawActionRoutine.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
-
-                const makeActionCall = (indent: string) => {
-                    if (!cleanActionRoutine) return "";
-                    if (isParameterless) {
-                        return `${indent}m.${cleanActionRoutine}();\n`;
-                    } else {
-                        let code = `${indent}{\n`;
-                        code += `${indent}    auto const &payload = std::get<${signalToken}>(e);\n`;
-                        code += `${indent}    m.${cleanActionRoutine}(payload);\n`;
-                        code += `${indent}}\n`;
-                        return code;
-                    }
-                };
-
-                if (t.guard) {
-                    const cleanGuard = t.guard.replace(/[^a-zA-Z0-9_]/g, "");
-                    if (isFirstBranch) {
-                        out += `            if (m.${cleanGuard}()) {\n`;
-                        isFirstBranch = false;
-                    } else {
-                        out += `            else if (m.${cleanGuard}()) {\n`;
-                    }
-                    
-                    out += makeActionCall("                ");
-                    out += `                return TransitionTo<${targetStateObj.name}>(m);\n`;
-                    out += `            }\n`;
-                } else {
-                    endedWithUnconditionalFallback = true;
-                    if (isFirstBranch) {
-                        out += makeActionCall("            ");
-                        out += `            return TransitionTo<${targetStateObj.name}>(m);\n`;
-                    } else {
-                        out += `            else {\n`;
-                        out += makeActionCall("                ");
-                        out += `                return TransitionTo<${targetStateObj.name}>(m);\n`;
-                        out += `            }\n`;
-                    }
-                }
-            });
-
-            if (!endedWithUnconditionalFallback) {
-                out += `            break;\n`;
-            }
-        });
-
-        out += `        default:\n`;
-        out += `            return Super(m, e);\n`;
-        out += `    }\n`;
-        out += `    return Status::Handled;\n`;
-        out += `}\n\n`;
-    });
 
     out += `#endif // ${upperMachineName}_HSM_HPP\n`;
     return out;
@@ -356,7 +454,6 @@ function generateCppConcreteStubString(jsonText: string): string {
 
     const states = (hsm.states || []) as any[];
     const collectedGuards = new Set<string>();
-    
     const uniqueSignatures = new Set<string>();
 
     ((hsm.guards || []) as string[]).forEach(g => collectedGuards.add(g.trim()));
@@ -365,43 +462,35 @@ function generateCppConcreteStubString(jsonText: string): string {
         if (s.entry) uniqueSignatures.add(`${s.entry.trim()}()`);
         if (s.exit) uniqueSignatures.add(`${s.exit.trim()}()`);
 
+        const processActionToken = (actionToken: string, signalToken: string) => {
+            if (!actionToken || !signalToken) return;
+            if (actionToken.endsWith('()')) {
+                const baseAct = actionToken.replace('()', '').trim();
+                if (baseAct) uniqueSignatures.add(`${baseAct}()`);
+            } else {
+                uniqueSignatures.add(`${actionToken}(${signalToken})`);
+            }
+        };
+
+        // Scrape actions from Graphical Transitions
+        if (s.transitions && Array.isArray(s.transitions)) {
+            s.transitions.forEach((t: any) => {
+                if (t.guard) collectedGuards.add(t.guard.trim());
+                if (t.event && t.event.includes('/')) {
+                    const parts = t.event.split('/');
+                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
+                }
+            });
+        }
+
+        // Scrape actions from Internal Card Text Events
         if (s.local_events && Array.isArray(s.local_events)) {
             s.local_events.forEach((rawEv: string) => {
                 if (typeof rawEv !== 'string') return;
                 const cleanEv = rawEv.replace('·', '').trim();
                 if (cleanEv.includes('/')) {
                     const parts = cleanEv.split('/');
-                    const signalToken = parts[0] ? parts[0].trim() : "";
-                    const actionToken = parts[1] ? parts[1].trim() : "";
-                    
-                    if (actionToken && signalToken) {
-                        if (actionToken.endsWith('()')) {
-                            const baseAct = actionToken.replace('()', '').trim();
-                            if (baseAct) uniqueSignatures.add(`${baseAct}()`);
-                        } else {
-                            uniqueSignatures.add(`${actionToken}(${signalToken})`);
-                        }
-                    }
-                }
-            });
-        }
-
-        if (s.transitions && Array.isArray(s.transitions)) {
-            s.transitions.forEach((t: any) => {
-                if (t.guard) collectedGuards.add(t.guard.trim());
-                if (t.event && t.event.includes('/')) {
-                    const parts = t.event.split('/');
-                    const signalToken = parts[0] ? parts[0].trim() : "";
-                    const actionToken = parts[1] ? parts[1].trim() : "";
-                    
-                    if (actionToken && signalToken) {
-                        if (actionToken.endsWith('()')) {
-                            const baseAct = actionToken.replace('()', '').trim();
-                            if (baseAct) uniqueSignatures.add(`${baseAct}()`);
-                        } else {
-                            uniqueSignatures.add(`${actionToken}(${signalToken})`);
-                        }
-                    }
+                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
                 }
             });
         }
@@ -412,14 +501,10 @@ function generateCppConcreteStubString(jsonText: string): string {
 
     let out = `// ==========================================================================\n`;
     out += `// C++ CONCRETE ACTIVE OBJECT IMPLEMENTATION STUB\n`;
-    out += `// WARNING: Copy this layout framework or update your custom application file.\n`;
     out += `// ==========================================================================\n\n`;
     
-    // Updated Include Guard to align with Option 2
     out += `#ifndef ${upperMachineName}_IMPL_HPP\n`;
     out += `#define ${upperMachineName}_IMPL_HPP\n\n`;
-    
-    // Updated Include Line pointing to the shortened _hsm.hpp asset
     out += `#include "${lowerMachineName}_hsm.hpp"\n`;
     out += `#include <iostream>\n\n`;
     
@@ -558,8 +643,6 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                     } catch (e) {}
 
                     const lowerHsmName = hsmName.toLowerCase();
-                    
-                    // NEW: Unified Short Option 2 target file strings
                     const blueprintFilename = `${lowerHsmName}_hsm.hpp`;
                     const stubFilename = `${lowerHsmName}_impl.hpp`;
 
@@ -574,25 +657,16 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                     const cppBlueprint = generateCppBlueprintString(jsonText);
                     const cppStub = generateCppConcreteStubString(jsonText);
                     
-                    // Agnostic VS Code path resolver logic (Works natively on both Linux and Windows)
                     const folderUri = vscode.Uri.joinPath(document.uri, '..');
                     const blueprintUri = vscode.Uri.joinPath(folderUri, blueprintFilename);
                     const stubUri = vscode.Uri.joinPath(folderUri, stubFilename);
                     
                     try {
-                        // Safe, clean global Buffer serialization logic
-                        const stringToUint8Array = (str: string): Uint8Array => {
-                            const arr = new Uint8Array(str.length);
-                            for (let i = 0; i < str.length; i++) {
-                                arr[i] = str.charCodeAt(i) & 0xFF;
-                            }
-                            return arr;
-                        };
-                        
+                        // Write out the fresh binary data streams to disk cleanly using our top-level global helper
                         await vscode.workspace.fs.writeFile(blueprintUri, stringToUint8Array(cppBlueprint));
                         await vscode.workspace.fs.writeFile(stubUri, stringToUint8Array(cppStub));
                         
-                        // 2. Synchronize our external runtime hpp framework engine files
+                        // Synchronize our external runtime hpp framework engine files
                         await copyFrameworkFilesToWorkspace(this.context, folderUri);
                         
                         vscode.window.showInformationMessage(`🚀 Generated ${blueprintFilename} and ${stubFilename} successfully!`);
