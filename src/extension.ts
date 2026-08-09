@@ -9,45 +9,30 @@ function stringToUint8Array(str: string): Uint8Array {
 }
 
 export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionContext, folderUri: vscode.Uri) {
-    // 1. Point to the 'freeactors' subfolder directly inside the active HSM file's directory path
     const destinationDirUri = vscode.Uri.joinPath(folderUri, 'freeactors');
-
-    // 2. Point to the folder inside the compiled extension bundle execution runtime path
     const sourceDirUri = vscode.Uri.joinPath(context.extensionUri, 'out', 'freeactors_lib');
-
-    // Define the core engine framework header asset portfolio files to copy over
-    const frameworkFiles = ['fa_core.hpp', 'fa_mempool.hpp', 'fa_timeEvent.hpp', 'fa_util.hpp'];
+    const frameworkFiles = ['fa_core.hpp', 'fa_mempool.hpp', 'fa_timeEvent.hpp', 'fa_util.hpp', 'fa_ops.hpp', 'fa_trace.hpp'];
 
     try {
-        // Create the destination project directory safely (safe if already exists)
         await vscode.workspace.fs.createDirectory(destinationDirUri);
-
-        // 3. Read and copy each file directly from the extension bundle pack
         for (const filename of frameworkFiles) {
             const srcFileUri = vscode.Uri.joinPath(sourceDirUri, filename);
             const destFileUri = vscode.Uri.joinPath(destinationDirUri, filename);
-
-            // Read the binary stream buffer out of the extension install track
             const fileData = await vscode.workspace.fs.readFile(srcFileUri);
-            
-            // Write the buffer straight to the user's project folder workspace space
             await vscode.workspace.fs.writeFile(destFileUri, fileData);
         }
-
-        vscode.window.showInformationMessage('📦 FreeActors core framework files synchronized successfully next to your blueprints!');
+        vscode.window.showInformationMessage('📦 FreeActors core framework files synchronized successfully!');
     } catch (error: any) {
-        // Updated to print out the absolute absolute string evaluation vectors for diagnostic review
         vscode.window.showErrorMessage(
             `❌ Framework Sync Failed.\n` +
-            `Source Checked: \${sourceDirUri.fsPath}\n` +
-            `Target Destination: \${destinationDirUri.fsPath}\n` +
-            `Reason: \${error.message}`
+            `Source Checked: ${sourceDirUri.fsPath}\n` +
+            `Target Destination: ${destinationDirUri.fsPath}\n` +
+            `Reason: ${error.message}`
         );
     }
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    // Register our custom editor provider, forwarding the extension runtime context handle along
     context.subscriptions.push(FreeActorsEditorProvider.register(context));
 }
 
@@ -67,18 +52,15 @@ function generateCppBlueprintString(jsonText: string): string {
     const normalizedSignals = rawSignals.map(s => s.trim()).filter(s => s.length > 0);
     const states = (hsm.states || []) as any[];
 
-    // Helper to format string tokens to PascalCase for C++ Struct Names
     const toPascalCase = (str: string): string => {
         const clean = str.replace(/[^a-zA-Z0-9_]/g, "");
         if (!clean) return "Unnamed";
         return clean.charAt(0).toUpperCase() + clean.slice(1);
     };
 
-    // --- Scrape & Catalog Unique Guards and Actions for Predicate Structs ---
     const guardCatalog = new Map<string, { pascalName: string; rawMethod: string }>();
     const actionCatalog = new Map<string, { pascalName: string; rawMethod: string }>();
 
-    // 1. Scrape Guards
     ((hsm.guards || []) as string[]).forEach(g => {
         const trimmed = g.trim();
         if (trimmed) {
@@ -87,7 +69,6 @@ function generateCppBlueprintString(jsonText: string): string {
         }
     });
 
-    // 2. Scrape Actions & Entry/Exit Routines
     ((hsm.actions || []) as string[]).forEach(a => {
         const trimmed = a.trim();
         if (trimmed) {
@@ -113,7 +94,8 @@ function generateCppBlueprintString(jsonText: string): string {
                     if (raw) guardCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
                 }
                 if (t.event && t.event.includes('/')) {
-                    const raw = t.event.split('/')[1].replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
+                    const actionPart = t.event.split('/')[1] || "";
+                    const raw = actionPart.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
                     if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
                 }
             });
@@ -124,8 +106,8 @@ function generateCppBlueprintString(jsonText: string): string {
                 if (typeof rawEv !== 'string') return;
                 const cleanEv = rawEv.replace('·', '').trim();
                 if (cleanEv.includes('/')) {
-                    const rawActionToken = cleanEv.split('/')[1] || "";
-                    const raw = rawActionToken.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
+                    const actionPart = cleanEv.split('/')[1] || "";
+                    const raw = actionPart.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
                     if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
                 }
             });
@@ -144,27 +126,24 @@ function generateCppBlueprintString(jsonText: string): string {
     out += `#include "fa_ops.hpp"\n`;
     out += `#include <iostream>\n\n`;
 
-    // --- TOP-LEVEL MACHINE NAMESPACE ---
     out += `namespace ${machineName} {\n\n`;
 
-    // --- 1. Signals & Event Variant ---
     out += `    // --- 1. Event Payloads (Forward Declarations) ---\n`;
     normalizedSignals.forEach(sig => {
         out += `    struct ${sig};\n`;
     });
     out += `\n`;
 
-    out += `    using AppEvents = std::variant<\n`;
-    out += `        Enter_sig,\n`;
-    out += `        Exit_sig,\n`;
-    out += `        Init_sig,\n`;
-    out += `        ExitToParent_sig`;
+    out += `    using Event = std::variant<\n`;
+    out += `        Fa::Enter_sig,\n`;
+    out += `        Fa::Exit_sig,\n`;
+    out += `        Fa::Init_sig,\n`;
+    out += `        Fa::ExitToParent_sig`;
     normalizedSignals.forEach(sig => {
         out += `,\n        ${sig}`;
     });
     out += `\n    >;\n\n`;
 
-    // --- 2. Predicate Struct Wrappers (Guards & Actions) ---
     out += `    // --- 2. Traceable Predicate Wrappers ---\n`;
     let elementIdCounter = 1;
 
@@ -181,7 +160,6 @@ function generateCppBlueprintString(jsonText: string): string {
             out += `        template <typename M, typename E>\n`;
             out += `        static bool eval(M const &m, E const &e) { return m.${rawMethod}(e); }\n`;
             out += `    };\n\n`;
-            guardCatalog.get(rawMethod)!.pascalName = pascalName; // Store for lookup inside handler
         });
     }
 
@@ -198,11 +176,9 @@ function generateCppBlueprintString(jsonText: string): string {
             out += `        template <typename M, typename E>\n`;
             out += `        static void execute(M &m, E const &e) { m.${rawMethod}(e); }\n`;
             out += `    };\n\n`;
-            actionCatalog.get(rawMethod)!.pascalName = pascalName; // Store for lookup inside handler
         });
     }
 
-    // --- 3. Forward Declarations of States ---
     out += `    // --- 3. Forward Declarations of States ---\n`;
     states.forEach((s: any) => {
         if (s.name) {
@@ -211,7 +187,6 @@ function generateCppBlueprintString(jsonText: string): string {
     });
     out += `\n`;
 
-    // --- 4. Structural Tree Blueprint ---
     out += `    // --- 4. Structural Inheritance Tree ---\n`;
     states.forEach((s: any) => {
         if (!s.name) return;
@@ -224,22 +199,21 @@ function generateCppBlueprintString(jsonText: string): string {
             }
         }
         
-        out += `    struct ${s.name} : public StateInterface<${s.name}, AppEvents, ${parentClassName}> {\n`;
-        out += `        template <typename M> static Status handle(M &m, AppEvents const &e);\n`;
+        out += `    struct ${s.name} : public StateInterface<${s.name}, Event, ${parentClassName}> {\n`;
+        out += `        template <typename M> static Status handle(M &m, Event const &e);\n`;
         out += `    };\n\n`;
     });
 
-    // --- 5. Unified State Handler Implementations ---
     out += `    // --- 5. State Handler Implementations ---\n`;
     states.forEach((s: any) => {
         if (!s.name) return;
 
         out += `    template <typename M>\n`;
-        out += `    Status ${s.name}::handle(M &m, AppEvents const &e) {\n`;
+        out += `    Status ${s.name}::handle(M &m, Event const &e) {\n`;
+        out += `        Fa::Status status;\n`;
         out += `        switch(e.index()) {\n`;
 
-        // Handle Entry Action Hook
-        out += `            case get_index_v<Enter_sig, AppEvents>:\n`;
+        out += `            case get_index_v<Fa::Enter_sig, Event>:\n`;
         if (s.entry) {
             const raw = s.entry.replace(/[^a-zA-Z0-9_]/g, "");
             const entryWrapper = actionCatalog.get(raw)?.pascalName;
@@ -247,10 +221,10 @@ function generateCppBlueprintString(jsonText: string): string {
                 out += `                Fa::Action<${entryWrapper}>::execute(m);\n`;
             }
         }
+        out += `                status = Fa::Status::Handled;\n`;
         out += `                break;\n`;
 
-        // Handle Exit Action Hook
-        out += `            case get_index_v<Exit_sig, AppEvents>:\n`;
+        out += `            case get_index_v<Fa::Exit_sig, Event>:\n`;
         if (s.exit) {
             const raw = s.exit.replace(/[^a-zA-Z0-9_]/g, "");
             const exitWrapper = actionCatalog.get(raw)?.pascalName;
@@ -258,14 +232,14 @@ function generateCppBlueprintString(jsonText: string): string {
                 out += `                Fa::Action<${exitWrapper}>::execute(m);\n`;
             }
         }
+        out += `                status = Fa::Status::Handled;\n`;
         out += `                break;\n`;
 
-        // Separate out Initialization transitions
         const allTransitions = (s.transitions || []) as any[];
         const initTransitions = allTransitions.filter((t: any) => t.event === 'Init_sig');
         
         if (initTransitions.length > 0) {
-            out += `            case get_index_v<Init_sig, AppEvents>:\n`;
+            out += `            case get_index_v<Fa::Init_sig, Event>:\n`;
             const sortedInit = [...initTransitions].sort((a: any, b: any) => (a.guard && !b.guard) ? -1 : (!a.guard && b.guard) ? 1 : 0);
             let isFirst = true;
             sortedInit.forEach((t: any) => {
@@ -276,28 +250,20 @@ function generateCppBlueprintString(jsonText: string): string {
                     const cleanGuard = t.guard.replace(/[^a-zA-Z0-9_]/g, "");
                     const guardWrapper = guardCatalog.get(cleanGuard)?.pascalName || cleanGuard;
                     out += `                ${isFirst ? "if" : "else if"} (Fa::Guard<${guardWrapper}>::eval(m)) {\n`;
-                    out += `                    Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, AppEvents>(m);\n`;
-                    out += `                    return Status::Handled;\n`;
+                    out += `                    status = Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, Event>(m);\n`;
                     out += `                }\n`;
                     isFirst = false;
                 } else {
                     out += `                ${isFirst ? "" : "else "}{\n`;
-                    out += `                    Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, AppEvents>(m);\n`;
-                    out += `                    return Status::Handled;\n`;
+                    out += `                    status = Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, Event>(m);\n`;
                     out += `                }\n`;
                 }
             });
-            if (!sortedInit.some((t: any) => !t.guard)) {
-                out += `                break;\n`;
-            }
+            out += `                break;\n`;
         }
 
-        // =========================================================================
-        // UNIFIED REACTION COMPILER PIPELINE
-        // =========================================================================
         const reactionGroups: { [signal: string]: any[] } = {};
 
-        // 1. Process regular graphical routing wire arrows
         allTransitions.filter((t: any) => t.event !== 'Init_sig').forEach((t: any) => {
             if (!t.event || !t.target) return;
             let signalToken = t.event.trim().split('/')[0].trim();
@@ -313,7 +279,6 @@ function generateCppBlueprintString(jsonText: string): string {
             });
         });
 
-        // 2. Process card compartment text elements (local handled events)
         if (s.local_events && Array.isArray(s.local_events)) {
             s.local_events.forEach((rawEv: string) => {
                 if (typeof rawEv !== 'string') return;
@@ -335,10 +300,9 @@ function generateCppBlueprintString(jsonText: string): string {
             });
         }
 
-        // Emit switch branches
         Object.keys(reactionGroups).forEach((signalToken) => {
             const list = reactionGroups[signalToken] || [];
-            out += `            case get_index_v<${signalToken}, AppEvents>:\n`;
+            out += `            case get_index_v<${signalToken}, Event>:\n`;
 
             const sortedReactions = [...list].sort((a: any, b: any) => (a.guard && !b.guard) ? -1 : (!a.guard && b.guard) ? 1 : 0);
             
@@ -368,10 +332,9 @@ function generateCppBlueprintString(jsonText: string): string {
                     
                     if (react.isExternal) {
                         const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                        out += `                    Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, AppEvents>(m);\n`;
-                        out += `                    return Status::Handled;\n`;
+                        out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, Event>(m);\n`;
                     } else {
-                        out += `                    return Status::Handled;\n`;
+                        out += `                    status = Fa::Status::Handled;\n`;
                     }
                     out += `                }\n`;
                     isFirstBranch = false;
@@ -381,20 +344,18 @@ function generateCppBlueprintString(jsonText: string): string {
                         if (actionCode) out += actionCode;
                         if (react.isExternal) {
                             const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                            out += `                Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, AppEvents>(m);\n`;
-                            out += `                return Status::Handled;\n`;
+                            out += `                status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, Event>(m);\n`;
                         } else {
-                            out += `                return Status::Handled;\n`;
+                            out += `                status = Fa::Status::Handled;\n`;
                         }
                     } else {
                         out += `                else {\n`;
                         if (actionCode) out += "    " + actionCode;
                         if (react.isExternal) {
                             const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                            out += `                    Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, AppEvents>(m);\n`;
-                            out += `                    return Status::Handled;\n`;
+                            out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, Event>(m);\n`;
                         } else {
-                            out += `                    return Status::Handled;\n`;
+                            out += `                    status = Fa::Status::Handled;\n`;
                         }
                         out += `                }\n`;
                     }
@@ -402,20 +363,23 @@ function generateCppBlueprintString(jsonText: string): string {
             });
 
             if (!holdsCatchallFallback) {
-                out += `                return Super(m, e);\n`;
+                out += `                else {\n`;
+                out += `                    status = Super(m, e);\n`;
+                out += `                }\n`;
             }
+            out += `                break;\n`;
         });
 
         out += `            default:\n`;
-        out += `                return Super(m, e);\n`;
+        out += `                status = Super(m, e);\n`;
+        out += `                break;\n`;
         out += `        }\n`;
+        out += `        return status;\n`;
         out += `    }\n\n`;
     });
 
-    // Close Machine Namespace
     out += `} // namespace ${machineName}\n\n`;
 
-    // --- 6. Compile-Time State Machine Traits Configuration ---
     out += `// --- 6. Compile-Time State Machine Traits Configuration ---\n`;
     
     let initialSelectedStateName = "ROOT";
@@ -431,20 +395,20 @@ function generateCppBlueprintString(jsonText: string): string {
     }
 
     out += `template <>\n`;
-    out += `struct HsmTraits<${concreteMachineName}> {\n`;
-    out += `    static constexpr auto InitialState = &${machineName}::${initialSelectedStateName}::template Dispatch<${concreteMachineName}>;\n`;
+    out += `struct HsmTraits<${machineName}::${concreteMachineName}> {\n`;
+    out += `    static constexpr auto InitialState = &${machineName}::${initialSelectedStateName}::template Dispatch<${machineName}::${concreteMachineName}>;\n`;
     out += `};\n\n`;
 
     out += `#endif // ${upperMachineName}_HSM_HPP\n`;
     return out;
 }
 
-function generateCppConcreteStubString(jsonText: string): string {
+function generateCppConcreteHeaderStub(jsonText: string): string {
     let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
     try {
         hsm = JSON.parse(jsonText);
     } catch (e) {
-        return "// Error: Invalid HSM structure. Cannot generate C++ concrete stubs.";
+        return "// Error: Invalid HSM structure. Cannot generate C++ concrete header stub.";
     }
 
     const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
@@ -456,26 +420,40 @@ function generateCppConcreteStubString(jsonText: string): string {
     const collectedGuards = new Set<string>();
     const uniqueSignatures = new Set<string>();
 
-    ((hsm.guards || []) as string[]).forEach(g => collectedGuards.add(g.trim()));
+    ((hsm.guards || []) as string[]).forEach(g => {
+        const trimmed = g.trim().replace(/[^a-zA-Z0-9_]/g, "");
+        if (trimmed) collectedGuards.add(trimmed);
+    });
 
     states.forEach((s: any) => {
-        if (s.entry) uniqueSignatures.add(`${s.entry.trim()}()`);
-        if (s.exit) uniqueSignatures.add(`${s.exit.trim()}()`);
+        if (s.entry) {
+            const raw = s.entry.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (raw) uniqueSignatures.add(`${raw}()`);
+        }
+        if (s.exit) {
+            const raw = s.exit.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (raw) uniqueSignatures.add(`${raw}()`);
+        }
 
         const processActionToken = (actionToken: string, signalToken: string) => {
             if (!actionToken || !signalToken) return;
+            const cleanAction = actionToken.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
+            const cleanSignal = signalToken.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (!cleanAction) return;
+
             if (actionToken.endsWith('()')) {
-                const baseAct = actionToken.replace('()', '').trim();
-                if (baseAct) uniqueSignatures.add(`${baseAct}()`);
+                uniqueSignatures.add(`${cleanAction}()`);
             } else {
-                uniqueSignatures.add(`${actionToken}(${signalToken})`);
+                uniqueSignatures.add(`${cleanAction}(${cleanSignal})`);
             }
         };
 
-        // Scrape actions from Graphical Transitions
         if (s.transitions && Array.isArray(s.transitions)) {
             s.transitions.forEach((t: any) => {
-                if (t.guard) collectedGuards.add(t.guard.trim());
+                if (t.guard) {
+                    const raw = t.guard.trim().replace(/[^a-zA-Z0-9_]/g, "");
+                    if (raw) collectedGuards.add(raw);
+                }
                 if (t.event && t.event.includes('/')) {
                     const parts = t.event.split('/');
                     processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
@@ -483,7 +461,6 @@ function generateCppConcreteStubString(jsonText: string): string {
             });
         }
 
-        // Scrape actions from Internal Card Text Events
         if (s.local_events && Array.isArray(s.local_events)) {
             s.local_events.forEach((rawEv: string) => {
                 if (typeof rawEv !== 'string') return;
@@ -496,58 +473,263 @@ function generateCppConcreteStubString(jsonText: string): string {
         }
     });
 
-    const uniqueGuards = Array.from(collectedGuards).filter(g => g.length > 0);
+    const uniqueGuards = Array.from(collectedGuards);
     const signatureList = Array.from(uniqueSignatures);
 
     let out = `// ==========================================================================\n`;
-    out += `// C++ CONCRETE ACTIVE OBJECT IMPLEMENTATION STUB\n`;
+    out += `// C++ CONCRETE ACTIVE OBJECT IMPLEMENTATION HEADER\n`;
     out += `// ==========================================================================\n\n`;
     
     out += `#ifndef ${upperMachineName}_IMPL_HPP\n`;
     out += `#define ${upperMachineName}_IMPL_HPP\n\n`;
-    out += `#include "${lowerMachineName}_hsm.hpp"\n`;
-    out += `#include <iostream>\n\n`;
+    out += `#include "${lowerMachineName}_hsm.hpp"\n\n`;
     
-    out += `struct ${concreteName} : public Hsm<${concreteName}, AppEvents> {\n`;
-    out += `    explicit ${concreteName}() : Hsm() {} \n\n`;
+    out += `namespace ${machineName} {\n\n`;
+    out += `    struct ${concreteName} : public Hsm<${concreteName}, Event> {\n`;
+    out += `        explicit ${concreteName}();\n\n`;
 
-    out += `    // --- Active Guard Target Condition Checks ---\n`;
+    out += `        // --- Active Guard Target Condition Checks ---\n`;
     if (uniqueGuards.length === 0) {
-        out += `    // No conditional guards found in graphical layout.\n`;
+        out += `        // No conditional guards found in graphical layout.\n`;
     } else {
         uniqueGuards.forEach(guard => {
-            out += `    bool ${guard.replace(/[^a-zA-Z0-9_]/g, "")}() const {\n`;
-            out += `        return true;\n`;
-            out += `    }\n\n`;
+            out += `        bool ${guard}() const;\n`;
         });
     }
+    out += `\n`;
 
-    out += `    // --- Graphical Behavioral Hook Subroutines ---\n`;
+    out += `        // --- Graphical Behavioral Hook Subroutines ---\n`;
     if (signatureList.length === 0) {
-        out += `    // No structural exit/entry/internal/transition hooks found.\n`;
+        out += `        // No structural exit/entry/internal/transition hooks found.\n`;
     } else {
         signatureList.forEach(sig => {
             if (sig.endsWith('()')) {
-                const cleanAction = sig.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
-                out += `    void ${cleanAction}() {\n`;
-                out += `        std::cout << "Action Routine [${cleanAction}] executed (Parameterless)\\n";\n`;
-                out += `    }\n\n`;
+                const cleanAction = sig.replace('()', '');
+                out += `        void ${cleanAction}();\n`;
             } else {
                 const openParenIdx = sig.indexOf('(');
                 const closeParenIdx = sig.indexOf(')');
-                const cleanAction = sig.substring(0, openParenIdx).replace(/[^a-zA-Z0-9_]/g, "");
-                const signalParam = sig.substring(openParenIdx + 1, closeParenIdx).replace(/[^a-zA-Z0-9_]/g, "");
-                
-                out += `    void ${cleanAction}(${signalParam} const &e) {\n`;
-                out += `        (void)e; // Suppresses compiler unused-parameter warning\n`;
-                out += `        std::cout << "Action Routine [${cleanAction}] executed for ${signalParam}\\n";\n`;
-                out += `    }\n\n`;
+                const cleanAction = sig.substring(0, openParenIdx);
+                const signalParam = sig.substring(openParenIdx + 1, closeParenIdx);
+                out += `        void ${cleanAction}(${signalParam} const &e);\n`;
             }
         });
     }
 
-    out += `};\n\n`;
+    out += `    };\n\n`;
+    out += `} // namespace ${machineName}\n\n`;
     out += `#endif // ${upperMachineName}_IMPL_HPP\n`;
+    return out;
+}
+
+function generateCppConcreteSourceStub(jsonText: string): string {
+    let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
+    try {
+        hsm = JSON.parse(jsonText);
+    } catch (e) {
+        return "// Error: Invalid HSM structure. Cannot generate C++ concrete source stub.";
+    }
+
+    const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
+    const lowerMachineName = machineName.toLowerCase();
+    const concreteName = "MyConcrete" + machineName;
+
+    const states = (hsm.states || []) as any[];
+    const collectedGuards = new Set<string>();
+    const uniqueSignatures = new Set<string>();
+
+    ((hsm.guards || []) as string[]).forEach(g => {
+        const trimmed = g.trim().replace(/[^a-zA-Z0-9_]/g, "");
+        if (trimmed) collectedGuards.add(trimmed);
+    });
+
+    states.forEach((s: any) => {
+        if (s.entry) {
+            const raw = s.entry.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (raw) uniqueSignatures.add(`${raw}()`);
+        }
+        if (s.exit) {
+            const raw = s.exit.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (raw) uniqueSignatures.add(`${raw}()`);
+        }
+
+        const processActionToken = (actionToken: string, signalToken: string) => {
+            if (!actionToken || !signalToken) return;
+            const cleanAction = actionToken.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
+            const cleanSignal = signalToken.trim().replace(/[^a-zA-Z0-9_]/g, "");
+            if (!cleanAction) return;
+
+            if (actionToken.endsWith('()')) {
+                uniqueSignatures.add(`${cleanAction}()`);
+            } else {
+                uniqueSignatures.add(`${cleanAction}(${cleanSignal})`);
+            }
+        };
+
+        if (s.transitions && Array.isArray(s.transitions)) {
+            s.transitions.forEach((t: any) => {
+                if (t.guard) {
+                    const raw = t.guard.trim().replace(/[^a-zA-Z0-9_]/g, "");
+                    if (raw) collectedGuards.add(raw);
+                }
+                if (t.event && t.event.includes('/')) {
+                    const parts = t.event.split('/');
+                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
+                }
+            });
+        }
+
+        if (s.local_events && Array.isArray(s.local_events)) {
+            s.local_events.forEach((rawEv: string) => {
+                if (typeof rawEv !== 'string') return;
+                const cleanEv = rawEv.replace('·', '').trim();
+                if (cleanEv.includes('/')) {
+                    const parts = cleanEv.split('/');
+                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
+                }
+            });
+        }
+    });
+
+    const uniqueGuards = Array.from(collectedGuards);
+    const signatureList = Array.from(uniqueSignatures);
+
+    let out = `// ==========================================================================\n`;
+    out += `// C++ CONCRETE ACTIVE OBJECT IMPLEMENTATION SOURCE\n`;
+    out += `// ==========================================================================\n\n`;
+    
+    out += `#include "${lowerMachineName}_impl.hpp"\n`;
+    out += `#include <iostream>\n\n`;
+
+    out += `namespace ${machineName} {\n\n`;
+
+    out += `    ${concreteName}::${concreteName}() : Hsm() {\n`;
+    out += `        // Initialize active object timers or state data fields here\n`;
+    out += `    }\n\n`;
+
+    out += `    // --- Active Guard Target Condition Checks ---\n`;
+    uniqueGuards.forEach(guard => {
+        out += `    bool ${concreteName}::${guard}() const {\n`;
+        out += `        return true;\n`;
+        out += `    }\n\n`;
+    });
+
+    out += `    // --- Graphical Behavioral Hook Subroutines ---\n`;
+    signatureList.forEach(sig => {
+        if (sig.endsWith('()')) {
+            const cleanAction = sig.replace('()', '');
+            out += `    void ${concreteName}::${cleanAction}() {\n`;
+            out += `        std::cout << "Action Routine [${cleanAction}] executed\\n";\n`;
+            out += `    }\n\n`;
+        } else {
+            const openParenIdx = sig.indexOf('(');
+            const closeParenIdx = sig.indexOf(')');
+            const cleanAction = sig.substring(0, openParenIdx);
+            const signalParam = sig.substring(openParenIdx + 1, closeParenIdx);
+            
+            out += `    void ${concreteName}::${cleanAction}(${signalParam} const &e) {\n`;
+            out += `        (void)e; // Suppress unused parameter warning\n`;
+            out += `        std::cout << "Action Routine [${cleanAction}] executed for signal payload\\n";\n`;
+            out += `    }\n\n`;
+        }
+    });
+
+    out += `} // namespace ${machineName}\n`;
+    return out;
+}
+
+function generateCppCliSimulatorString(jsonText: string): string {
+    let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
+    try {
+        hsm = JSON.parse(jsonText);
+    } catch (e) {
+        return "// Error: Invalid HSM structure. Cannot generate CLI Simulator.";
+    }
+
+    const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
+    const lowerMachineName = machineName.toLowerCase();
+    const concreteName = "MyConcrete" + machineName;
+
+    const rawSignals = (hsm.signals || []) as string[];
+    const normalizedSignals = rawSignals.map(s => s.trim()).filter(s => s.length > 0);
+
+    let out = `// ==========================================================================\n`;
+    out += `// FREEACTORS CLI SANDBOX SIMULATOR - AUTO-GENERATED\n`;
+    out += `// ==========================================================================\n\n`;
+
+    out += `#define FA_SIM\n`;
+    out += `#include "${lowerMachineName}_impl.hpp"\n`;
+    out += `#include <iostream>\n`;
+    out += `#include <string>\n\n`;
+
+    out += `int main() {\n`;
+    out += `    std::cout << "\\033[1;36m============================================================\\033[0m\\n";\n`;
+    out += `    std::cout << "\\033[1;32m   📦 FREEACTORS CLI SANDBOX SIMULATOR: ${machineName}\\033[0m\\n";\n`;
+    out += `    std::cout << "\\033[1;36m============================================================\\033[0m\\n\\n";\n\n`;
+
+    out += `    ${machineName}::${concreteName} actor;\n`;
+    out += `    actor.start(); // Triggers initial transition\n\n`;
+
+    out += `    std::cout << "\\033[1;33mAvailable Signals:\\033[0m ";\n`;
+    if (normalizedSignals.length === 0) {
+        out += `    std::cout << "(None registered)\\n";\n`;
+    } else {
+        out += `    std::cout << "${normalizedSignals.join(', ')}\\n";\n`;
+    }
+    out += `    std::cout << "Type \\033[1;31mquit\\033[0m or \\033[1;31mexit\\033[0m to terminate the simulation.\\n\\n";\n\n`;
+
+    out += `    std::string input;\n`;
+    out += `    while (true) {\n`;
+    out += `        std::cout << "\\033[1;35mEnter Signal > \\033[0m";\n`;
+    out += `        if (!(std::cin >> input)) break;\n`;
+    out += `        if (input == "quit" || input == "exit") break;\n\n`;
+
+    let isFirst = true;
+    normalizedSignals.forEach(sig => {
+        out += `        ${isFirst ? "if" : "else if"} (input == "${sig}") {\n`;
+        out += `            actor.dispatch(${machineName}::${sig}{});\n`;
+        out += `        }\n`;
+        isFirst = false;
+    });
+
+    if (!isFirst) {
+        out += `        else {\n`;
+        out += `            std::cout << "  \\033[1;31m[ERROR]\\033[0m Unknown signal identity: '" << input << "'\\n";\n`;
+        out += `        }\n`;
+    }
+
+    out += `    }\n\n`;
+    out += `    std::cout << "\\n\\033[1;30m[SYSTEM] Simulation terminated.\\033[0m\\n";\n`;
+    out += `    return 0;\n`;
+    out += `}\n`;
+
+    return out;
+}
+
+function generateCMakeListsString(jsonText: string): string {
+    let hsm = { name: "ActorMachine" };
+    try {
+        hsm = JSON.parse(jsonText);
+    } catch (e) {}
+
+    const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
+    const lowerMachineName = machineName.toLowerCase();
+
+    let out = `cmake_minimum_required(VERSION 3.10)\n`;
+    out += `project(${lowerMachineName}_sim CXX)\n\n`;
+
+    out += `set(CMAKE_CXX_STANDARD 17)\n`;
+    out += `set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n`;
+
+    out += `# Include local FreeActors framework headers\n`;
+    out += `include_directories(./freeactors)\n\n`;
+
+    out += `# Build Desktop CLI Simulation Executable\n`;
+    out += `add_executable(${lowerMachineName}_sim\n`;
+    out += `    main.cpp\n`;
+    out += `    ${lowerMachineName}_impl.cpp\n`;
+    out += `)\n`;
+
     return out;
 }
 
@@ -573,7 +755,6 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
             enableScripts: true,
         };
 
-        // --- AUTO-INITIALIZE EMPTY FILES BASED ON FILENAME ---
         if (document.getText().trim().length === 0) {
             const rawFilename = document.uri.fsPath.split(/[\\/]/).pop() || "ActorMachine";
             const segments = rawFilename.split('.');
@@ -581,7 +762,6 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
             
             const baseName = firstSegment.replace(/[^a-zA-Z0-9_]/g, "") || "ActorMachine";
             const sanitizedName = baseName.charAt(0).toUpperCase() + baseName.slice(1);
-            
             const rootStateName = sanitizedName.toUpperCase() + "_ROOT";
             
             const defaultSkeleton = {
@@ -644,32 +824,47 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
 
                     const lowerHsmName = hsmName.toLowerCase();
                     const blueprintFilename = `${lowerHsmName}_hsm.hpp`;
-                    const stubFilename = `${lowerHsmName}_impl.hpp`;
+                    const implHeaderFilename = `${lowerHsmName}_impl.hpp`;
+                    const implSourceFilename = `${lowerHsmName}_impl.cpp`;
+                    const mainFilename = `main.cpp`;
+                    const cmakeFilename = `CMakeLists.txt`;
 
-                    const userResponse = await vscode.window.showWarningMessage(
-                        `⚠️ Overwrite Warning: Exporting will completely replace '${blueprintFilename}' and '${stubFilename}' in this directory. Proceed?`,
-                        { modal: true },
-                        "Yes, Overwrite"
-                    );
-
-                    if (userResponse !== "Yes, Overwrite") return;
-
-                    const cppBlueprint = generateCppBlueprintString(jsonText);
-                    const cppStub = generateCppConcreteStubString(jsonText);
-                    
                     const folderUri = vscode.Uri.joinPath(document.uri, '..');
                     const blueprintUri = vscode.Uri.joinPath(folderUri, blueprintFilename);
-                    const stubUri = vscode.Uri.joinPath(folderUri, stubFilename);
-                    
+                    const implHeaderUri = vscode.Uri.joinPath(folderUri, implHeaderFilename);
+                    const implSourceUri = vscode.Uri.joinPath(folderUri, implSourceFilename);
+                    const mainUri = vscode.Uri.joinPath(folderUri, mainFilename);
+                    const cmakeUri = vscode.Uri.joinPath(folderUri, cmakeFilename);
+
                     try {
-                        // Write out the fresh binary data streams to disk cleanly using our top-level global helper
+                        const cppBlueprint = generateCppBlueprintString(jsonText);
+                        const cppImplHeader = generateCppConcreteHeaderStub(jsonText);
+
                         await vscode.workspace.fs.writeFile(blueprintUri, stringToUint8Array(cppBlueprint));
-                        await vscode.workspace.fs.writeFile(stubUri, stringToUint8Array(cppStub));
-                        
-                        // Synchronize our external runtime hpp framework engine files
+                        await vscode.workspace.fs.writeFile(implHeaderUri, stringToUint8Array(cppImplHeader));
+
+                        let sourceExists = false, mainExists = false, cmakeExists = false;
+                        try { await vscode.workspace.fs.stat(implSourceUri); sourceExists = true; } catch {}
+                        try { await vscode.workspace.fs.stat(mainUri); mainExists = true; } catch {}
+                        try { await vscode.workspace.fs.stat(cmakeUri); cmakeExists = true; } catch {}
+
+                        if (!sourceExists) {
+                            await vscode.workspace.fs.writeFile(implSourceUri, stringToUint8Array(generateCppConcreteSourceStub(jsonText)));
+                        }
+                        if (!mainExists) {
+                            await vscode.workspace.fs.writeFile(mainUri, stringToUint8Array(generateCppCliSimulatorString(jsonText)));
+                        }
+                        if (!cmakeExists) {
+                            await vscode.workspace.fs.writeFile(cmakeUri, stringToUint8Array(generateCMakeListsString(jsonText)));
+                        }
+
                         await copyFrameworkFilesToWorkspace(this.context, folderUri);
-                        
-                        vscode.window.showInformationMessage(`🚀 Generated ${blueprintFilename} and ${stubFilename} successfully!`);
+
+                        if (!sourceExists || !mainExists || !cmakeExists) {
+                            vscode.window.showInformationMessage(`🚀 Export complete! Generated '${blueprintFilename}', '${implHeaderFilename}', and initial skeleton workspace.`);
+                        } else {
+                            vscode.window.showInformationMessage(`🔄 Updated contract headers '${blueprintFilename}' and '${implHeaderFilename}'. Your '${implSourceFilename}' was preserved!`);
+                        }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`❌ Export failed: ${err.message}`);
                     }
@@ -701,316 +896,151 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                 <title>FreeActors HSM Canvas</title>
                 <style>
                     body {
-                        margin: 0;
-                        padding: 0;
+                        margin: 0; padding: 0;
                         color: var(--vscode-foreground);
                         font-family: var(--vscode-font-family);
                         background-color: var(--vscode-editor-backgroundColor);
-                        user-select: none;
-                        overflow: hidden;
-                        display: flex;
-                        flex-direction: column;
-                        height: 100vh;
+                        user-select: none; overflow: hidden;
+                        display: flex; flex-direction: column; height: 100vh;
                     }
                     #toolbar {
                         padding: 8px;
                         background: var(--vscode-sideBar-background, #252526);
-                        display: flex;
-                        gap: 10px;
-                        align-items: center;
-                        border-bottom: 1px solid var(--vscode-panel-border);
-                        z-index: 100;
+                        display: flex; gap: 10px; align-items: center;
+                        border-bottom: 1px solid var(--vscode-panel-border); z-index: 100;
                     }
                     button {
                         background: var(--vscode-button-background);
                         color: var(--vscode-button-foreground);
-                        border: none;
-                        padding: 4px 12px;
-                        cursor: pointer;
-                        border-radius: 2px;
+                        border: none; padding: 4px 12px; cursor: pointer; border-radius: 2px;
                     }
-                    button:hover {
-                        background: var(--vscode-button-hoverBackground);
-                    }
-                    #main-layout {
-                        display: flex;
-                        flex: 1;
-                        height: calc(100vh - 45px);
-                        overflow: hidden;
-                    }
+                    button:hover { background: var(--vscode-button-hoverBackground); }
+                    #main-layout { display: flex; flex: 1; height: calc(100vh - 45px); overflow: hidden; }
                     #sidebar-registry {
-                        width: 240px;
-                        background: var(--vscode-sideBar-background, #252526);
+                        width: 240px; background: var(--vscode-sideBar-background, #252526);
                         border-right: 1px solid var(--vscode-panel-border);
-                        display: flex;
-                        flex-direction: column;
-                        padding: 10px;
-                        gap: 15px;
-                        overflow-y: auto;
-                        box-sizing: border-box;
-                        z-index: 10;
+                        display: flex; flex-direction: column; padding: 10px; gap: 15px;
+                        overflow-y: auto; box-sizing: border-box; z-index: 10;
                     }
-                    .registry-section {
-                        display: flex;
-                        flex-direction: column;
-                        gap: 6px;
-                    }
+                    .registry-section { display: flex; flex-direction: column; gap: 6px; }
                     .registry-header {
-                        font-size: 0.85em;
-                        font-weight: bold;
-                        text-transform: uppercase;
-                        opacity: 0.7;
-                        border-bottom: 1px solid var(--vscode-panel-border);
-                        padding-bottom: 3px;
-                        display: flex;
-                        justify-content: space-between;
-                        align-items: center;
+                        font-size: 0.85em; font-weight: bold; text-transform: uppercase;
+                        opacity: 0.7; border-bottom: 1px solid var(--vscode-panel-border);
+                        padding-bottom: 3px; display: flex; justify-content: space-between; align-items: center;
                     }
-                    .registry-list {
-                        display: flex;
-                        flex-direction: column;
-                        gap: 4px;
-                        max-height: 120px;
-                        overflow-y: auto;
-                        padding-right: 2px;
-                    }
+                    .registry-list { display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto; padding-right: 2px; }
                     .registry-item {
-                        font-size: 0.85em;
-                        background: var(--vscode-list-hoverBackground, #2a2a2b);
-                        padding: 3px 6px;
-                        border-radius: 3px;
-                        display: flex;
-                        justify-content: space-between;
-                        align-items: center;
+                        font-size: 0.85em; background: var(--vscode-list-hoverBackground, #2a2a2b);
+                        padding: 3px 6px; border-radius: 3px; display: flex; justify-content: space-between; align-items: center;
                     }
-                    .registry-item button {
-                        background: transparent;
-                        padding: 0 4px;
-                        color: var(--vscode-errorForeground, #f48771);
-                    }
-                    .registry-item button:hover {
-                        background: rgba(255,0,0,0.1);
-                    }
+                    .registry-item button { background: transparent; padding: 0 4px; color: var(--vscode-errorForeground, #f48771); }
+                    .registry-item button:hover { background: rgba(255,0,0,0.1); }
                     #canvas-container {
-                        flex: 1;
-                        position: relative;
-                        overflow: hidden;
+                        flex: 1; position: relative; overflow: hidden;
                         background-image: radial-gradient(var(--vscode-panel-border, #444) 1px, transparent 1px);
-                        background-size: 20px 20px;
-                        cursor: grab;
-                        z-index: 1; /* FIX: Keeps canvas layers behind top-level workspace modals */
+                        background-size: 20px 20px; cursor: grab; z-index: 1;
                     }
-                    #canvas-container:active {
-                        cursor: grabbing;
-                    }
+                    #canvas-container:active { cursor: grabbing; }
                     #workspace-viewport {
-                        position: absolute;
-                        top: 0;
-                        left: 0;
-                        width: 3000px;
-                        height: 3000px;
-                        transform-origin: 0 0;
-                        will-change: transform;
+                        position: absolute; top: 0; left: 0; width: 3000px; height: 3000px;
+                        transform-origin: 0 0; will-change: transform;
                     }
-                    #svg-layer {
-                        position: absolute;
-                        top: 0;
-                        left: 0;
-                        width: 100%;
-                        height: 100%;
-                        z-index: 3;
-                        pointer-events: none;
-                    }
-                    #nodes-layer {
-                        position: absolute;
-                        top: 0;
-                        left: 0;
-                        width: 100%;
-                        height: 100%;
-                        z-index: 2;
-                        pointer-events: none;
-                    }
+                    #svg-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; }
+                    #nodes-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
                     .hsm-state-node {
-                        position: absolute;
-                        background: var(--vscode-editor-background, #1e1e1e);
-                        border: 2px solid var(--vscode-button-background);
-                        border-radius: 6px;
-                        padding: 10px;
-                        min-width: 180px;
-                        min-height: 80px;
-                        cursor: move;
-                        box-shadow: 0 4px 8px rgba(0,0,0,0.4);
-                        pointer-events: auto;
-                        box-sizing: border-box;
+                        position: absolute; background: var(--vscode-editor-background, #1e1e1e);
+                        border: 2px solid var(--vscode-button-background); border-radius: 6px;
+                        padding: 10px; min-width: 180px; min-height: 80px; cursor: move;
+                        box-shadow: 0 4px 8px rgba(0,0,0,0.4); pointer-events: auto; box-sizing: border-box;
                     }
-                    .hsm-state-node.composite {
-                        border: 2px dashed var(--vscode-textLink-foreground);
-                        background: rgba(255, 255, 255, 0.01);
-                    }
+                    .hsm-state-node.composite { border: 2px dashed var(--vscode-textLink-foreground); background: rgba(255, 255, 255, 0.01); }
                     .hsm-state-node.initial-accent {
                         border-color: var(--vscode-charts-green, #388a34) !important;
                         box-shadow: 0 0 8px rgba(56, 138, 52, 0.4), 0 4px 8px rgba(0,0,0,0.4);
                     }
-                    .hsm-state-node.composite.initial-accent {
-                        border: 2px dashed var(--vscode-charts-green, #388a34) !important;
-                    }
-                    .init-badge {
-                        background: var(--vscode-charts-green, #388a34);
-                        color: #ffffff;
-                        font-size: 0.7em;
-                        padding: 2px 5px;
-                        border-radius: 3px;
-                        font-weight: bold;
-                        margin-left: 6px;
-                    }
+                    .hsm-state-node.composite.initial-accent { border: 2px dashed var(--vscode-charts-green, #388a34) !important; }
                     .hsm-state-node.link-target-candidate {
                         box-shadow: 0 0 14px var(--vscode-textLink-foreground, #007acc) !important;
                         border-color: var(--vscode-textLink-foreground, #007acc) !important;
                     }
                     .hsm-state-header {
-                        font-weight: bold;
-                        border-bottom: 1px solid var(--vscode-panel-border);
-                        padding-bottom: 4px;
-                        margin-bottom: 6px;
-                        color: var(--vscode-textLink-foreground);
+                        font-weight: bold; border-bottom: 1px solid var(--vscode-panel-border);
+                        padding-bottom: 4px; margin-bottom: 6px; color: var(--vscode-textLink-foreground);
+                        display: flex; justify-content: space-between; align-items: center;
+                    }
+                    .hamburger-btn {
+                        background: transparent; color: var(--vscode-foreground);
+                        padding: 2px 6px; font-size: 14px; cursor: pointer; border-radius: 3px;
+                    }
+                    .hamburger-btn:hover { background: var(--vscode-list-hoverBackground, #37373d); }
+                    .hsm-state-actions { font-size: 0.85em; opacity: 0.8; display: flex; flex-direction: column; gap: 2px; }
+                    .transition-clickable-path { cursor: pointer; pointer-events: stroke; }
+                    .transition-clickable-path:hover { stroke: var(--vscode-errorForeground, #f48771) !important; stroke-width: 4px !important; }
+                    .transition-label { fill: var(--vscode-editor-foreground); font-size: 11px; font-family: sans-serif; pointer-events: none; }
+                    .resize-handle {
+                        position: absolute; right: 0; bottom: 0; width: 12px; height: 12px; cursor: se-resize;
+                        background: linear-gradient(135deg, transparent 30%, var(--vscode-panel-border) 30%, var(--vscode-panel-border) 50%, transparent 50%, transparent 70%, var(--vscode-panel-border) 70%);
+                        background-size: 4px 4px; border-bottom-right-radius: 4px;
+                    }
+                    .initial-pseudostate-dot {
+                        position: absolute; width: 12px; height: 12px;
+                        background-color: var(--vscode-charts-blue, #007acc);
+                        border: 2px solid #ffffff; border-radius: 50%; cursor: crosshair; z-index: 10;
+                    }
+                    .initial-pseudostate-dot:hover { transform: scale(1.2); box-shadow: 0 0 6px var(--vscode-charts-blue, #007acc); }
+                    .context-menu {
+                        position: absolute; background: var(--vscode-menu-background, #252526);
+                        color: var(--vscode-menu-foreground, #cccccc); border: 1px solid var(--vscode-menu-border, #454545);
+                        border-radius: 4px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); z-index: 1000;
+                        display: none; flex-direction: column; padding: 4px 0; min-width: 160px;
+                    }
+                    .context-menu-item { padding: 6px 12px; cursor: pointer; font-size: 0.9em; }
+                    .context-menu-item:hover { background: var(--vscode-menu-selectionBackground, #007acc); color: var(--vscode-menu-selectionForeground, #ffffff); }
+                    .modal-overlay {
+                        position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+                        background: rgba(0, 0, 0, 0.6); display: none; justify-content: center; align-items: center; z-index: 2000;
+                    }
+                    .modal-box {
+                        background: var(--vscode-sideBar-background, #252526); border: 1px solid var(--vscode-panel-border);
+                        border-radius: 6px; padding: 16px; width: 320px; display: flex; flex-direction: column; gap: 12px;
+                        box-shadow: 0 4px 15px rgba(0,0,0,0.6); box-sizing: border-box;
+                    }
+                    .modal-box h3 { margin: 0; font-size: 1.1em; color: var(--vscode-textLink-foreground); }
+                    .modal-box input, .modal-box select {
+                        background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #cccccc);
+                        border: 1px solid var(--vscode-input-border, #6b6b6b); padding: 6px; border-radius: 2px;
+                    }
+                    .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+                    .validation-hint { font-size: 0.8em; color: var(--vscode-textPreformat-foreground, #d7ba7d); margin-top: -6px; display: none; }
+                    .local-event-row {
                         display: flex;
                         justify-content: space-between;
                         align-items: center;
-                    }
-                    .hamburger-btn {
-                        background: transparent;
-                        color: var(--vscode-foreground);
-                        padding: 2px 6px;
-                        font-size: 14px;
-                        cursor: pointer;
+                        padding: 2px 4px;
                         border-radius: 3px;
+                        font-size: 0.95em;
+                        color: var(--vscode-charts-purple, #b15c87);
                     }
-                    .hamburger-btn:hover {
-                        background: var(--vscode-list-hoverBackground, #37373d);
+                    .local-event-row:hover {
+                        background: rgba(255, 255, 255, 0.05);
                     }
-                    .hsm-state-actions {
-                        font-size: 0.85em;
-                        opacity: 0.8;
-                        display: flex;
-                        flex-direction: column;
-                        gap: 2px;
-                    }
-                    .transition-clickable-path {
+                    .del-event-btn {
+                        background: transparent;
+                        border: none;
+                        color: var(--vscode-errorForeground, #f48771);
                         cursor: pointer;
-                        pointer-events: stroke;
-                    }
-                    .transition-clickable-path:hover {
-                        stroke: var(--vscode-errorForeground, #f48771) !important;
-                        stroke-width: 4px !important;
-                    }
-                    .transition-label {
-                        fill: var(--vscode-editor-foreground);
-                        font-size: 11px;
-                        font-family: sans-serif;
-                        pointer-events: none;
-                    }
-                    .resize-handle {
-                        position: absolute;
-                        right: 0;
-                        bottom: 0;
-                        width: 12px;
-                        height: 12px;
-                        cursor: se-resize;
-                        background: linear-gradient(135deg, transparent 30%, var(--vscode-panel-border) 30%, var(--vscode-panel-border) 50%, transparent 50%, transparent 70%, var(--vscode-panel-border) 70%);
-                        background-size: 4px 4px;
-                        border-bottom-right-radius: 4px;
-                    }
-                    .initial-pseudostate-dot {
-                        position: absolute;
-                        width: 12px;
-                        height: 12px;
-                        background-color: var(--vscode-charts-blue, #007acc);
-                        border: 2px solid #ffffff;
-                        border-radius: 50%;
-                        cursor: crosshair;
-                        z-index: 10;
-                    }
-                    .initial-pseudostate-dot:hover {
-                        transform: scale(1.2);
-                        box-shadow: 0 0 6px var(--vscode-charts-blue, #007acc);
-                    }
-                    .context-menu {
-                        position: absolute;
-                        background: var(--vscode-menu-background, #252526);
-                        color: var(--vscode-menu-foreground, #cccccc);
-                        border: 1px solid var(--vscode-menu-border, #454545);
-                        border-radius: 4px;
-                        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-                        z-index: 1000;
-                        display: none;
-                        flex-direction: column;
-                        padding: 4px 0;
-                        min-width: 160px;
-                    }
-                    .context-menu-item {
-                        padding: 6px 12px;
-                        cursor: pointer;
-                        font-size: 0.9em;
-                    }
-                    .context-menu-item:hover {
-                        background: var(--vscode-menu-selectionBackground, #007acc);
-                        color: var(--vscode-menu-selectionForeground, #ffffff);
-                    }
-                    .modal-overlay {
-                        position: fixed;
-                        top: 0;
-                        left: 0;
-                        width: 100vw;
-                        height: 100vh; /* FIX: Force to view height, not width! */
-                        background: rgba(0, 0, 0, 0.6);
-                        display: none;
-                        justify-content: center;
-                        align-items: center;
-                        z-index: 2000;
-                    }
-                    .modal-box {
-                        background: var(--vscode-sideBar-background, #252526);
-                        border: 1px solid var(--vscode-panel-border);
-                        border-radius: 6px;
-                        padding: 16px;
-                        width: 320px; /* Slightly wider for clear input padding fields */
-                        display: flex;
-                        flex-direction: column;
-                        gap: 12px;
-                        box-shadow: 0 4px 15px rgba(0,0,0,0.6);
-                        box-sizing: border-box; /* FIX: Prevents inner inputs from bleeding over borders */
-                    }
-                    .modal-box h3 {
-                        margin: 0;
-                        font-size: 1.1em;
-                        color: var(--vscode-textLink-foreground);
-                    }
-                    .modal-box input, .modal-box select {
-                        background: var(--vscode-input-background, #3c3c3c);
-                        color: var(--vscode-input-foreground, #cccccc);
-                        border: 1px solid var(--vscode-input-border, #6b6b6b);
-                        padding: 6px;
+                        font-size: 13px;
+                        line-height: 1;
+                        padding: 1px 5px;
+                        opacity: 0.4;
+                        transition: opacity 0.2s, background 0.2s;
                         border-radius: 2px;
-                    }
-                    .modal-buttons {
-                        display: flex;
-                        justify-content: flex-end;
-                        gap: 8px;
-                        margin-top: 4px;
-                    }
-                    .validation-hint {
-                        font-size: 0.8em;
-                        color: var(--vscode-textPreformat-foreground, #d7ba7d);
-                        margin-top: -6px;
-                        display: none;
                     }
                     .local-event-row:hover .del-event-btn {
-                        display: inline-block !important;
-                        cursor: pointer;
+                        opacity: 1;
                     }
                     .del-event-btn:hover {
-                        background: rgba(244, 135, 113, 0.2) !important;
-                        border-radius: 2px;
+                        background: rgba(244, 135, 113, 0.25) !important;
                     }
                 </style>
             </head>
@@ -1053,14 +1083,14 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                         <div id="workspace-viewport">
                             <svg id="svg-layer">
                                 <defs>
-                                    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                                        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-button-background)" />
+                                    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                                        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-textLink-foreground, #007acc)" />
                                     </marker>
-                                    <marker id="rubber-arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                                        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-textLink-foreground)" />
+                                    <marker id="rubber-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                                        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-textLink-foreground, #007acc)" />
                                     </marker>
                                 </defs>
-                                <svg id="links-group"></svg>
+                                <g id="links-group"></g>
                                 <path id="rubber-band-path" stroke="var(--vscode-textLink-foreground)" stroke-dasharray="4 4" stroke-width="2" fill="none" marker-end="url(#rubber-arrow)" style="display:none;"></path>
                             </svg>
                             <div id="nodes-layer"></div>
@@ -1470,9 +1500,50 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
 
                     setupLiveValidation('input-trans-event', 'hint-trans-event', 'signals');
                     setupLiveValidation('input-trans-guard', 'hint-trans-guard', 'guards');
-                    setupLiveValidation('input-signal', 'hint-event-signal', 'signals');
                     setupLiveValidation('input-action', 'hint-event-action', 'actions');
                     setupLiveValidation('input-trans-action', 'hint-trans-action', 'actions');
+
+                    document.getElementById('input-signal').addEventListener('input', (e) => {
+                        const inputSignal = e.target.value.trim();
+                        const hintSignal = document.getElementById('hint-event-signal');
+                        const submitBtn = document.getElementById('btn-submit-event');
+                        const targetState = currentHsmData.states.find(s => s.id === activeMenuStateId);
+
+                        if (!inputSignal) {
+                            hintSignal.style.display = 'none';
+                            submitBtn.disabled = false;
+                            submitBtn.style.opacity = '1';
+                            submitBtn.style.cursor = 'pointer';
+                            return;
+                        }
+
+                        const isDuplicateInState = targetState && targetState.local_events && targetState.local_events.some(ev => {
+                            const cleanEv = ev.replace('·', '').trim();
+                            const existingSignal = cleanEv.split('/')[0].trim();
+                            return existingSignal.toUpperCase() === inputSignal.toUpperCase();
+                        });
+
+                        if (isDuplicateInState) {
+                            hintSignal.innerText = \`⚠️ '\${inputSignal}' is already handled in \${targetState.name}\`;
+                            hintSignal.style.color = 'var(--vscode-errorForeground, #f48771)';
+                            hintSignal.style.display = 'block';
+                            submitBtn.disabled = true;
+                            submitBtn.style.opacity = '0.5';
+                            submitBtn.style.cursor = 'not-allowed';
+                        } else {
+                            submitBtn.disabled = false;
+                            submitBtn.style.opacity = '1';
+                            submitBtn.style.cursor = 'pointer';
+
+                            if (!currentHsmData.signals.includes(inputSignal)) {
+                                hintSignal.innerText = '⚠️ New Signal identifier. Will auto-register.';
+                                hintSignal.style.color = 'var(--vscode-textPreformat-foreground, #d7ba7d)';
+                                hintSignal.style.display = 'block';
+                            } else {
+                                hintSignal.style.display = 'none';
+                            }
+                        }
+                    });
 
                     function setupLiveValidation(inputId, hintId, registryKey) {
                         const input = document.getElementById(inputId);
@@ -1482,6 +1553,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             if (!val || val === 'Init_sig' || currentHsmData[registryKey].includes(val)) {
                                 hint.style.display = 'none';
                             } else {
+                                hint.style.color = 'var(--vscode-textPreformat-foreground, #d7ba7d)';
                                 hint.style.display = 'block';
                             }
                         });
@@ -1522,9 +1594,9 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             if (state.local_events) {
                                 state.local_events.forEach((ev, evIdx) => {
                                     internalEventsHtml += \`
-                                        <div class="local-event-row" style="color:var(--vscode-charts-purple, #b15c87); display:flex; justify-content:space-between; align-items:center; font-size:0.95em;">
+                                        <div class="local-event-row">
                                             <span>⚡ \${ev}</span>
-                                            <button class="del-event-btn" data-state-index="\${index}" data-event-index="\${evIdx}" style="background:transparent; padding:0 4px; color:var(--vscode-errorForeground, #f48771); display:none; font-size:11px;">×</button>
+                                            <button class="del-event-btn" data-state-index="\${index}" data-event-index="\${evIdx}" title="Delete handled event">×</button>
                                         </div>
                                     \`;
                                 });
@@ -1538,14 +1610,13 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                                     <button class="hamburger-btn" data-state-id="\${state.id}">☰</button>
                                 </div>
                                 <div class="hsm-state-actions">
-                                    \---state_actions_hook---
                                     \${state.entry ? '<div>↳ 🟡 ' + state.entry + '</div>' : ''}
                                     \${state.exit ? '<div>↱ 🔴 ' + state.exit + '</div>' : ''}
                                     \${state.parent ? '<div style="font-size:0.8em; opacity:0.6; font-style:italic;">Parent: ' + state.parent + '</div>' : ''}
                                     \${internalEventsHtml}
                                 </div>
                                 <div class="resize-handle"></div>
-                            \`.replace('\\---state_actions_hook---', '');
+                            \`;
 
                             if (isParent || !state.parent) {
                                 const initDot = document.createElement('div');
@@ -1600,6 +1671,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             nodesLayer.appendChild(node);
 
                             node.querySelectorAll('.del-event-btn').forEach(btn => {
+                                btn.addEventListener('mousedown', (e) => e.stopPropagation());
                                 btn.addEventListener('click', (e) => {
                                     e.stopPropagation();
                                     const stateIdx = parseInt(btn.getAttribute('data-state-index'));
@@ -1810,8 +1882,8 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                                     let finalCurveness = state.id === idArray[0] ? baseCurve : -baseCurve;
                                     if (index > 2 && index % 2 === 0) finalCurveness = -finalCurveness;
                                     
-                                    const isInitialLink = trans.event.startsWith('Init_sig');
-                                    drawTransitionLink(state.id, trans.target, trans.event, trans.guard, finalCurveness, transIdx, isInitialLink, trans);
+                                    const isInitialLink = Boolean(trans.event && trans.event.startsWith('Init_sig'));
+                                    drawTransitionLink(state.id, trans.target, trans.event || '', trans.guard, finalCurveness, transIdx, isInitialLink, trans);
                                 });
                             }
                         });
@@ -2009,24 +2081,32 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                         const actionInputText = document.getElementById('input-action').value.trim();
                         if (!signal) return;
 
+                        const targetState = currentHsmData.states.find(s => s.id === activeMenuStateId);
+                        if (!targetState) return;
+
+                        const isDuplicate = targetState.local_events && targetState.local_events.some(ev => {
+                            const cleanEv = ev.replace('·', '').trim();
+                            return cleanEv.split('/')[0].trim().toUpperCase() === signal.toUpperCase();
+                        });
+
+                        if (isDuplicate) return;
+
                         const cleanActionName = actionInputText.replace('()', '').trim();
 
                         if (!currentHsmData.signals.includes(signal)) currentHsmData.signals.push(signal);
-                        if (cleanActionName && !currentHsmData.actions.includes(cleanActionName)) currentHsmData.actions.push(cleanActionName);
-
-                        const state = currentHsmData.states.find(s => s.id === activeMenuStateId);
-                        if (state) {
-                            if (!state.local_events) state.local_events = [];
-                            
-                            const eventRowString = actionInputText ? "· " + signal + " / " + actionInputText : "· " + signal;
-                            if (!state.local_events.includes(eventRowString)) {
-                                state.local_events.push(eventRowString);
-                            }
-                            
-                            commitHsmChange();
-                            renderHsmWorkspace();
-                            renderSidebarRegistry();
+                        if (cleanActionName && !currentHsmData.actions.includes(cleanActionName)) {
+                            currentHsmData.actions.push(cleanActionName);
                         }
+
+                        if (!targetState.local_events) targetState.local_events = [];
+                        
+                        const eventRowString = actionInputText ? "· " + signal + " / " + actionInputText : "· " + signal;
+                        targetState.local_events.push(eventRowString);
+                        
+                        commitHsmChange();
+                        renderHsmWorkspace();
+                        renderSidebarRegistry();
+                        
                         eventModal.style.display = 'none';
                     });
 
