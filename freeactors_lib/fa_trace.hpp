@@ -1,6 +1,30 @@
 #ifndef FA_TRACE_H
 #define FA_TRACE_H
 
+namespace Fa{
+    struct EventMeta {
+        uint16_t id;
+        const char* name;
+    };
+
+    template <typename Variant>
+    struct EventRegistry;
+
+    template <typename... Events>
+    struct EventRegistry<std::variant<Events...>> {
+        using VariantType = std::variant<Events...>;
+        static constexpr size_t count = sizeof...(Events);
+
+        static constexpr std::array<EventMeta, count> items = {{
+            { 
+                static_cast<uint16_t>(Fa::get_index_v<Events, VariantType>), 
+                Fa::EventDescriptor<Events>::name 
+            }...
+        }};
+    };
+}
+
+
 #ifdef FA_SIM
 #include <iostream>
 
@@ -30,7 +54,9 @@ namespace Fa {
 
     template <typename EventVariant>
     inline void trace_event(EventVariant const& e) {
-        std::cout << "\n\033[1;32m[EVENT]\033[0m ID: " << e.index() << "\n";
+        const auto& meta = EventRegistry<EventVariant>::items[e.index()];
+        std::cout << "\n\033[1;32m[EVENT]\033[0m " << meta.name 
+                << " (id: " << meta.id << ")\n";
     }
 }
 
@@ -39,22 +65,18 @@ namespace Fa {
 namespace Fa {
 
     struct [[gnu::packed]] trace_token {
-        uint32_t machine_id  : 5;  // Up to 32 distinct state machine blueprints
-        uint32_t instance_id : 3;  // Up to 8 active runtime task instances per machine type
-        uint32_t trace_cat   : 2;  // Category: 0=Event, 1=Guard, 2=Action, 3=Transition
-        uint32_t guard_state : 1;  // Pass/Fail execution result bit for Guards
-        uint32_t reserved    : 5;  // Available field space for future scaling flags
-        uint32_t token_id    : 16; // Concrete canvas entity identifier index
+        uint32_t machine_id  : 5;
+        uint32_t instance_id : 3;
+        uint32_t trace_cat   : 2;
+        uint32_t guard_state : 1;
+        uint32_t reserved    : 5;
+        uint32_t token_id    : 16;
     };
 
-    // Statically guarantee at compile-time that no alignment padding was injected
     static_assert(sizeof(trace_token) == 4, "Error: trace_token struct padding layout must be exactly 4 bytes!");
 
-    // user-space bytes to JTAG/UART/RTT.
     extern void emit_trace_token(trace_token token);
 
-    // Token Map Layout (16-bit):
-    // [ Bits 15:14 -> Type Category ] [ Bits 13:0 -> Specific Generated Element ID ]
     constexpr uint16_t TRACE_CAT_EVENT      = 0x0000;
     constexpr uint16_t TRACE_CAT_GUARD      = 0x4000;
     constexpr uint16_t TRACE_CAT_ACTION     = 0x8000;

@@ -1,13 +1,29 @@
 #ifndef FA_CORE_HPP
 #define FA_CORE_HPP
 
-#include "FreeRTOS.h"
-#include "queue.h"
-#include "task.h"
-#include "fa_util.hpp"
-#include "fa_ops.h"
+#include <cstdint>
+#include <type_traits>
 
-namespace Fa{
+#ifdef FA_SIMULATION_MODE
+    #include <cassert>
+    #ifndef configASSERT
+        #define configASSERT(x) assert(x)
+    #endif
+#else
+    #include "FreeRTOS.h"
+    #include "queue.h"
+    #include "task.h"
+
+    #ifndef configASSERT
+        #define configASSERT(x) ((void)0)
+    #endif
+#endif
+
+#include "fa_util.hpp"
+#include "fa_ops.hpp"
+
+namespace Fa {
+
     enum class Status {
         Handled,
         Ignored,
@@ -22,7 +38,6 @@ namespace Fa{
     template <typename M, typename E>
     using HandlerRef = Status(*)(M&, E const&);
 
-
     template <typename Derived, typename E, typename ParentState = None>
     struct StateInterface {
         using Parent = ParentState;
@@ -30,7 +45,7 @@ namespace Fa{
 
         template <typename DestState, typename M>
         static Status TransitionTo(M &machine) {
-            machine.pending_transition = &Transition<Self, DestState>::template execute<M, E>;
+            machine.pending_transition = &TransitionTo<Self, DestState>::template execute<M>;
             return Status::Transitioned;
         }
 
@@ -55,16 +70,24 @@ namespace Fa{
                 
                 return Status::Handled;
             }
-            return Derived::handle(machine, event);
+            return Derived::template handle<M>(machine, event);
         }
     };
 
     template<typename M, typename E>
     struct Hsm {
-        Hsm() : handler(HsmTraits<M>::InitialState), queue(nullptr), pending_transition(nullptr) {}
+        Hsm() 
+            : handler(HsmTraits<M>::InitialState), 
+              pending_transition(nullptr)
+#ifndef FA_SIMULATION_MODE
+            , queue(nullptr)
+#endif
+        {}
 
         void start(uint8_t prio, uint32_t queueLen, uint32_t stackSize) {
             configASSERT(handler != nullptr);
+
+#ifndef FA_SIMULATION_MODE
             configASSERT(queue == nullptr);
 
             queue = xQueueCreate(queueLen, sizeof(E));
@@ -79,29 +102,39 @@ namespace Fa{
                 NULL
             );
             configASSERT(xResult == pdPASS);
+#else
+            (void)prio;
+            (void)queueLen;
+            (void)stackSize;
+#endif
         }
 
         void postFromTask(E const &e) {
+#ifndef FA_SIMULATION_MODE
             configASSERT(queue != NULL);
-
             BaseType_t status = xQueueSendToBack(queue, (void *)&e, portMAX_DELAY);
             configASSERT(status == pdPASS);
+#else
+            // Direct sync dispatch for simulation tests if no queue runtime is provided
+            dispatch(static_cast<M&>(*this), e);
+#endif
         }
 
         void postFromISR(E const &e) {
+#ifndef FA_SIMULATION_MODE
             configASSERT(queue != NULL);
-
             BaseType_t xHigherPriorityTaskWoken = pdFALSE;
             BaseType_t status = xQueueSendToBackFromISR(queue, (void *)&e, &xHigherPriorityTaskWoken);
-            
             configASSERT(status == pdPASS);
-
             portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+#else
+            dispatch(static_cast<M&>(*this), e);
+#endif
         }
 
         void unwindToState(HandlerRef<M, E> target_source) {
             while (handler != target_source) {
-                configASSERT(handler != nullptr); // Guard 7: Prevent infinite loops hitting null handlers
+                configASSERT(handler != nullptr);
                 handler(static_cast<M&>(*this), E{ExitToParent_sig{}});
             }
         }
@@ -109,7 +142,8 @@ namespace Fa{
         static void dispatch(M &machine, E const &e) {
             configASSERT(machine.handler != nullptr);
 
-            fa_trace_event<M, E>();
+            // Event tracing hook
+            Fa::trace_event<M, E>(e);
 
             Status s = machine.handler(machine, e);
             while (s == Status::Transitioned && machine.pending_transition != nullptr) {
@@ -127,6 +161,7 @@ namespace Fa{
         void (*pending_transition)(M &m); 
 
     private:
+#ifndef FA_SIMULATION_MODE
         static void eventLoop(void *pdata) {
             configASSERT(pdata != NULL);
             auto &machine = *static_cast<M*>(pdata);
@@ -143,6 +178,9 @@ namespace Fa{
         }
 
         QueueHandle_t queue;
-    };
-}
 #endif
+    };
+
+}
+
+#endif // FA_CORE_HPP
