@@ -33,7 +33,7 @@ namespace Fa {
 
         template <typename DestState, typename M>
         static Status TransitionTo(M &machine) {
-            machine.pending_transition = &TransitionTo<Self, DestState>::template execute<M>;
+            machine.pending_transition = &Transition<Self, DestState>::template execute<M>;
             return Status::Transitioned;
         }
 

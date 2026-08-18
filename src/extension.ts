@@ -14,7 +14,10 @@ function stringToUint8Array(str: string): Uint8Array {
 
 export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionContext, folderUri: vscode.Uri) {
     const destinationDirUri = vscode.Uri.joinPath(folderUri, 'freeactors');
-    const sourceDirUri = vscode.Uri.joinPath(context.extensionUri, 'out', 'freeactors_lib');
+    
+    // Read directly from the root freeactors_lib folder
+    const sourceDirUri = vscode.Uri.joinPath(context.extensionUri, 'freeactors_lib');
+    
     const frameworkFiles = [
         'fa_core.hpp', 
         'fa_mempool.hpp', 
@@ -23,7 +26,8 @@ export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionCon
         'fa_ops.hpp', 
         'fa_trace.hpp',
         'fa_sim.hpp',
-        'linenoise.hpp' 
+        'fa_actor.hpp',
+        'linenoise.hpp'
     ];
 
     try {
@@ -31,19 +35,16 @@ export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionCon
         for (const filename of frameworkFiles) {
             const srcFileUri = vscode.Uri.joinPath(sourceDirUri, filename);
             const destFileUri = vscode.Uri.joinPath(destinationDirUri, filename);
+
             try {
                 const fileData = await vscode.workspace.fs.readFile(srcFileUri);
                 await vscode.workspace.fs.writeFile(destFileUri, fileData);
-            } catch (fileErr) {}
+            } catch (fileErr: any) {
+                console.warn(`[FreeActors] Could not copy ${filename}: ${fileErr.message}`);
+            }
         }
-        vscode.window.showInformationMessage('📦 FreeActors core framework files synchronized successfully!');
     } catch (error: any) {
-        vscode.window.showErrorMessage(
-            `❌ Framework Sync Failed.\n` +
-            `Source Checked: ${sourceDirUri.fsPath}\n` +
-            `Target Destination: ${destinationDirUri.fsPath}\n` +
-            `Reason: ${error.message}`
-        );
+        vscode.window.showErrorMessage(`❌ Framework Sync Failed: ${error.message}`);
     }
 }
 
@@ -224,21 +225,19 @@ function generateCppBlueprintString(jsonText: string): string {
 
     out += `namespace ${machineName} {\n\n`;
 
-    out += `    // --- 2. Traceable Predicate Wrappers ---\n`;
+    out += `    // --- 2. Predicate & Action Functors ---\n`;
     let elementIdCounter = 1;
 
-    const guardPascalNames: string[] = [];
-    const actionPascalNames: string[] = [];
+    const guardEntries: { pascalName: string; rawMethod: string; id: number }[] = [];
+    const actionEntries: { pascalName: string; rawMethod: string; id: number }[] = [];
 
     if (guardCatalog.size === 0) {
         out += `    // No conditional guards detected.\n`;
     } else {
         guardCatalog.forEach(({ pascalName, rawMethod }) => {
             const currentId = elementIdCounter++;
-            guardPascalNames.push(pascalName);
+            guardEntries.push({ pascalName, rawMethod, id: currentId });
             out += `    struct ${pascalName} {\n`;
-            out += `        static constexpr const char* name = "${pascalName}";\n`;
-            out += `        static constexpr uint16_t id = ${currentId};\n\n`;
             out += `        template <typename M>\n`;
             out += `        static bool eval(M const &m) { return m.${rawMethod}(); }\n\n`;
             out += `        template <typename M, typename E>\n`;
@@ -252,10 +251,8 @@ function generateCppBlueprintString(jsonText: string): string {
     } else {
         actionCatalog.forEach(({ pascalName, rawMethod }) => {
             const currentId = elementIdCounter++;
-            actionPascalNames.push(pascalName);
+            actionEntries.push({ pascalName, rawMethod, id: currentId });
             out += `    struct ${pascalName} {\n`;
-            out += `        static constexpr const char* name = "${pascalName}";\n`;
-            out += `        static constexpr uint16_t id = ${currentId};\n\n`;
             out += `        template <typename M>\n`;
             out += `        static void execute(M &m) { m.${rawMethod}(); }\n\n`;
             out += `        template <typename M, typename E>\n`;
@@ -263,6 +260,9 @@ function generateCppBlueprintString(jsonText: string): string {
             out += `    };\n\n`;
         });
     }
+
+    const guardPascalNames = guardEntries.map(g => g.pascalName);
+    const actionPascalNames = actionEntries.map(a => a.pascalName);
 
     out += `    // --- 3. Reflective Type Catalogs ---\n`;
     out += `    using GuardCatalog = Fa::TypeList<${guardPascalNames.join(', ')}>;\n`;
@@ -474,7 +474,29 @@ function generateCppBlueprintString(jsonText: string): string {
 
     out += `} // namespace ${machineName}\n\n`;
 
-    out += `// --- 7. Compile-Time State Machine Traits Configuration ---\n`;
+    out += `// --- 7. Reflection Descriptor Specializations ---\n`;
+    out += `namespace Fa {\n`;
+    
+    // States
+    states.forEach((s: any) => {
+        if (s.name) {
+            out += `    template <> struct StateDescriptor<${machineName}::${s.name}> { static constexpr const char* name = "${s.name}"; };\n`;
+        }
+    });
+
+    // Guards
+    guardEntries.forEach(g => {
+        out += `    template <> struct GuardDescriptor<${machineName}::${g.pascalName}> { static constexpr const char* name = "${g.pascalName}"; static constexpr uint16_t id = ${g.id}; };\n`;
+    });
+
+    // Actions
+    actionEntries.forEach(a => {
+        out += `    template <> struct ActionDescriptor<${machineName}::${a.pascalName}> { static constexpr const char* name = "${a.pascalName}"; static constexpr uint16_t id = ${a.id}; };\n`;
+    });
+
+    out += `} // namespace Fa\n\n`;
+
+    out += `// --- 8. Compile-Time State Machine Traits Configuration ---\n`;
     out += `#ifndef FA_SIM\n\n`;
 
     out += `// Embedded Target Hardware Traits Configuration\n`;

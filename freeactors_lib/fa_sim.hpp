@@ -45,9 +45,11 @@ struct MetaRegistry<TypeList<Items...>> {
     }
 };
 
-// Partial specialization for Guard policies (falling back to Item::name)
+template <typename T>
+struct MetaRegistryGuard;
+
 template <typename... Guards>
-struct MetaRegistryGuard {
+struct MetaRegistryGuard<TypeList<Guards...>> {
     using List = TypeList<Guards...>;
     static constexpr size_t count = sizeof...(Guards);
 
@@ -213,7 +215,7 @@ public:
     explicit SimRunner(MachineType& machine) : machine_(machine) {}
 
     void init() {
-        machine_.init();
+        machine_.postFromTask(AppEvents{Init_sig{}});
     }
 
     // --- Fast O(1) Operations ---

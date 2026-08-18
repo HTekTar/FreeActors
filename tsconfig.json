@@ -9,9 +9,9 @@
     // See also https://aka.ms/tsconfig/module
     "module": "commonjs",
     "target": "es2020",
-    "types": [],
+    "types": ["node", "vscode"],
     // For nodejs:
-    "lib": ["es2020"],
+    "lib": ["es2020"],  
     // "types": ["node"],
     // and npm install -D @types/node
 

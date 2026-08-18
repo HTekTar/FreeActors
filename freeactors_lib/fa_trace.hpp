@@ -4,6 +4,15 @@
 namespace Fa{
     template <typename E>
     struct EventDescriptor;
+
+    template <typename E>
+    struct StateDescriptor;
+
+    template <typename E>
+    struct GuardDescriptor;
+
+    template <typename E>
+    struct ActionDescriptor;
     
     struct EventMeta {
         uint16_t id;
@@ -39,20 +48,20 @@ namespace Fa {
 
     template <typename M, typename P>
     inline void trace_guard(bool passed) {
-        std::cout << "  \033[1;35m[GUARD]\033[0m " << clean_name<P>() 
+        std::cout << "  \033[1;35m[GUARD]\033[0m " << GuardDescriptor<P>::name 
                   << " -> " << (passed ? "\033[1;32mPASSED\033[0m" : "\033[1;31mFAILED\033[0m") 
                   << "\n";
     }
 
     template <typename M, typename P>
     inline void trace_action() {
-        std::cout << "  \033[1;36m[ACTION]\033[0m " << clean_name<P>() << "\n";
+        std::cout << "  \033[1;36m[ACTION]\033[0m " << ActionDescriptor<P>::name << "\n";
     }
 
     template <typename M, typename Src, typename Dest>
     inline void trace_transition() {
-        std::cout << "  \033[1;33m[TRANSITION]\033[0m " << clean_name<Src>() 
-                  << " ===> " << clean_name<Dest>() << "\n";
+        std::cout << "  \033[1;33m[TRANSITION]\033[0m " << StateDescriptor<Src>::name 
+                  << " ===> " << StateDescriptor<Dest>::name << "\n";
     }
 
     template <typename EventVariant>

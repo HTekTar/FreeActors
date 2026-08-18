@@ -5,8 +5,11 @@
   "displayName": "FreeActors HSM Editor",
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./ && cp -r freeactors_lib out/",
-    "watch": "tsc -watch -p ./"
+    "compile": "tsc -p ./ && npm run copy-lib",
+    "watch:tsc": "tsc -watch -p ./",
+    "watch:lib": "nodemon --watch freeactors_lib -e hpp,h,cpp --exec npm run copy-lib",
+    "watch": "npm run copy-lib && npm run watch:tsc",
+    "copy-lib": "mkdir -p out/freeactors_lib && cp -r freeactors_lib/* out/freeactors_lib/"
   },
   "main": "./out/extension.js",
   "activationEvents": [
@@ -29,7 +32,7 @@
     ]
   },
   "devDependencies": {
-    "@types/node": "16.x",
+    "@types/node": "^16.18.126",
     "@types/vscode": "^1.85.0",
     "typescript": "^4.9.4 "
   }
