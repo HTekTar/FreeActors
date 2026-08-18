@@ -15,15 +15,26 @@ function stringToUint8Array(str: string): Uint8Array {
 export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionContext, folderUri: vscode.Uri) {
     const destinationDirUri = vscode.Uri.joinPath(folderUri, 'freeactors');
     const sourceDirUri = vscode.Uri.joinPath(context.extensionUri, 'out', 'freeactors_lib');
-    const frameworkFiles = ['fa_core.hpp', 'fa_mempool.hpp', 'fa_timeEvent.hpp', 'fa_util.hpp', 'fa_ops.hpp', 'fa_trace.hpp'];
+    const frameworkFiles = [
+        'fa_core.hpp', 
+        'fa_mempool.hpp', 
+        'fa_timeEvent.hpp', 
+        'fa_util.hpp', 
+        'fa_ops.hpp', 
+        'fa_trace.hpp',
+        'fa_sim.hpp',
+        'linenoise.hpp' 
+    ];
 
     try {
         await vscode.workspace.fs.createDirectory(destinationDirUri);
         for (const filename of frameworkFiles) {
             const srcFileUri = vscode.Uri.joinPath(sourceDirUri, filename);
             const destFileUri = vscode.Uri.joinPath(destinationDirUri, filename);
-            const fileData = await vscode.workspace.fs.readFile(srcFileUri);
-            await vscode.workspace.fs.writeFile(destFileUri, fileData);
+            try {
+                const fileData = await vscode.workspace.fs.readFile(srcFileUri);
+                await vscode.workspace.fs.writeFile(destFileUri, fileData);
+            } catch (fileErr) {}
         }
         vscode.window.showInformationMessage('📦 FreeActors core framework files synchronized successfully!');
     } catch (error: any) {
@@ -40,63 +51,86 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(FreeActorsEditorProvider.register(context));
 }
 
-function generateCppBlueprintString(jsonText: string): string {
-    let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [], initial_state: "" };
-    try { hsm = JSON.parse(jsonText); } catch (e) {}
+function normalizeActionName(actionName: string, machine: string): string {
+    if (!actionName) return actionName;
+    return actionName
+        .replace(new RegExp(`entry_${machine}_ROOT`, 'gi'), 'entry_ROOT')
+        .replace(new RegExp(`exit_${machine}_ROOT`, 'gi'), 'exit_ROOT');
+}
 
-    const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
-    const upperMachineName = machineName.toUpperCase();
-    const concreteMachineName = "MyConcrete" + machineName;
+function toPascalCase(str: string): string {
+    const clean = str.replace(/[^a-zA-Z0-9_]/g, "");
+    if (!clean) return "Unnamed";
+    return clean.charAt(0).toUpperCase() + clean.slice(1);
+}
 
-    const rawSignals = (hsm.signals || []) as string[];
-    const normalizedSignals = rawSignals.map(s => s.trim()).filter(s => s.length > 0);
-    const states = (hsm.states || []) as any[];
+interface MethodCatalogItem {
+    rawMethod: string;
+    pascalName: string;
+    hasVoid: boolean;
+    payloadEvents: Set<string>;
+}
 
-    const toPascalCase = (str: string): string => {
-        const clean = str.replace(/[^a-zA-Z0-9_]/g, "");
-        if (!clean) return "Unnamed";
-        return clean.charAt(0).toUpperCase() + clean.slice(1);
+function extractCatalogs(hsm: any, machineName: string) {
+    const rawStates = (hsm.states || []) as any[];
+    const states = rawStates.map(s => ({
+        ...s,
+        name: (!s.parent || s.name === `${machineName}_ROOT` || s.name === "ROOT" || s.name === "STATE_ROOT") ? "ROOT" : s.name,
+        entry: normalizeActionName(s.entry || "", machineName),
+        exit: normalizeActionName(s.exit || "", machineName)
+    }));
+
+    const guardCatalog = new Map<string, MethodCatalogItem>();
+    const actionCatalog = new Map<string, MethodCatalogItem>();
+
+    const registerGuard = (rawName: string, payloadEvent?: string) => {
+        const clean = rawName.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "").trim();
+        if (!clean) return;
+        const isParameterless = rawName.includes('()') || !payloadEvent;
+
+        let item = guardCatalog.get(clean);
+        if (!item) {
+            item = { rawMethod: clean, pascalName: toPascalCase(clean), hasVoid: false, payloadEvents: new Set() };
+            guardCatalog.set(clean, item);
+        }
+        if (isParameterless) item.hasVoid = true;
+        if (payloadEvent && !rawName.includes('()')) item.payloadEvents.add(payloadEvent);
     };
 
-    const guardCatalog = new Map<string, { pascalName: string; rawMethod: string }>();
-    const actionCatalog = new Map<string, { pascalName: string; rawMethod: string }>();
+    const registerAction = (rawName: string, payloadEvent?: string) => {
+        const clean = rawName.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "").trim();
+        if (!clean) return;
+        const isParameterless = rawName.includes('()') || !payloadEvent;
 
-    ((hsm.guards || []) as string[]).forEach(g => {
-        const trimmed = g.trim();
-        if (trimmed) {
-            const raw = trimmed.replace(/[^a-zA-Z0-9_]/g, "");
-            guardCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+        let item = actionCatalog.get(clean);
+        if (!item) {
+            item = { rawMethod: clean, pascalName: toPascalCase(clean), hasVoid: false, payloadEvents: new Set() };
+            actionCatalog.set(clean, item);
         }
-    });
+        if (isParameterless) item.hasVoid = true;
+        if (payloadEvent && !rawName.includes('()')) item.payloadEvents.add(payloadEvent);
+    };
 
-    ((hsm.actions || []) as string[]).forEach(a => {
-        const trimmed = a.trim();
-        if (trimmed) {
-            const raw = trimmed.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
-            actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
-        }
-    });
+    ((hsm.guards || []) as string[]).forEach(g => registerGuard(g));
+    ((hsm.actions || []) as string[]).forEach(a => registerAction(a));
 
     states.forEach((s: any) => {
-        if (s.entry) {
-            const raw = s.entry.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
-        }
-        if (s.exit) {
-            const raw = s.exit.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
-        }
+        if (s.entry) registerAction(s.entry);
+        if (s.exit) registerAction(s.exit);
 
         if (s.transitions && Array.isArray(s.transitions)) {
             s.transitions.forEach((t: any) => {
-                if (t.guard) {
-                    const raw = t.guard.trim().replace(/[^a-zA-Z0-9_]/g, "");
-                    if (raw) guardCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
-                }
-                if (t.event && t.event.includes('/')) {
+                const signalToken = (t.event && typeof t.event === 'string') 
+                    ? (t.event.trim().split('/')[0] || "").trim() 
+                    : "";
+                const isInit = signalToken === 'Init_sig';
+                const payloadEvent = isInit ? undefined : signalToken;
+
+                if (t.guard) registerGuard(t.guard, payloadEvent);
+
+                if (t.event && typeof t.event === 'string' && t.event.includes('/')) {
                     const actionPart = t.event.split('/')[1] || "";
-                    const raw = actionPart.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
-                    if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+                    registerAction(actionPart, payloadEvent);
                 }
             });
         }
@@ -105,14 +139,29 @@ function generateCppBlueprintString(jsonText: string): string {
             s.local_events.forEach((rawEv: string) => {
                 if (typeof rawEv !== 'string') return;
                 const cleanEv = rawEv.replace('·', '').trim();
+                const signalToken = (cleanEv.split('/')[0] || "").trim();
                 if (cleanEv.includes('/')) {
                     const actionPart = cleanEv.split('/')[1] || "";
-                    const raw = actionPart.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
-                    if (raw) actionCatalog.set(raw, { pascalName: toPascalCase(raw), rawMethod: raw });
+                    registerAction(actionPart, signalToken);
                 }
             });
         }
     });
+
+    return { states, guardCatalog, actionCatalog };
+}
+
+function generateCppBlueprintString(jsonText: string): string {
+    let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
+    try { hsm = JSON.parse(jsonText); } catch (e) {}
+
+    const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
+    const upperMachineName = machineName.toUpperCase();
+
+    const rawSignals = (hsm.signals || []) as string[];
+    const normalizedSignals = rawSignals.map(s => s.trim()).filter(s => s.length > 0);
+
+    const { states, guardCatalog, actionCatalog } = extractCatalogs(hsm, machineName);
 
     let out = `// ==========================================================================\n`;
     out += `// AUTO-GENERATED FREEACTORS HSM BLUEPRINT - DO NOT HAND-EDIT THIS FILE\n`;
@@ -130,11 +179,25 @@ function generateCppBlueprintString(jsonText: string): string {
 
     out += `namespace ${machineName} {\n\n`;
 
-    out += `    // --- 1. Event Payloads (Forward Declarations) ---\n`;
-    normalizedSignals.forEach(sig => {
-        out += `    struct ${sig};\n`;
-    });
-    out += `\n`;
+    out += `#ifdef FA_SIM\n`;
+    out += `    // --- 1. User-Defined Event Signals (Simulation Mode Stubs) ---\n`;
+    if (normalizedSignals.length === 0) {
+        out += `    // No custom signals registered.\n`;
+    } else {
+        normalizedSignals.forEach(sig => {
+            out += `    struct ${sig} {};\n`;
+        });
+    }
+    out += `#else\n`;
+    out += `    // --- 1. Forward Declarations for Embedded Target Event Payloads ---\n`;
+    if (normalizedSignals.length === 0) {
+        out += `    // No custom signals registered.\n`;
+    } else {
+        normalizedSignals.forEach(sig => {
+            out += `    struct ${sig};\n`;
+        });
+    }
+    out += `#endif // FA_SIM\n\n`;
 
     out += `    using Event = std::variant<\n`;
     out += `        Fa::Enter_sig,\n`;
@@ -217,7 +280,7 @@ function generateCppBlueprintString(jsonText: string): string {
     states.forEach((s: any) => {
         if (!s.name) return;
         
-        let parentClassName = "None";
+        let parentClassName = "Fa::None";
         if (s.parent) {
             const parentObj = states.find((p: any) => p.id === s.parent);
             if (parentObj && parentObj.name) {
@@ -225,8 +288,8 @@ function generateCppBlueprintString(jsonText: string): string {
             }
         }
         
-        out += `    struct ${s.name} : public StateInterface<${s.name}, Event, ${parentClassName}> {\n`;
-        out += `        template <typename M> static Status handle(M &m, Event const &e);\n`;
+        out += `    struct ${s.name} : public Fa::StateInterface<${s.name}, Event, ${parentClassName}> {\n`;
+        out += `        template <typename M> static Fa::Status handle(M &m, Event const &e);\n`;
         out += `    };\n\n`;
     });
 
@@ -235,13 +298,13 @@ function generateCppBlueprintString(jsonText: string): string {
         if (!s.name) return;
 
         out += `    template <typename M>\n`;
-        out += `    Status ${s.name}::handle(M &m, Event const &e) {\n`;
+        out += `    Fa::Status ${s.name}::handle(M &m, Event const &e) {\n`;
         out += `        Fa::Status status;\n`;
         out += `        switch(e.index()) {\n`;
 
-        out += `            case get_index_v<Fa::Enter_sig, Event>:\n`;
+        out += `            case Fa::get_index_v<Fa::Enter_sig, Event>:\n`;
         if (s.entry) {
-            const raw = s.entry.replace(/[^a-zA-Z0-9_]/g, "");
+            const raw = s.entry.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
             const entryWrapper = actionCatalog.get(raw)?.pascalName;
             if (entryWrapper) {
                 out += `                Fa::Action<${entryWrapper}>::execute(m);\n`;
@@ -250,9 +313,9 @@ function generateCppBlueprintString(jsonText: string): string {
         out += `                status = Fa::Status::Handled;\n`;
         out += `                break;\n`;
 
-        out += `            case get_index_v<Fa::Exit_sig, Event>:\n`;
+        out += `            case Fa::get_index_v<Fa::Exit_sig, Event>:\n`;
         if (s.exit) {
-            const raw = s.exit.replace(/[^a-zA-Z0-9_]/g, "");
+            const raw = s.exit.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
             const exitWrapper = actionCatalog.get(raw)?.pascalName;
             if (exitWrapper) {
                 out += `                Fa::Action<${exitWrapper}>::execute(m);\n`;
@@ -265,7 +328,7 @@ function generateCppBlueprintString(jsonText: string): string {
         const initTransitions = allTransitions.filter((t: any) => t.event === 'Init_sig');
         
         if (initTransitions.length > 0) {
-            out += `            case get_index_v<Fa::Init_sig, Event>:\n`;
+            out += `            case Fa::get_index_v<Fa::Init_sig, Event>:\n`;
             const sortedInit = [...initTransitions].sort((a: any, b: any) => (a.guard && !b.guard) ? -1 : (!a.guard && b.guard) ? 1 : 0);
             let isFirst = true;
             sortedInit.forEach((t: any) => {
@@ -273,7 +336,7 @@ function generateCppBlueprintString(jsonText: string): string {
                 if (!targetStateObj || !targetStateObj.name) return;
 
                 if (t.guard) {
-                    const cleanGuard = t.guard.replace(/[^a-zA-Z0-9_]/g, "");
+                    const cleanGuard = t.guard.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
                     const guardWrapper = guardCatalog.get(cleanGuard)?.pascalName || cleanGuard;
                     out += `                ${isFirst ? "if" : "else if"} (Fa::Guard<${guardWrapper}>::eval(m)) {\n`;
                     out += `                    status = Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, Event>(m);\n`;
@@ -328,7 +391,7 @@ function generateCppBlueprintString(jsonText: string): string {
 
         Object.keys(reactionGroups).forEach((signalToken) => {
             const list = reactionGroups[signalToken] || [];
-            out += `            case get_index_v<${signalToken}, Event>:\n`;
+            out += `            case Fa::get_index_v<${signalToken}, Event>:\n`;
 
             const sortedReactions = [...list].sort((a: any, b: any) => (a.guard && !b.guard) ? -1 : (!a.guard && b.guard) ? 1 : 0);
             
@@ -350,15 +413,20 @@ function generateCppBlueprintString(jsonText: string): string {
                 }
 
                 if (react.guard) {
-                    const cleanGuard = react.guard.replace(/[^a-zA-Z0-9_]/g, "");
+                    const isParameterless = react.guard.endsWith('()');
+                    const cleanGuard = react.guard.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
                     const guardWrapper = guardCatalog.get(cleanGuard)?.pascalName || cleanGuard;
 
-                    out += `                ${isFirstBranch ? "if" : "else if"} (Fa::Guard<${guardWrapper}>::eval(m, e)) {\n`;
+                    const guardEvalCall = isParameterless 
+                        ? `Fa::Guard<${guardWrapper}>::eval(m)` 
+                        : `Fa::Guard<${guardWrapper}>::eval(m, std::get<${signalToken}>(e))`;
+
+                    out += `                ${isFirstBranch ? "if" : "else if"} (${guardEvalCall}) {\n`;
                     if (actionCode) out += actionCode;
                     
                     if (react.isExternal) {
                         const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                        out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, Event>(m);\n`;
+                        out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "Fa::None"}>::template execute<M, Event>(m);\n`;
                     } else {
                         out += `                    status = Fa::Status::Handled;\n`;
                     }
@@ -370,7 +438,7 @@ function generateCppBlueprintString(jsonText: string): string {
                         if (actionCode) out += actionCode;
                         if (react.isExternal) {
                             const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                            out += `                status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, Event>(m);\n`;
+                            out += `                status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "Fa::None"}>::template execute<M, Event>(m);\n`;
                         } else {
                             out += `                status = Fa::Status::Handled;\n`;
                         }
@@ -379,7 +447,7 @@ function generateCppBlueprintString(jsonText: string): string {
                         if (actionCode) out += "    " + actionCode;
                         if (react.isExternal) {
                             const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                            out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "None"}>::template execute<M, Event>(m);\n`;
+                            out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "Fa::None"}>::template execute<M, Event>(m);\n`;
                         } else {
                             out += `                    status = Fa::Status::Handled;\n`;
                         }
@@ -407,23 +475,39 @@ function generateCppBlueprintString(jsonText: string): string {
     out += `} // namespace ${machineName}\n\n`;
 
     out += `// --- 7. Compile-Time State Machine Traits Configuration ---\n`;
-    
-    let initialSelectedStateName = "ROOT";
-    const rootState = states.find((s: any) => !s.parent);
-    if (rootState && rootState.transitions) {
-        const bootTransition = rootState.transitions.find((t: any) => t.event === 'Init_sig' && !t.guard);
-        if (bootTransition) {
-            const matchingState = states.find((s: any) => s.id === bootTransition.target);
-            if (matchingState && matchingState.name) {
-                initialSelectedStateName = matchingState.name;
-            }
-        }
-    }
+    out += `#ifndef FA_SIM\n\n`;
 
-    out += `template <>\n`;
-    out += `struct HsmTraits<${machineName}::${concreteMachineName}> {\n`;
-    out += `    static constexpr auto InitialState = &${machineName}::${initialSelectedStateName}::template Dispatch<${machineName}::${concreteMachineName}>;\n`;
-    out += `};\n\n`;
+    out += `// Embedded Target Hardware Traits Configuration\n`;
+    out += `namespace ${machineName} {\n`;
+    out += `    class Actor;\n`;
+    out += `} // namespace ${machineName}\n\n`;
+
+    out += `namespace Fa {\n`;
+    out += `    template <>\n`;
+    out += `    struct HsmTraits<${machineName}::Actor> {\n`;
+    out += `        static constexpr auto InitialState = &${machineName}::ROOT::template Dispatch<${machineName}::Actor>;\n`;
+    out += `    };\n`;
+    out += `} // namespace Fa\n\n`;
+
+    out += `#else\n\n`;
+
+    out += `// Host Simulation Sandbox Traits Configuration\n`;
+    out += `namespace ${machineName} {\n`;
+    out += `    using SimMachine = Fa::MockMachine<\n`;
+    out += `        Event, \n`;
+    out += `        GuardCatalog, \n`;
+    out += `        ActionCatalog\n`;
+    out += `    >;\n`;
+    out += `} // namespace ${machineName}\n\n`;
+
+    out += `namespace Fa {\n`;
+    out += `    template <>\n`;
+    out += `    struct HsmTraits<${machineName}::SimMachine> {\n`;
+    out += `        static constexpr auto InitialState = &${machineName}::ROOT::template Dispatch<${machineName}::SimMachine>;\n`;
+    out += `    };\n`;
+    out += `} // namespace Fa\n\n`;
+
+    out += `#endif // FA_SIM\n\n`;
 
     out += `#endif // ${upperMachineName}_HSM_HPP\n`;
     return out;
@@ -431,301 +515,163 @@ function generateCppBlueprintString(jsonText: string): string {
 
 function generateCppConcreteHeaderStub(jsonText: string): string {
     let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
-    try {
-        hsm = JSON.parse(jsonText);
-    } catch (e) {
-        return "// Error: Invalid HSM structure. Cannot generate C++ concrete header stub.";
-    }
+    try { hsm = JSON.parse(jsonText); } catch (e) {}
 
     const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
-    const lowerMachineName = machineName.toLowerCase();
     const upperMachineName = machineName.toUpperCase();
-    const concreteName = "MyConcrete" + machineName;
 
-    const states = (hsm.states || []) as any[];
-    const collectedGuards = new Set<string>();
-    const uniqueSignatures = new Set<string>();
-
-    ((hsm.guards || []) as string[]).forEach(g => {
-        const trimmed = g.trim().replace(/[^a-zA-Z0-9_]/g, "");
-        if (trimmed) collectedGuards.add(trimmed);
-    });
-
-    states.forEach((s: any) => {
-        if (s.entry) {
-            const raw = s.entry.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (raw) uniqueSignatures.add(`${raw}()`);
-        }
-        if (s.exit) {
-            const raw = s.exit.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (raw) uniqueSignatures.add(`${raw}()`);
-        }
-
-        const processActionToken = (actionToken: string, signalToken: string) => {
-            if (!actionToken || !signalToken) return;
-            const cleanAction = actionToken.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
-            const cleanSignal = signalToken.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (!cleanAction) return;
-
-            if (actionToken.endsWith('()')) {
-                uniqueSignatures.add(`${cleanAction}()`);
-            } else {
-                uniqueSignatures.add(`${cleanAction}(${cleanSignal})`);
-            }
-        };
-
-        if (s.transitions && Array.isArray(s.transitions)) {
-            s.transitions.forEach((t: any) => {
-                if (t.guard) {
-                    const raw = t.guard.trim().replace(/[^a-zA-Z0-9_]/g, "");
-                    if (raw) collectedGuards.add(raw);
-                }
-                if (t.event && t.event.includes('/')) {
-                    const parts = t.event.split('/');
-                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
-                }
-            });
-        }
-
-        if (s.local_events && Array.isArray(s.local_events)) {
-            s.local_events.forEach((rawEv: string) => {
-                if (typeof rawEv !== 'string') return;
-                const cleanEv = rawEv.replace('·', '').trim();
-                if (cleanEv.includes('/')) {
-                    const parts = cleanEv.split('/');
-                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
-                }
-            });
-        }
-    });
-
-    const uniqueGuards = Array.from(collectedGuards);
-    const signatureList = Array.from(uniqueSignatures);
+    const { guardCatalog, actionCatalog } = extractCatalogs(hsm, machineName);
 
     let out = `// ==========================================================================\n`;
-    out += `// C++ CONCRETE ACTIVE OBJECT IMPLEMENTATION HEADER\n`;
+    out += `// CONCRETE ACTIVE OBJECT IMPLEMENTATION HEADER\n`;
+    out += `// Machine: ${machineName}\n`;
     out += `// ==========================================================================\n\n`;
-    
-    out += `#ifndef ${upperMachineName}_IMPL_HPP\n`;
-    out += `#define ${upperMachineName}_IMPL_HPP\n\n`;
-    out += `#include "${lowerMachineName}_hsm.hpp"\n\n`;
-    
-    out += `namespace ${machineName} {\n\n`;
-    out += `    struct ${concreteName} : public Hsm<${concreteName}, Event> {\n`;
-    out += `        explicit ${concreteName}();\n\n`;
 
-    out += `        // --- Active Guard Target Condition Checks ---\n`;
-    if (uniqueGuards.length === 0) {
-        out += `        // No conditional guards found in graphical layout.\n`;
+    out += `#pragma once\n`;
+    out += `#ifndef ${upperMachineName}_ACTOR_HPP\n`;
+    out += `#define ${upperMachineName}_ACTOR_HPP\n\n`;
+
+    out += `#include "${machineName.toLowerCase()}_hsm.hpp"\n`;
+    out += `#include "fa_actor.hpp"\n\n`;
+
+    out += `namespace ${machineName} {\n\n`;
+    out += `class Actor : public Fa::ActiveObject<Actor, Event> {\n`;
+    out += `public:\n`;
+    out += `    Actor();\n`;
+    out += `    ~Actor() = default;\n\n`;
+
+    out += `    // --- Guard Predicates ---\n`;
+    if (guardCatalog.size === 0) {
+        out += `    // No guard conditions registered.\n`;
     } else {
-        uniqueGuards.forEach(guard => {
-            out += `        bool ${guard}() const;\n`;
+        guardCatalog.forEach(item => {
+            if (item.hasVoid || item.payloadEvents.size === 0) {
+                out += `    bool ${item.rawMethod}() const;\n`;
+            }
+            item.payloadEvents.forEach(sig => {
+                out += `    bool ${item.rawMethod}(${sig} const &e) const;\n`;
+            });
         });
     }
     out += `\n`;
 
-    out += `        // --- Graphical Behavioral Hook Subroutines ---\n`;
-    if (signatureList.length === 0) {
-        out += `        // No structural exit/entry/internal/transition hooks found.\n`;
+    out += `    // --- Action Handlers ---\n`;
+    if (actionCatalog.size === 0) {
+        out += `    // No action routines registered.\n`;
     } else {
-        signatureList.forEach(sig => {
-            if (sig.endsWith('()')) {
-                const cleanAction = sig.replace('()', '');
-                out += `        void ${cleanAction}();\n`;
-            } else {
-                const openParenIdx = sig.indexOf('(');
-                const closeParenIdx = sig.indexOf(')');
-                const cleanAction = sig.substring(0, openParenIdx);
-                const signalParam = sig.substring(openParenIdx + 1, closeParenIdx);
-                out += `        void ${cleanAction}(${signalParam} const &e);\n`;
+        actionCatalog.forEach(item => {
+            if (item.hasVoid || item.payloadEvents.size === 0) {
+                out += `    void ${item.rawMethod}();\n`;
             }
+            item.payloadEvents.forEach(sig => {
+                out += `    void ${item.rawMethod}(${sig} const &e);\n`;
+            });
         });
     }
+    out += `\n`;
 
-    out += `    };\n\n`;
+    out += `private:\n`;
+    out += `    // User private fields & hardware peripheral handles\n`;
+    out += `};\n\n`;
+
     out += `} // namespace ${machineName}\n\n`;
-    out += `#endif // ${upperMachineName}_IMPL_HPP\n`;
+    out += `#endif // ${upperMachineName}_ACTOR_HPP\n`;
+
     return out;
 }
 
 function generateCppConcreteSourceStub(jsonText: string): string {
     let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
-    try {
-        hsm = JSON.parse(jsonText);
-    } catch (e) {
-        return "// Error: Invalid HSM structure. Cannot generate C++ concrete source stub.";
-    }
+    try { hsm = JSON.parse(jsonText); } catch (e) {}
 
     const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
-    const lowerMachineName = machineName.toLowerCase();
-    const concreteName = "MyConcrete" + machineName;
 
-    const states = (hsm.states || []) as any[];
-    const collectedGuards = new Set<string>();
-    const uniqueSignatures = new Set<string>();
-
-    ((hsm.guards || []) as string[]).forEach(g => {
-        const trimmed = g.trim().replace(/[^a-zA-Z0-9_]/g, "");
-        if (trimmed) collectedGuards.add(trimmed);
-    });
-
-    states.forEach((s: any) => {
-        if (s.entry) {
-            const raw = s.entry.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (raw) uniqueSignatures.add(`${raw}()`);
-        }
-        if (s.exit) {
-            const raw = s.exit.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (raw) uniqueSignatures.add(`${raw}()`);
-        }
-
-        const processActionToken = (actionToken: string, signalToken: string) => {
-            if (!actionToken || !signalToken) return;
-            const cleanAction = actionToken.replace('()', '').trim().replace(/[^a-zA-Z0-9_]/g, "");
-            const cleanSignal = signalToken.trim().replace(/[^a-zA-Z0-9_]/g, "");
-            if (!cleanAction) return;
-
-            if (actionToken.endsWith('()')) {
-                uniqueSignatures.add(`${cleanAction}()`);
-            } else {
-                uniqueSignatures.add(`${cleanAction}(${cleanSignal})`);
-            }
-        };
-
-        if (s.transitions && Array.isArray(s.transitions)) {
-            s.transitions.forEach((t: any) => {
-                if (t.guard) {
-                    const raw = t.guard.trim().replace(/[^a-zA-Z0-9_]/g, "");
-                    if (raw) collectedGuards.add(raw);
-                }
-                if (t.event && t.event.includes('/')) {
-                    const parts = t.event.split('/');
-                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
-                }
-            });
-        }
-
-        if (s.local_events && Array.isArray(s.local_events)) {
-            s.local_events.forEach((rawEv: string) => {
-                if (typeof rawEv !== 'string') return;
-                const cleanEv = rawEv.replace('·', '').trim();
-                if (cleanEv.includes('/')) {
-                    const parts = cleanEv.split('/');
-                    processActionToken((parts[1] || "").trim(), (parts[0] || "").trim());
-                }
-            });
-        }
-    });
-
-    const uniqueGuards = Array.from(collectedGuards);
-    const signatureList = Array.from(uniqueSignatures);
+    const { guardCatalog, actionCatalog } = extractCatalogs(hsm, machineName);
 
     let out = `// ==========================================================================\n`;
-    out += `// C++ CONCRETE ACTIVE OBJECT IMPLEMENTATION SOURCE\n`;
+    out += `// CONCRETE ACTIVE OBJECT IMPLEMENTATION SOURCE\n`;
+    out += `// Machine: ${machineName}\n`;
     out += `// ==========================================================================\n\n`;
-    
-    out += `#include "${lowerMachineName}_impl.hpp"\n`;
+
+    out += `#include "${machineName.toLowerCase()}_actor.hpp"\n`;
     out += `#include <iostream>\n\n`;
 
     out += `namespace ${machineName} {\n\n`;
 
-    out += `    ${concreteName}::${concreteName}() : Hsm() {\n`;
-    out += `        // Initialize active object timers or state data fields here\n`;
-    out += `    }\n\n`;
+    out += `Actor::Actor()\n`;
+    out += `    : Fa::ActiveObject<Actor, Event>() {\n`;
+    out += `    // Initialize hardware peripherals, FreeRTOS queue configurations, or timer handles\n`;
+    out += `}\n\n`;
 
-    out += `    // --- Active Guard Target Condition Checks ---\n`;
-    uniqueGuards.forEach(guard => {
-        out += `    bool ${concreteName}::${guard}() const {\n`;
-        out += `        return true;\n`;
-        out += `    }\n\n`;
-    });
+    out += `// --- Guard Predicate Implementations ---\n`;
+    if (guardCatalog.size === 0) {
+        out += `// No guard conditions registered.\n\n`;
+    } else {
+        guardCatalog.forEach(item => {
+            if (item.hasVoid || item.payloadEvents.size === 0) {
+                out += `bool Actor::${item.rawMethod}() const {\n`;
+                out += `    // TODO: Return condition evaluation\n`;
+                out += `    return true;\n`;
+                out += `}\n\n`;
+            }
+            item.payloadEvents.forEach(sig => {
+                out += `bool Actor::${item.rawMethod}(${sig} const &/*e*/) const {\n`;
+                out += `    // TODO: Return condition evaluation against payload\n`;
+                out += `    return true;\n`;
+                out += `}\n\n`;
+            });
+        });
+    }
 
-    out += `    // --- Graphical Behavioral Hook Subroutines ---\n`;
-    signatureList.forEach(sig => {
-        if (sig.endsWith('()')) {
-            const cleanAction = sig.replace('()', '');
-            out += `    void ${concreteName}::${cleanAction}() {\n`;
-            out += `        std::cout << "Action Routine [${cleanAction}] executed\\n";\n`;
-            out += `    }\n\n`;
-        } else {
-            const openParenIdx = sig.indexOf('(');
-            const closeParenIdx = sig.indexOf(')');
-            const cleanAction = sig.substring(0, openParenIdx);
-            const signalParam = sig.substring(openParenIdx + 1, closeParenIdx);
-            
-            out += `    void ${concreteName}::${cleanAction}(${signalParam} const &e) {\n`;
-            out += `        (void)e; // Suppress unused parameter warning\n`;
-            out += `        std::cout << "Action Routine [${cleanAction}] executed for signal payload\\n";\n`;
-            out += `    }\n\n`;
-        }
-    });
+    out += `// --- Action Handler Implementations ---\n`;
+    if (actionCatalog.size === 0) {
+        out += `// No action routines registered.\n\n`;
+    } else {
+        actionCatalog.forEach(item => {
+            if (item.hasVoid || item.payloadEvents.size === 0) {
+                out += `void Actor::${item.rawMethod}() {\n`;
+                out += `    // TODO: Implement peripheral trigger or operational logic\n`;
+                out += `}\n\n`;
+            }
+            item.payloadEvents.forEach(sig => {
+                out += `void Actor::${item.rawMethod}(${sig} const &/*e*/) {\n`;
+                out += `    // TODO: Process payload from ${sig}\n`;
+                out += `}\n\n`;
+            });
+        });
+    }
 
     out += `} // namespace ${machineName}\n`;
+
     return out;
 }
 
 function generateCppCliSimulatorString(jsonText: string): string {
-    let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
-    try {
-        hsm = JSON.parse(jsonText);
-    } catch (e) {
-        return "// Error: Invalid HSM structure. Cannot generate CLI Simulator.";
-    }
+    let hsm = { name: "ActorMachine" };
+    try { hsm = JSON.parse(jsonText); } catch (e) {}
 
     const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
     const lowerMachineName = machineName.toLowerCase();
-    const concreteName = "MyConcrete" + machineName;
-
-    const rawSignals = (hsm.signals || []) as string[];
-    const normalizedSignals = rawSignals.map(s => s.trim()).filter(s => s.length > 0);
 
     let out = `// ==========================================================================\n`;
-    out += `// FREEACTORS CLI SANDBOX SIMULATOR - AUTO-GENERATED\n`;
+    out += `// FREEACTORS CLI HOST SIMULATOR - DESKTOP REPL\n`;
+    out += `// Machine: ${machineName}\n`;
     out += `// ==========================================================================\n\n`;
 
     out += `#define FA_SIM\n`;
-    out += `#include "${lowerMachineName}_impl.hpp"\n`;
-    out += `#include <iostream>\n`;
-    out += `#include <string>\n\n`;
+    out += `#include "${lowerMachineName}_hsm.hpp"\n`;
+    out += `#include "fa_sim.hpp"\n`;
+    out += `#include <iostream>\n\n`;
 
     out += `int main() {\n`;
-    out += `    std::cout << "\\033[1;36m============================================================\\033[0m\\n";\n`;
-    out += `    std::cout << "\\033[1;32m   📦 FREEACTORS CLI SANDBOX SIMULATOR: ${machineName}\\033[0m\\n";\n`;
-    out += `    std::cout << "\\033[1;36m============================================================\\033[0m\\n\\n";\n\n`;
+    out += `    ${machineName}::SimMachine machine;\n\n`;
 
-    out += `    ${machineName}::${concreteName} actor;\n`;
-    out += `    actor.start(); // Triggers initial transition\n\n`;
+    out += `    Fa::SimRunner<${machineName}::SimMachine> runner(machine);\n\n`;
 
-    out += `    std::cout << "\\033[1;33mAvailable Signals:\\033[0m ";\n`;
-    if (normalizedSignals.length === 0) {
-        out += `    std::cout << "(None registered)\\n";\n`;
-    } else {
-        out += `    std::cout << "${normalizedSignals.join(', ')}\\n";\n`;
-    }
-    out += `    std::cout << "Type \\033[1;31mquit\\033[0m or \\033[1;31mexit\\033[0m to terminate the simulation.\\n\\n";\n\n`;
+    out += `    runner.init();\n\n`;
 
-    out += `    std::string input;\n`;
-    out += `    while (true) {\n`;
-    out += `        std::cout << "\\033[1;35mEnter Signal > \\033[0m";\n`;
-    out += `        if (!(std::cin >> input)) break;\n`;
-    out += `        if (input == "quit" || input == "exit") break;\n\n`;
+    out += `    runner.run_repl();\n\n`;
 
-    let isFirst = true;
-    normalizedSignals.forEach(sig => {
-        out += `        ${isFirst ? "if" : "else if"} (input == "${sig}") {\n`;
-        out += `            actor.dispatch(${machineName}::${sig}{});\n`;
-        out += `        }\n`;
-        isFirst = false;
-    });
-
-    if (!isFirst) {
-        out += `        else {\n`;
-        out += `            std::cout << "  \\033[1;31m[ERROR]\\033[0m Unknown signal identity: '" << input << "'\\n";\n`;
-        out += `        }\n`;
-    }
-
-    out += `    }\n\n`;
-    out += `    std::cout << "\\n\\033[1;30m[SYSTEM] Simulation terminated.\\033[0m\\n";\n`;
     out += `    return 0;\n`;
     out += `}\n`;
 
@@ -734,27 +680,30 @@ function generateCppCliSimulatorString(jsonText: string): string {
 
 function generateCMakeListsString(jsonText: string): string {
     let hsm = { name: "ActorMachine" };
-    try {
-        hsm = JSON.parse(jsonText);
-    } catch (e) {}
+    try { hsm = JSON.parse(jsonText); } catch (e) {}
 
     const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
     const lowerMachineName = machineName.toLowerCase();
 
-    let out = `cmake_minimum_required(VERSION 3.10)\n`;
-    out += `project(${lowerMachineName}_sim CXX)\n\n`;
+    let out = `cmake_minimum_required(VERSION 3.14)\n`;
+    out += `project(${lowerMachineName}_sim LANGUAGES CXX)\n\n`;
 
     out += `set(CMAKE_CXX_STANDARD 17)\n`;
-    out += `set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n`;
+    out += `set(CMAKE_CXX_STANDARD_REQUIRED ON)\n`;
+    out += `set(CMAKE_CXX_EXTENSIONS OFF)\n\n`;
 
-    out += `# Include local FreeActors framework headers\n`;
-    out += `include_directories(./freeactors)\n\n`;
+    out += `include_directories(\n`;
+    out += `    \${CMAKE_CURRENT_SOURCE_DIR}\n`;
+    out += `    \${CMAKE_CURRENT_SOURCE_DIR}/freeactors\n`;
+    out += `)\n\n`;
 
-    out += `# Build Desktop CLI Simulation Executable\n`;
     out += `add_executable(${lowerMachineName}_sim\n`;
     out += `    main.cpp\n`;
-    out += `    ${lowerMachineName}_impl.cpp\n`;
-    out += `)\n`;
+    out += `)\n\n`;
+
+    out += `if(UNIX AND NOT APPLE)\n`;
+    out += `    target_link_libraries(${lowerMachineName}_sim PRIVATE pthread)\n`;
+    out += `endif()\n`;
 
     return out;
 }
@@ -791,7 +740,6 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
             
             const baseName = firstSegment.replace(/[^a-zA-Z0-9_]/g, "") || "ActorMachine";
             const sanitizedName = baseName.charAt(0).toUpperCase() + baseName.slice(1);
-            const rootStateName = sanitizedName.toUpperCase() + "_ROOT";
             
             const defaultSkeleton = {
                 name: sanitizedName,
@@ -801,13 +749,13 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                 states: [
                     {
                         id: "STATE_ROOT",
-                        name: rootStateName,
+                        name: "ROOT",
                         x: 50,
                         y: 50,
                         width: 700,
                         height: 500,
-                        entry: "entry_" + rootStateName,
-                        exit: "exit_" + rootStateName
+                        entry: "entry_ROOT()",
+                        exit: "exit_ROOT()"
                     }
                 ]
             };
@@ -853,32 +801,32 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
 
                     const lowerHsmName = hsmName.toLowerCase();
                     const blueprintFilename = `${lowerHsmName}_hsm.hpp`;
-                    const implHeaderFilename = `${lowerHsmName}_impl.hpp`;
-                    const implSourceFilename = `${lowerHsmName}_impl.cpp`;
+                    const actorHeaderFilename = `${lowerHsmName}_actor.hpp`;
+                    const actorSourceFilename = `${lowerHsmName}_actor.cpp`;
                     const mainFilename = `main.cpp`;
                     const cmakeFilename = `CMakeLists.txt`;
 
                     const folderUri = vscode.Uri.joinPath(document.uri, '..');
                     const blueprintUri = vscode.Uri.joinPath(folderUri, blueprintFilename);
-                    const implHeaderUri = vscode.Uri.joinPath(folderUri, implHeaderFilename);
-                    const implSourceUri = vscode.Uri.joinPath(folderUri, implSourceFilename);
+                    const actorHeaderUri = vscode.Uri.joinPath(folderUri, actorHeaderFilename);
+                    const actorSourceUri = vscode.Uri.joinPath(folderUri, actorSourceFilename);
                     const mainUri = vscode.Uri.joinPath(folderUri, mainFilename);
                     const cmakeUri = vscode.Uri.joinPath(folderUri, cmakeFilename);
 
                     try {
                         const cppBlueprint = generateCppBlueprintString(jsonText);
-                        const cppImplHeader = generateCppConcreteHeaderStub(jsonText);
+                        const cppActorHeader = generateCppConcreteHeaderStub(jsonText);
 
                         await vscode.workspace.fs.writeFile(blueprintUri, stringToUint8Array(cppBlueprint));
-                        await vscode.workspace.fs.writeFile(implHeaderUri, stringToUint8Array(cppImplHeader));
+                        await vscode.workspace.fs.writeFile(actorHeaderUri, stringToUint8Array(cppActorHeader));
 
                         let sourceExists = false, mainExists = false, cmakeExists = false;
-                        try { await vscode.workspace.fs.stat(implSourceUri); sourceExists = true; } catch {}
+                        try { await vscode.workspace.fs.stat(actorSourceUri); sourceExists = true; } catch {}
                         try { await vscode.workspace.fs.stat(mainUri); mainExists = true; } catch {}
                         try { await vscode.workspace.fs.stat(cmakeUri); cmakeExists = true; } catch {}
 
                         if (!sourceExists) {
-                            await vscode.workspace.fs.writeFile(implSourceUri, stringToUint8Array(generateCppConcreteSourceStub(jsonText)));
+                            await vscode.workspace.fs.writeFile(actorSourceUri, stringToUint8Array(generateCppConcreteSourceStub(jsonText)));
                         }
                         if (!mainExists) {
                             await vscode.workspace.fs.writeFile(mainUri, stringToUint8Array(generateCppCliSimulatorString(jsonText)));
@@ -890,9 +838,9 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                         await copyFrameworkFilesToWorkspace(this.context, folderUri);
 
                         if (!sourceExists || !mainExists || !cmakeExists) {
-                            vscode.window.showInformationMessage(`🚀 Export complete! Generated '${blueprintFilename}', '${implHeaderFilename}', and initial skeleton workspace.`);
+                            vscode.window.showInformationMessage(`🚀 Export complete! Generated '${blueprintFilename}', '${actorHeaderFilename}', and initial skeleton workspace.`);
                         } else {
-                            vscode.window.showInformationMessage(`🔄 Updated contract headers '${blueprintFilename}' and '${implHeaderFilename}'. Your '${implSourceFilename}' was preserved!`);
+                            vscode.window.showInformationMessage(`🔄 Updated contract headers '${blueprintFilename}' and '${actorHeaderFilename}'. Your '${actorSourceFilename}' was preserved!`);
                         }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`❌ Export failed: ${err.message}`);

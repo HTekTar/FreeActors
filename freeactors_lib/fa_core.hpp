@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <type_traits>
 
-#ifdef FA_SIMULATION_MODE
+#ifdef FA_SIM
     #include <cassert>
     #ifndef configASSERT
         #define configASSERT(x) assert(x)
@@ -23,18 +23,6 @@
 #include "fa_ops.hpp"
 
 namespace Fa {
-
-    enum class Status {
-        Handled,
-        Ignored,
-        Transitioned
-    };
-
-    struct Enter_sig {};
-    struct Exit_sig  {};
-    struct Init_sig  {};
-    struct ExitToParent_sig {};
-
     template <typename M, typename E>
     using HandlerRef = Status(*)(M&, E const&);
 
@@ -73,13 +61,15 @@ namespace Fa {
             return Derived::template handle<M>(machine, event);
         }
     };
-
+    template<typename M>
+    struct HsmTraits;
+    
     template<typename M, typename E>
     struct Hsm {
         Hsm() 
             : handler(HsmTraits<M>::InitialState), 
               pending_transition(nullptr)
-#ifndef FA_SIMULATION_MODE
+#ifndef FA_SIM
             , queue(nullptr)
 #endif
         {}
@@ -87,7 +77,7 @@ namespace Fa {
         void start(uint8_t prio, uint32_t queueLen, uint32_t stackSize) {
             configASSERT(handler != nullptr);
 
-#ifndef FA_SIMULATION_MODE
+#ifndef FA_SIM
             configASSERT(queue == nullptr);
 
             queue = xQueueCreate(queueLen, sizeof(E));
@@ -110,7 +100,7 @@ namespace Fa {
         }
 
         void postFromTask(E const &e) {
-#ifndef FA_SIMULATION_MODE
+#ifndef FA_SIM
             configASSERT(queue != NULL);
             BaseType_t status = xQueueSendToBack(queue, (void *)&e, portMAX_DELAY);
             configASSERT(status == pdPASS);
@@ -121,7 +111,7 @@ namespace Fa {
         }
 
         void postFromISR(E const &e) {
-#ifndef FA_SIMULATION_MODE
+#ifndef FA_SIM
             configASSERT(queue != NULL);
             BaseType_t xHigherPriorityTaskWoken = pdFALSE;
             BaseType_t status = xQueueSendToBackFromISR(queue, (void *)&e, &xHigherPriorityTaskWoken);
@@ -143,7 +133,7 @@ namespace Fa {
             configASSERT(machine.handler != nullptr);
 
             // Event tracing hook
-            Fa::trace_event<M, E>(e);
+            Fa::trace_event<E>(e);
 
             Status s = machine.handler(machine, e);
             while (s == Status::Transitioned && machine.pending_transition != nullptr) {
@@ -161,7 +151,7 @@ namespace Fa {
         void (*pending_transition)(M &m); 
 
     private:
-#ifndef FA_SIMULATION_MODE
+#ifndef FA_SIM
         static void eventLoop(void *pdata) {
             configASSERT(pdata != NULL);
             auto &machine = *static_cast<M*>(pdata);

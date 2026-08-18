@@ -2,6 +2,9 @@
 #define FA_TRACE_H
 
 namespace Fa{
+    template <typename E>
+    struct EventDescriptor;
+    
     struct EventMeta {
         uint16_t id;
         const char* name;

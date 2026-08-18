@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FreeActors HSM Canvas</title>
+    <link rel="stylesheet" href="{{styleUri}}">
+</head>
+<body>
+    <div id="toolbar">
+        <strong>FreeActors HSM Workspace</strong>
+        <button id="add-state-btn">+ Add Root State</button>
+        <button id="reset-view-btn">🏠 Reset View</button>
+        <button id="export-cpp-btn" style="background:var(--vscode-charts-blue, #007acc);">💾 Export C++ Blueprint</button>
+        <span id="zoom-readout">Zoom: 100%</span>
+        <span id="linking-hint" style="color:var(--vscode-textLink-foreground); font-size:0.9em; margin-left:15px; display:none;">ℹ️ Click target state card (Esc or Right-Click to cancel)</span>
+    </div>
+    
+    <div id="main-layout">
+        <div id="sidebar-registry">
+            <div class="registry-section">
+                <div class="registry-header">
+                    <span>Signals (Events)</span>
+                    <button id="add-reg-signal" style="padding: 1px 6px; font-size: 11px;">+</button>
+                </div>
+                <div id="list-signals" class="registry-list"></div>
+            </div>
+            <div class="registry-section">
+                <div class="registry-header">
+                    <span>Guards (Queries)</span>
+                    <button id="add-reg-guard" style="padding: 1px 6px; font-size: 11px;">+</button>
+                </div>
+                <div id="list-guards" class="registry-list"></div>
+            </div>
+            <div class="registry-section">
+                <div class="registry-header">
+                    <span>Actions (Routines)</span>
+                    <button id="add-reg-action" style="padding: 1px 6px; font-size: 11px;">+</button>
+                </div>
+                <div id="list-actions" class="registry-list"></div>
+            </div>
+        </div>
+
+        <div id="canvas-container">
+            <div id="workspace-viewport">
+                <svg id="svg-layer">
+                    <defs>
+                        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-textLink-foreground, #007acc)" />
+                        </marker>
+                        <marker id="rubber-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-textLink-foreground, #007acc)" />
+                        </marker>
+                    </defs>
+                    <g id="links-group"></g>
+                    <path id="rubber-band-path" stroke="var(--vscode-textLink-foreground)" stroke-dasharray="4 4" stroke-width="2" fill="none" marker-end="url(#rubber-arrow)" style="display:none;"></path>
+                </svg>
+                <div id="nodes-layer"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="state-context-menu" class="context-menu">
+        <div class="context-menu-item" id="menu-add-transition">➡️ Add Transition Link</div>
+        <div class="context-menu-item" id="menu-add-event">⚡ Add Handled Event</div>
+        <div class="context-menu-item" id="menu-add-substate">📁 Add Sub-State</div>
+        <div class="context-menu-item" id="menu-change-parent">⚙️ Change Parent...</div>
+        <div class="context-menu-item" id="menu-rename-state">✏️ Rename State...</div>
+        <hr style="border:0; border-top:1px solid var(--vscode-panel-border); margin:4px 0;">
+        <div class="context-menu-item" id="menu-delete-state" style="color:var(--vscode-errorForeground, #f48771);">❌ Delete State</div>
+    </div>
+
+    <div id="asset-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="asset-modal-title">Declare Global Asset</h3>
+            <input type="text" id="input-asset-name" placeholder="Identifiers (e.g. EV_START, EV_STOP, EV_FAULT)">
+            <div class="modal-buttons">
+                <button id="btn-cancel-asset" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-submit-asset">Register</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="transition-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="transition-modal-title">Configure Transition</h3>
+            <input type="text" id="input-trans-event" placeholder="Signal (e.g. EV_START)">
+            <div id="hint-trans-event" class="validation-hint">⚠️ New Signal identifier. Will auto-register.</div>
+            <input type="text" id="input-trans-guard" placeholder="Guard Condition (Optional)">
+            <div id="hint-trans-guard" class="validation-hint">⚠️ New Guard identifier. Will auto-register.</div>
+            <input type="text" id="input-trans-action" placeholder="Transition Action Routine (Optional)">
+            <div id="hint-trans-action" class="validation-hint">⚠️ New Action identifier. Will auto-register.</div>
+            <div class="modal-buttons">
+                <button id="btn-cancel-trans" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-submit-trans">Bind Link</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="event-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Add Handled Event</h3>
+            <input type="text" id="input-signal" placeholder="Signal Name">
+            <div id="hint-event-signal" class="validation-hint">⚠️ New Signal identifier. Will auto-register.</div>
+            <input type="text" id="input-action" placeholder="Action Routine (Optional)">
+            <div id="hint-event-action" class="validation-hint">⚠️ New Action identifier. Will auto-register.</div>
+            <div class="modal-buttons">
+                <button id="btn-cancel-event" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-submit-event">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="parent-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Change Parent State</h3>
+            <p style="margin:0; font-size:0.85em; opacity:0.8;">Select a container state for this node:</p>
+            <select id="select-parent-node"></select>
+            <div class="modal-buttons">
+                <button id="btn-cancel-parent" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-submit-parent">Update Hierarchy</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="delete-state-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Delete State?</h3>
+            <p style="margin:0; font-size:0.9em; opacity:0.8;">This will remove this state, orphan sub-states, and purge dependent links.</p>
+            <div class="modal-buttons">
+                <button id="btn-cancel-delstate" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-confirm-delstate" style="background:var(--vscode-statusBarItem-errorBackground, #c74848);">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="delete-trans-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Remove Transition?</h3>
+            <p id="delete-trans-text" style="margin:0; font-size:0.9em; opacity:0.8;">Remove connection?</p>
+            <div class="modal-buttons">
+                <button id="btn-cancel-deltrans" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-confirm-deltrans" style="background:var(--vscode-statusBarItem-errorBackground, #c74848);">Remove</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="substate-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Add Sub-State</h3>
+            <input type="text" id="input-subname" placeholder="Sub-State Name">
+            <div id="error-substate" style="color:var(--vscode-errorForeground, #f48771); font-size:0.85em; display:none; margin-top:-4px;">❌ State name must be unique!</div>
+            <div class="modal-buttons">
+                <button id="btn-cancel-substate" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-submit-substate">Add Sub-State</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="rootstate-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Add Root State</h3>
+            <input type="text" id="input-rootname" placeholder="State Name (e.g. IDLE, RUNNING)">
+            <div id="error-rootstate" style="color:var(--vscode-errorForeground, #f48771); font-size:0.85em; display:none; margin-top:-4px;">❌ State name must be unique!</div>
+            <div class="modal-buttons">
+                <button id="btn-cancel-rootstate" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-submit-rootstate">Create State</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="rename-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Rename State</h3>
+            <input type="text" id="input-rename-name" placeholder="New State Name">
+            <div id="error-rename" style="color:var(--vscode-errorForeground, #f48771); font-size:0.85em; display:none; margin-top:-4px;">❌ State name must be unique!</div>
+            <div class="modal-buttons">
+                <button id="btn-cancel-rename" style="background:transparent; border:1px solid var(--vscode-panel-border); color:var(--vscode-foreground);">Cancel</button>
+                <button id="btn-submit-rename">Apply Name</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{scriptUri}}"></script>
+</body>
+</html>

@@ -3,90 +3,130 @@
 
 #include <variant>
 #include <type_traits>
+#include <array>
+#include <cstddef>
 
-// Base marker for the top-level absolute root state
-struct None {
-    template <typename M, typename E>
-    static Status Dispatch(M&, E const&) { return Status::Ignored; }
-};
+namespace Fa{
+    enum class Status {
+        Handled,
+        Ignored,
+        Transitioned
+    };
+    // Base marker for the top-level absolute root state
+    struct None {
+        template <typename M, typename E>
+        static Status Dispatch(M&, E const&) { return Status::Ignored; }
+    };
 
-// Standard uniform function pointer type for the runtime execution engine
-template<typename M, typename E>
-using HandlerRef = Status (*) (M &, E const &);
+    // Standard uniform function pointer type for the runtime execution engine
+    template<typename M, typename E>
+    using HandlerRef = Status (*) (M &, E const &);
 
-// --- Metaprogramming Path Utilities ---
-template <typename ...Ts> struct TypeList { using FirstType = None; };
-template <typename T, typename ...Ts> struct TypeList<T, Ts...> { using FirstType = T; };
+    // --- Metaprogramming Path Utilities ---
+    template <typename ...Ts> struct TypeList { using FirstType = None; };
+    template <typename T, typename ...Ts> struct TypeList<T, Ts...> { using FirstType = T; };
 
-template<typename List, typename ...Acc> struct ReverseList;
-template <typename ...Acc> struct ReverseList<TypeList<>, Acc...> { using Type = TypeList<Acc...>; };
-template<typename T, typename ...Ts, typename ...Acc>
-struct ReverseList<TypeList<T, Ts...>, Acc...> {
-    using Type = typename ReverseList<TypeList<Ts...>, T, Acc...>::Type;
-};
+    template<typename List, typename ...Acc> struct ReverseList;
+    template <typename ...Acc> struct ReverseList<TypeList<>, Acc...> { using Type = TypeList<Acc...>; };
+    template<typename T, typename ...Ts, typename ...Acc>
+    struct ReverseList<TypeList<T, Ts...>, Acc...> {
+        using Type = typename ReverseList<TypeList<Ts...>, T, Acc...>::Type;
+    };
 
-template<typename List1, typename List2> struct ConcatPath;
-template<typename ...T1, typename ...T2> 
-struct ConcatPath<TypeList<T1...>, TypeList<T2...>> { using Type = TypeList<T1..., T2...>; };
+    template<typename List1, typename List2> struct ConcatPath;
+    template<typename ...T1, typename ...T2> 
+    struct ConcatPath<TypeList<T1...>, TypeList<T2...>> { using Type = TypeList<T1..., T2...>; };
 
-// Build Leaf-to-Root path tracking via inheritance ancestry links
-template <typename CurrentState, typename = void>
-struct BuildPath {
-    using Type = typename ConcatPath<TypeList<CurrentState>, typename BuildPath<typename CurrentState::Parent>::Type>::Type;
-};
-template <> struct BuildPath<None, void> { using Type = TypeList<>; };
+    // Build Leaf-to-Root path tracking via inheritance ancestry links
+    template <typename CurrentState, typename = void>
+    struct BuildPath {
+        using Type = typename ConcatPath<TypeList<CurrentState>, typename BuildPath<typename CurrentState::Parent>::Type>::Type;
+    };
+    template <> struct BuildPath<None, void> { using Type = TypeList<>; };
 
-template <typename T, typename List> struct ListContains;
-template<typename T, typename ...Ts> struct ListContains<T, TypeList<Ts...>> {
-    static constexpr bool value = (std::is_same_v<T, Ts> || ...);
-};
+    template <typename T, typename List> struct ListContains;
+    template<typename T, typename ...Ts> struct ListContains<T, TypeList<Ts...>> {
+        static constexpr bool value = (std::is_same_v<T, Ts> || ...);
+    };
 
-// Find the Lowest Common Ancestor (LCA) node at compile-time
-template <typename SrcPath, typename DestPath> struct FindLCA;
-template <typename DestPath> struct FindLCA<TypeList<>, DestPath> { using Type = None; };
-template <typename First, typename ...Rest, typename DestPath>
-struct FindLCA<TypeList<First, Rest...>, DestPath> {
-    using Type = std::conditional_t<ListContains<First, DestPath>::value, First, typename FindLCA<TypeList<Rest...>, DestPath>::Type>;
-};
+    // Find the Lowest Common Ancestor (LCA) node at compile-time
+    template <typename SrcPath, typename DestPath> struct FindLCA;
+    template <typename DestPath> struct FindLCA<TypeList<>, DestPath> { using Type = None; };
+    template <typename First, typename ...Rest, typename DestPath>
+    struct FindLCA<TypeList<First, Rest...>, DestPath> {
+        using Type = std::conditional_t<ListContains<First, DestPath>::value, First, typename FindLCA<TypeList<Rest...>, DestPath>::Type>;
+    };
 
-// Slice path up to the intersection node point
-template <typename Path, typename LCA, typename Acc = TypeList<>> struct SliceToLCA;
-template <typename LCA, typename ...Acc> struct SliceToLCA<TypeList<>, LCA, TypeList<Acc...>> { using Type = TypeList<Acc...>; };
-template <typename First, typename ...Rest, typename LCA, typename ...Acc>
-struct SliceToLCA<TypeList<First, Rest...>, LCA, TypeList<Acc...>> {
-    using Type = std::conditional_t<
-        std::is_same_v<First, LCA>,
-        TypeList<Acc...>,
-        typename SliceToLCA<TypeList<Rest...>, LCA, TypeList<Acc..., First>>::Type
-    >;
-};
+    // Slice path up to the intersection node point
+    template <typename Path, typename LCA, typename Acc = TypeList<>> struct SliceToLCA;
+    template <typename LCA, typename ...Acc> struct SliceToLCA<TypeList<>, LCA, TypeList<Acc...>> { using Type = TypeList<Acc...>; };
+    template <typename First, typename ...Rest, typename LCA, typename ...Acc>
+    struct SliceToLCA<TypeList<First, Rest...>, LCA, TypeList<Acc...>> {
+        using Type = std::conditional_t<
+            std::is_same_v<First, LCA>,
+            TypeList<Acc...>,
+            typename SliceToLCA<TypeList<Rest...>, LCA, TypeList<Acc..., First>>::Type
+        >;
+    };
 
 
-// Static Route Executor (Loops through standard function pointers generated by structural types)
-template <typename M, typename E, typename Path> struct RouteExecutor;
-template <typename M, typename E, typename ...States>
-struct RouteExecutor<M, E, TypeList<States...>> {
-    static constexpr std::array<HandlerRef<M, E>, sizeof...(States)> route{ States::Dispatch... };
-    
-    template<typename SignalType>
-    static void run(M &machine, SignalType const &event) {
-        for (auto const &handler : route) {
-            if (handler) {
-                handler(machine, E{event}); // Wrap standard trigger back into uniform variant pack
+    // Static Route Executor (Loops through standard function pointers generated by structural types)
+    template <typename M, typename E, typename Path> struct RouteExecutor;
+    template <typename M, typename E, typename ...States>
+    struct RouteExecutor<M, E, TypeList<States...>> {
+        static constexpr std::array<HandlerRef<M, E>, sizeof...(States)> route{ States::Dispatch... };
+        
+        template<typename SignalType>
+        static void run(M &machine, SignalType const &event) {
+            for (auto const &handler : route) {
+                if (handler) {
+                    handler(machine, E{event}); // Wrap standard trigger back into uniform variant pack
+                }
             }
         }
-    }
-};
+    };
 
-template <typename T, typename Variant> struct get_index;
-template <typename T, typename ...Ts> struct get_index<T, std::variant<Ts...>> {
-    static constexpr size_t get() {
-        size_t index = 0; size_t current = 0;
-        ((std::is_same_v<T, Ts> ? (index = current, true) : (++current, false)) || ...);
-        return index;
-    }
-};
-template <typename T, typename Variant>
-inline constexpr size_t get_index_v = get_index<T, Variant>::get();
+    template <typename T, typename Variant> struct get_index;
+    template <typename T, typename ...Ts> struct get_index<T, std::variant<Ts...>> {
+        static constexpr size_t get() {
+            size_t index = 0; size_t current = 0;
+            ((std::is_same_v<T, Ts> ? (index = current, true) : (++current, false)) || ...);
+            return index;
+        }
+    };
+    template <typename T, typename Variant>
+    inline constexpr size_t get_index_v = get_index<T, Variant>::get();
 
+    template <typename T>
+    struct variant_to_type_list;
+
+    template <typename... Ts>
+    struct variant_to_type_list<std::variant<Ts...>> {
+        using type = TypeList<Ts...>;
+    };
+
+    template <typename Variant>
+    using variant_to_type_list_t = typename variant_to_type_list<Variant>::type;
+
+    template <typename T, typename List> 
+    struct TypeId;
+
+    template <typename T, typename ...Ts> 
+    struct TypeId<T, TypeList<Ts...>> {
+        static_assert(ListContains<T, TypeList<Ts...>>::value, 
+                      "Error: Type was not found in the target TypeList!");
+
+        static constexpr size_t get() {
+            size_t index = 0; 
+            size_t current = 0;
+            ((std::is_same_v<T, Ts> ? (index = current, true) : (++current, false)) || ...);
+            return index;
+        }
+
+        static constexpr uint16_t value = static_cast<uint16_t>(get());
+    };
+
+    template <typename T, typename List>
+    inline constexpr uint16_t type_id_v = TypeId<T, List>::value;
+}
 #endif

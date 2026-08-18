@@ -5,10 +5,20 @@
 #include "fa_trace.hpp"
 
 namespace Fa{
+    struct Enter_sig {};
+    struct Exit_sig  {};
+    struct Init_sig  {};
+    struct ExitToParent_sig {};
+
+    template <> struct EventDescriptor<Enter_sig> { static constexpr const char* name = "Enter_sig"; };
+    template <> struct EventDescriptor<Exit_sig> { static constexpr const char* name = "Exit_sig"; };
+    template <> struct EventDescriptor<Init_sig> { static constexpr const char* name = "Init_sig"; };
+    template <> struct EventDescriptor<ExitToParent_sig> { static constexpr const char* name = "ExitToParent_sig"; };
+
     template<typename S, typename D>
     struct Transition {
         template <typename M, typename E>
-        static void execute(M &machine) {
+        static Status execute(M &machine) {
             using SrcPath  = typename BuildPath<S>::Type; 
             using DestPath = typename BuildPath<D>::Type; 
 
@@ -23,9 +33,9 @@ namespace Fa{
             RouteExecutor<M, E, ExitPath>::run(machine, E{Exit_sig{}});
             RouteExecutor<M, E, EnterPath>::run(machine, E{Enter_sig{}});
 
-            //transition tracing here
-            fa_trace_trans<M,S,D>();
+            trace_transition<M,S,D>();
             machine.handler = &D::template Dispatch<M>;
+            return Status::Transitioned;
         }
     };
 
@@ -33,14 +43,23 @@ namespace Fa{
     template <typename P>
     struct Action {
         template<typename M>
-        static bool execute(M const &m) {
-            fa_trace_action<M,P>();
+        static void execute(M &m) {
+            trace_action<M,P>();
+#ifndef FA_SIM
             P::execute(m);
+#else
+            m.template execute_action<P>();
+#endif
         }
         template <typename M, typename E>
-        static bool execute(M const &m, E const &e){
-            fa_trace_action<M,P>();
-            P::execute(m);
+        static void execute(M &m, E const &e){
+            trace_action<M,P>();
+#ifndef FA_SIM
+            P::execute(m, e);
+#else
+            (void)e;
+            m.template execute_action<P>();
+#endif
         }
     };
 
@@ -50,18 +69,28 @@ namespace Fa{
         static bool eval(M const &m) {
             bool passed = false;
 
-            passed = P::eval(m);
-            fa_trace_guard<M,P>(passed);
+#ifndef FA_SIM
+        passed = P::eval(m);
+#else
+        passed = m.template eval_guard<P>();
+#endif
+            trace_guard<M,P>(passed);
             return passed;
         }
         template <typename M, typename E>
         static bool eval(M const &m, E const &e){
             bool passed = false;
-            passed = P::eval(m, e);
-            fa_trace_guard<M,P>(passed);
+#ifndef FA_SIM
+        passed = P::eval(m, e);
+#else
+        (void)e;
+        passed = m.template eval_guard<P>();
+#endif
+            trace_guard<M,P>(passed);
             return passed;
         }
     };
 }
+
 
 #endif
