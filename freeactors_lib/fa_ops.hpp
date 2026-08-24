@@ -15,12 +15,16 @@ namespace Fa{
     template <> struct EventDescriptor<Init_sig> { static constexpr const char* name = "Init_sig"; };
     template <> struct EventDescriptor<ExitToParent_sig> { static constexpr const char* name = "ExitToParent_sig"; };
 
+    template<typename M>
+    struct HsmTraits;
+
     template<typename S, typename D>
     struct Transition {
         template <typename M, typename E>
-        static Status execute(M &machine) {
+        static void execute(M &machine) {
             using SrcPath  = typename BuildPath<S>::Type; 
             using DestPath = typename BuildPath<D>::Type; 
+            using MachineStates = typename HsmTraits<M>::StateCatalog;
 
             using LCA = typename FindLCA<SrcPath, DestPath>::Type;
 
@@ -28,14 +32,15 @@ namespace Fa{
             using EnterPathRev = typename SliceToLCA<DestPath, LCA>::Type;
             using EnterPath    = typename ReverseList<EnterPathRev>::Type;
 
+            trace_transition<M,S,D>();
+            
             machine.unwindToState(&S::template Dispatch<M>);
 
             RouteExecutor<M, E, ExitPath>::run(machine, E{Exit_sig{}});
             RouteExecutor<M, E, EnterPath>::run(machine, E{Enter_sig{}});
 
-            trace_transition<M,S,D>();
             machine.handler = &D::template Dispatch<M>;
-            return Status::Transitioned;
+            machine.state_id = type_id_v<D, MachineStates>;
         }
     };
 

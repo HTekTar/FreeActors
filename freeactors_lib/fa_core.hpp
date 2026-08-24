@@ -33,7 +33,7 @@ namespace Fa {
 
         template <typename DestState, typename M>
         static Status TransitionTo(M &machine) {
-            machine.pending_transition = &Transition<Self, DestState>::template execute<M>;
+            machine.pending_transition = &Transition<Self, DestState>::template execute<M, E>;
             return Status::Transitioned;
         }
 
@@ -61,14 +61,13 @@ namespace Fa {
             return Derived::template handle<M>(machine, event);
         }
     };
-    template<typename M>
-    struct HsmTraits;
     
     template<typename M, typename E>
     struct Hsm {
         Hsm() 
             : handler(HsmTraits<M>::InitialState), 
-              pending_transition(nullptr)
+              pending_transition(nullptr),
+              state_id(HsmTraits<M>::InitialStateId)
 #ifndef FA_SIM
             , queue(nullptr)
 #endif
@@ -132,8 +131,7 @@ namespace Fa {
         static void dispatch(M &machine, E const &e) {
             configASSERT(machine.handler != nullptr);
 
-            // Event tracing hook
-            Fa::trace_event<E>(e);
+            trace_event<E>(e);
 
             Status s = machine.handler(machine, e);
             while (s == Status::Transitioned && machine.pending_transition != nullptr) {
@@ -148,7 +146,8 @@ namespace Fa {
         }
 
         HandlerRef<M, E> handler;
-        void (*pending_transition)(M &m); 
+        void (*pending_transition)(M &m);
+        uint16_t state_id;
 
     private:
 #ifndef FA_SIM

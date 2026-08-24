@@ -27,7 +27,7 @@ export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionCon
         'fa_trace.hpp',
         'fa_sim.hpp',
         'fa_actor.hpp',
-        'linenoise.hpp'
+        'fa_repl.hpp'
     ];
 
     try {
@@ -263,6 +263,7 @@ function generateCppBlueprintString(jsonText: string): string {
 
     const guardPascalNames = guardEntries.map(g => g.pascalName);
     const actionPascalNames = actionEntries.map(a => a.pascalName);
+    const stateTypeNames = states.map((s: any) => s.name).filter(Boolean);
 
     out += `    // --- 3. Reflective Type Catalogs ---\n`;
     out += `    using GuardCatalog = Fa::TypeList<${guardPascalNames.join(', ')}>;\n`;
@@ -275,6 +276,7 @@ function generateCppBlueprintString(jsonText: string): string {
         }
     });
     out += `\n`;
+    out += `    using StateCatalog = Fa::TypeList<${stateTypeNames.join(', ')}>;\n`;
 
     out += `    // --- 5. Structural Inheritance Tree ---\n`;
     states.forEach((s: any) => {
@@ -327,8 +329,8 @@ function generateCppBlueprintString(jsonText: string): string {
         const allTransitions = (s.transitions || []) as any[];
         const initTransitions = allTransitions.filter((t: any) => t.event === 'Init_sig');
         
+        out += `            case Fa::get_index_v<Fa::Init_sig, Event>:\n`;
         if (initTransitions.length > 0) {
-            out += `            case Fa::get_index_v<Fa::Init_sig, Event>:\n`;
             const sortedInit = [...initTransitions].sort((a: any, b: any) => (a.guard && !b.guard) ? -1 : (!a.guard && b.guard) ? 1 : 0);
             let isFirst = true;
             sortedInit.forEach((t: any) => {
@@ -339,17 +341,19 @@ function generateCppBlueprintString(jsonText: string): string {
                     const cleanGuard = t.guard.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
                     const guardWrapper = guardCatalog.get(cleanGuard)?.pascalName || cleanGuard;
                     out += `                ${isFirst ? "if" : "else if"} (Fa::Guard<${guardWrapper}>::eval(m)) {\n`;
-                    out += `                    status = Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, Event>(m);\n`;
+                    out += `                    status = TransitionTo<${targetStateObj.name}>(m);\n`;
                     out += `                }\n`;
                     isFirst = false;
                 } else {
                     out += `                ${isFirst ? "" : "else "}{\n`;
-                    out += `                    status = Fa::Transition<${s.name}, ${targetStateObj.name}>::template execute<M, Event>(m);\n`;
+                    out += `                    status = TransitionTo<${targetStateObj.name}>(m);\n`;
                     out += `                }\n`;
                 }
             });
-            out += `                break;\n`;
+        } else {
+            out += `                status = Fa::Status::Handled;\n`;
         }
+        out += `                break;\n`;
 
         const reactionGroups: { [signal: string]: any[] } = {};
 
@@ -426,7 +430,7 @@ function generateCppBlueprintString(jsonText: string): string {
                     
                     if (react.isExternal) {
                         const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                        out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "Fa::None"}>::template execute<M, Event>(m);\n`;
+                        out += `                    status = TransitionTo<${targetObj ? targetObj.name : "Fa::None"}>(m);\n`;
                     } else {
                         out += `                    status = Fa::Status::Handled;\n`;
                     }
@@ -438,7 +442,7 @@ function generateCppBlueprintString(jsonText: string): string {
                         if (actionCode) out += actionCode;
                         if (react.isExternal) {
                             const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                            out += `                status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "Fa::None"}>::template execute<M, Event>(m);\n`;
+                            out += `                status = TransitionTo<${targetObj ? targetObj.name : "Fa::None"}>(m);\n`;
                         } else {
                             out += `                status = Fa::Status::Handled;\n`;
                         }
@@ -447,7 +451,7 @@ function generateCppBlueprintString(jsonText: string): string {
                         if (actionCode) out += "    " + actionCode;
                         if (react.isExternal) {
                             const targetObj = states.find((tgt: any) => tgt.id === react.target);
-                            out += `                    status = Fa::Transition<${s.name}, ${targetObj ? targetObj.name : "Fa::None"}>::template execute<M, Event>(m);\n`;
+                            out += `                    status = TransitionTo<${targetObj ? targetObj.name : "Fa::None"}>(m);\n`;
                         } else {
                             out += `                    status = Fa::Status::Handled;\n`;
                         }
@@ -507,7 +511,9 @@ function generateCppBlueprintString(jsonText: string): string {
     out += `namespace Fa {\n`;
     out += `    template <>\n`;
     out += `    struct HsmTraits<${machineName}::Actor> {\n`;
+    out += `        using StateCatalog = ${machineName}::StateCatalog;\n`;
     out += `        static constexpr auto InitialState = &${machineName}::ROOT::template Dispatch<${machineName}::Actor>;\n`;
+    out += `        static constexpr uint16_t InitialStateId = type_id_v<${machineName}::ROOT, StateCatalog>;\n`;
     out += `    };\n`;
     out += `} // namespace Fa\n\n`;
 
@@ -525,7 +531,9 @@ function generateCppBlueprintString(jsonText: string): string {
     out += `namespace Fa {\n`;
     out += `    template <>\n`;
     out += `    struct HsmTraits<${machineName}::SimMachine> {\n`;
+    out += `        using StateCatalog = ${machineName}::StateCatalog;\n`;
     out += `        static constexpr auto InitialState = &${machineName}::ROOT::template Dispatch<${machineName}::SimMachine>;\n`;
+    out += `        static constexpr uint16_t InitialStateId = type_id_v<${machineName}::ROOT, StateCatalog>;\n`;
     out += `    };\n`;
     out += `} // namespace Fa\n\n`;
 
@@ -689,8 +697,6 @@ function generateCppCliSimulatorString(jsonText: string): string {
     out += `    ${machineName}::SimMachine machine;\n\n`;
 
     out += `    Fa::SimRunner<${machineName}::SimMachine> runner(machine);\n\n`;
-
-    out += `    runner.init();\n\n`;
 
     out += `    runner.run_repl();\n\n`;
 
