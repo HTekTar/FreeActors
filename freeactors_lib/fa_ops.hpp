@@ -3,20 +3,9 @@
 
 #include "fa_util.hpp"
 #include "fa_trace.hpp"
+#include "fa_common.hpp"
 
 namespace Fa{
-    struct Enter_sig {};
-    struct Exit_sig  {};
-    struct Init_sig  {};
-    struct ExitToParent_sig {};
-
-    template <> struct EventDescriptor<Enter_sig> { static constexpr const char* name = "Enter_sig"; };
-    template <> struct EventDescriptor<Exit_sig> { static constexpr const char* name = "Exit_sig"; };
-    template <> struct EventDescriptor<Init_sig> { static constexpr const char* name = "Init_sig"; };
-    template <> struct EventDescriptor<ExitToParent_sig> { static constexpr const char* name = "ExitToParent_sig"; };
-
-    template<typename M>
-    struct HsmTraits;
 
     template<typename S, typename D>
     struct Transition {

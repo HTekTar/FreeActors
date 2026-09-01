@@ -14,11 +14,10 @@ function stringToUint8Array(str: string): Uint8Array {
 
 export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionContext, folderUri: vscode.Uri) {
     const destinationDirUri = vscode.Uri.joinPath(folderUri, 'freeactors');
-    
-    // Read directly from the root freeactors_lib folder
     const sourceDirUri = vscode.Uri.joinPath(context.extensionUri, 'freeactors_lib');
     
     const frameworkFiles = [
+        'fa_common.hpp',
         'fa_core.hpp', 
         'fa_mempool.hpp', 
         'fa_timeEvent.hpp', 
@@ -152,6 +151,179 @@ function extractCatalogs(hsm: any, machineName: string) {
     return { states, guardCatalog, actionCatalog };
 }
 
+// ==========================================================================
+// UNIFIED STATE GRAPH & REACHABILITY METADATA GENERATOR
+// ==========================================================================
+
+interface UnifiedTransitionEdge {
+    fromStateId: number;
+    toStateName: string;
+    signalName: string;
+    isInit: boolean;
+    guardTrits: number[]; // 0: False, 1: True, 2: Don't Care
+}
+
+function generateUnifiedReachabilityMetadata(
+    states: any[], 
+    guardEntries: { pascalName: string; rawMethod: string; id: number }[]
+) {
+    const totalGuards = guardEntries.length;
+    const guardIndexMap = new Map<string, number>();
+    guardEntries.forEach((g, idx) => guardIndexMap.set(g.pascalName, idx));
+
+    const stateMap = new Map<string, any>();
+    states.forEach(s => stateMap.set(s.id, s));
+
+    const parentIdSet = new Set(states.map(s => s.parent).filter(Boolean));
+
+    const isLeafList: boolean[] = [];
+    const stateRanges: { start: number; count: number }[] = [];
+    const allTransitions: UnifiedTransitionEdge[] = [];
+
+    states.forEach((s, stateIdx) => {
+        const isLeaf = !parentIdSet.has(s.id) && s.name !== "ROOT";
+        isLeafList.push(isLeaf);
+
+        const startIdx = allTransitions.length;
+
+        if (!isLeaf) {
+            // Composite states / ROOT only emit their direct local transitions (primarily Init_sig)
+            const rawTransitions = (s.transitions || []) as any[];
+            const bySignal = new Map<string, any[]>();
+            rawTransitions.forEach(t => {
+                const sigToken = (t.event && typeof t.event === 'string')
+                    ? (t.event.trim().split('/')[0] || "").trim()
+                    : "";
+                if (!sigToken) return;
+                const list = bySignal.get(sigToken) || [];
+                list.push(t);
+                bySignal.set(sigToken, list);
+            });
+
+            for (const [sigToken, transList] of bySignal.entries()) {
+                let priorGuardsOnSignal: number[] = [];
+                transList.forEach(t => {
+                    const trits = new Array<number>(totalGuards).fill(2);
+                    for (const gIdx of priorGuardsOnSignal) trits[gIdx] = 0;
+
+                    if (t.guard) {
+                        const cleanGuard = t.guard.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
+                        const pascalGuard = toPascalCase(cleanGuard);
+                        if (guardIndexMap.has(pascalGuard)) {
+                            const gIdx = guardIndexMap.get(pascalGuard)!;
+                            trits[gIdx] = 1;
+                            priorGuardsOnSignal.push(gIdx);
+                        }
+                    }
+
+                    const targetObj = stateMap.get(t.target);
+                    const targetName = targetObj ? targetObj.name : "Fa::None";
+
+                    allTransitions.push({
+                        fromStateId: stateIdx,
+                        toStateName: targetName,
+                        signalName: sigToken,
+                        isInit: sigToken === 'Init_sig',
+                        guardTrits: trits
+                    });
+                });
+            }
+        } else {
+            // Leaf states climb up to ROOT to inherit all unshadowed ancestor transitions
+            const inheritedNegatedGuards = new Map<string, number[]>();
+            const fullyShadowedSignals = new Set<string>();
+
+            let curr: any = s;
+            while (curr) {
+                const rawTransitions = (curr.transitions || []) as any[];
+                const bySignal = new Map<string, any[]>();
+                rawTransitions.forEach(t => {
+                    const sigToken = (t.event && typeof t.event === 'string')
+                        ? (t.event.trim().split('/')[0] || "").trim()
+                        : "";
+                    if (!sigToken) return;
+                    const list = bySignal.get(sigToken) || [];
+                    list.push(t);
+                    bySignal.set(sigToken, list);
+                });
+
+                for (const [sigToken, transList] of bySignal.entries()) {
+                    // Rule: Never inherit Init_sig from ancestor composite states
+                    if (sigToken === 'Init_sig' && curr !== s) {
+                        continue;
+                    }
+
+                    if (fullyShadowedSignals.has(sigToken)) continue;
+
+                    const priorNegated = inheritedNegatedGuards.get(sigToken) || [];
+
+                    for (const t of transList) {
+                        const trits = new Array<number>(totalGuards).fill(2);
+
+                        // 1. Apply negative preconditions accumulated from child levels
+                        for (const gIdx of priorNegated) {
+                            trits[gIdx] = 0;
+                        }
+
+                        // 2. Apply positive guard on current transition (if any)
+                        if (t.guard) {
+                            const cleanGuard = t.guard.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
+                            const pascalGuard = toPascalCase(cleanGuard);
+                            if (guardIndexMap.has(pascalGuard)) {
+                                const gIdx = guardIndexMap.get(pascalGuard)!;
+                                trits[gIdx] = 1;
+                            }
+                        }
+
+                        const targetObj = stateMap.get(t.target);
+                        const targetName = targetObj ? targetObj.name : "Fa::None";
+
+                        allTransitions.push({
+                            fromStateId: stateIdx, // The edge is registered on this concrete leaf
+                            toStateName: targetName,
+                            signalName: sigToken,
+                            isInit: sigToken === 'Init_sig',
+                            guardTrits: trits
+                        });
+                    }
+
+                    // Check for unconditional / catch-all handler at this level
+                    const hasUnguarded = transList.some(t => !t.guard);
+                    if (hasUnguarded) {
+                        fullyShadowedSignals.add(sigToken);
+                    } else {
+                        const localGuards: number[] = [];
+                        transList.forEach(t => {
+                            if (t.guard) {
+                                const cleanGuard = t.guard.replace('()', '').replace(/[^a-zA-Z0-9_]/g, "");
+                                const pascalGuard = toPascalCase(cleanGuard);
+                                if (guardIndexMap.has(pascalGuard)) {
+                                    localGuards.push(guardIndexMap.get(pascalGuard)!);
+                                }
+                            }
+                        });
+                        inheritedNegatedGuards.set(sigToken, [...priorNegated, ...localGuards]);
+                    }
+                }
+
+                curr = curr.parent ? stateMap.get(curr.parent) : null;
+            }
+        }
+
+        stateRanges.push({
+            start: startIdx,
+            count: allTransitions.length - startIdx
+        });
+    });
+
+    return {
+        isLeafList,
+        stateRanges,
+        allTransitions,
+        totalGuards
+    };
+}
+
 function generateCppBlueprintString(jsonText: string): string {
     let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
     try { hsm = JSON.parse(jsonText); } catch (e) {}
@@ -176,7 +348,8 @@ function generateCppBlueprintString(jsonText: string): string {
     out += `#include "fa_ops.hpp"\n`;
     out += `#include "fa_sim.hpp"\n`;
     out += `#include "fa_trace.hpp"\n`;
-    out += `#include <iostream>\n\n`;
+    out += `#include <iostream>\n`;
+    out += `#include <array>\n\n`;
 
     out += `namespace ${machineName} {\n\n`;
 
@@ -478,13 +651,16 @@ function generateCppBlueprintString(jsonText: string): string {
 
     out += `} // namespace ${machineName}\n\n`;
 
+    const reachMeta = generateUnifiedReachabilityMetadata(states, guardEntries);
+
     out += `// --- 7. Reflection Descriptor Specializations ---\n`;
     out += `namespace Fa {\n`;
     
-    // States
-    states.forEach((s: any) => {
+    // States with is_leaf reflection
+    states.forEach((s: any, idx: number) => {
         if (s.name) {
-            out += `    template <> struct StateDescriptor<${machineName}::${s.name}> { static constexpr const char* name = "${s.name}"; };\n`;
+            const isLeaf = reachMeta.isLeafList[idx];
+            out += `    template <> struct StateDescriptor<${machineName}::${s.name}> { static constexpr const char* name = "${s.name}"; static constexpr bool is_leaf = ${isLeaf ? 'true' : 'false'}; };\n`;
         }
     });
 
@@ -500,10 +676,15 @@ function generateCppBlueprintString(jsonText: string): string {
 
     out += `} // namespace Fa\n\n`;
 
+    // --- 8. Compile-Time State Machine Traits Configuration ---
+    const totalStates = states.length;
+    const transCount = reachMeta.allTransitions.length;
+    const guardCount = reachMeta.totalGuards;
+
     out += `// --- 8. Compile-Time State Machine Traits Configuration ---\n`;
     out += `#ifndef FA_SIM\n\n`;
 
-    out += `// Embedded Target Hardware Traits Configuration\n`;
+    out += `// Embedded Target Hardware Traits Configuration (Zero Flash Overhead)\n`;
     out += `namespace ${machineName} {\n`;
     out += `    class Actor;\n`;
     out += `} // namespace ${machineName}\n\n`;
@@ -519,7 +700,7 @@ function generateCppBlueprintString(jsonText: string): string {
 
     out += `#else\n\n`;
 
-    out += `// Host Simulation Sandbox Traits Configuration\n`;
+    out += `// Host Simulation Sandbox Traits Configuration (Includes Reachability Topology)\n`;
     out += `namespace ${machineName} {\n`;
     out += `    using SimMachine = Fa::MockMachine<\n`;
     out += `        Event, \n`;
@@ -532,13 +713,61 @@ function generateCppBlueprintString(jsonText: string): string {
     out += `    template <>\n`;
     out += `    struct HsmTraits<${machineName}::SimMachine> {\n`;
     out += `        using StateCatalog = ${machineName}::StateCatalog;\n`;
+    out += `        using GuardCatalog = ${machineName}::GuardCatalog;\n`;
+    out += `        using ActionCatalog = ${machineName}::ActionCatalog;\n`;
     out += `        static constexpr auto InitialState = &${machineName}::ROOT::template Dispatch<${machineName}::SimMachine>;\n`;
-    out += `        static constexpr uint16_t InitialStateId = type_id_v<${machineName}::ROOT, StateCatalog>;\n`;
+    out += `        static constexpr uint16_t InitialStateId = type_id_v<${machineName}::ROOT, StateCatalog>;\n\n`;
+
+    out += `        // --- Static Unified Reachability Topology ---\n`;
+    out += `        static constexpr size_t StateCount = ${totalStates};\n`;
+    out += `        static constexpr size_t TotalTransitions = ${transCount};\n`;
+    out += `        static constexpr size_t TotalGuards = ${guardCount};\n\n`;
+
+    // 1. is_leaf_state array
+    out += `        static constexpr std::array<bool, ${totalStates > 0 ? totalStates : 1}> is_leaf_state = {{\n`;
+    reachMeta.isLeafList.forEach((isLeaf, idx) => {
+        out += `            ${isLeaf ? 'true ' : 'false'}${idx < totalStates - 1 ? ',' : ''} // ID ${idx}: ${states[idx].name}\n`;
+    });
+    out += `        }};\n\n`;
+
+    // 2. state_transition_ranges
+    out += `        static constexpr std::array<Fa::IndexRange, ${totalStates > 0 ? totalStates : 1}> state_transition_ranges = {{\n`;
+    reachMeta.stateRanges.forEach((r, idx) => {
+        out += `            { ${r.start}, ${r.count} }${idx < totalStates - 1 ? ',' : ''} // ${states[idx].name}\n`;
+    });
+    out += `        }};\n\n`;
+
+    // 3. transitions array
+    out += `        static constexpr std::array<Fa::TransitionEdge, ${transCount > 0 ? transCount : 1}> transitions = {{\n`;
+    if (transCount === 0) {
+        out += `            { 0, 0, 0 }\n`;
+    } else {
+        reachMeta.allTransitions.forEach((e, idx) => {
+            const sigExpr = e.isInit 
+                ? `Fa::get_index_v<Fa::Init_sig, ${machineName}::Event>` 
+                : `Fa::get_index_v<${machineName}::${e.signalName}, ${machineName}::Event>`;
+            out += `            { ${e.fromStateId}, type_id_v<${machineName}::${e.toStateName}, StateCatalog>, ${sigExpr} }${idx < transCount - 1 ? ',' : ''} // ${states[e.fromStateId].name} --(${e.signalName})--> ${e.toStateName}\n`;
+        });
+    }
+    out += `        }};\n\n`;
+
+    // 4. transition_guards matrix (0: False, 1: True, 2: Don't Care)
+    const matrixRows = transCount > 0 ? transCount : 1;
+    const matrixCols = guardCount > 0 ? guardCount : 1;
+    out += `        static constexpr std::array<std::array<int8_t, ${matrixCols}>, ${matrixRows}> transition_guards = {{\n`;
+    if (transCount === 0) {
+        out += `            {{ 2 }}\n`;
+    } else {
+        reachMeta.allTransitions.forEach((e, idx) => {
+            const tritsStr = guardCount > 0 ? e.guardTrits.join(', ') : '2';
+            out += `            {{ ${tritsStr} }}${idx < transCount - 1 ? ',' : ''}\n`;
+        });
+    }
+    out += `        }};\n`;
     out += `    };\n`;
     out += `} // namespace Fa\n\n`;
 
     out += `#endif // FA_SIM\n\n`;
-
     out += `#endif // ${upperMachineName}_HSM_HPP\n`;
     return out;
 }

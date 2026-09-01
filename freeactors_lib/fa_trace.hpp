@@ -1,41 +1,7 @@
 #ifndef FA_TRACE_H
 #define FA_TRACE_H
 
-namespace Fa{
-    template <typename E>
-    struct EventDescriptor;
-
-    template <typename E>
-    struct StateDescriptor;
-
-    template <typename E>
-    struct GuardDescriptor;
-
-    template <typename E>
-    struct ActionDescriptor;
-    
-    struct EventMeta {
-        uint16_t id;
-        const char* name;
-    };
-
-    template <typename Variant>
-    struct EventRegistry;
-
-    template <typename... Events>
-    struct EventRegistry<std::variant<Events...>> {
-        using VariantType = std::variant<Events...>;
-        static constexpr size_t count = sizeof...(Events);
-
-        static constexpr std::array<EventMeta, count> items = {{
-            { 
-                static_cast<uint16_t>(Fa::get_index_v<Events, VariantType>), 
-                Fa::EventDescriptor<Events>::name 
-            }...
-        }};
-    };
-}
-
+#include "fa_common.hpp"
 
 #ifdef FA_SIM
 #include <iostream>
@@ -66,9 +32,10 @@ namespace Fa {
 
     template <typename EventVariant>
     inline void trace_event(EventVariant const& e) {
-        const auto& meta = EventRegistry<EventVariant>::items[e.index()];
-        std::cout << "\n\033[1;32m[EVENT]\033[0m " << meta.name 
-                << " (id: " << meta.id << ")\n";
+        const auto id = e.index();
+        const auto& name = MetaTable<EventDescriptor, EventVariant>::names[id];
+        std::cout << "\n\033[1;32m[EVENT]\033[0m " << name 
+                << " (id: " << id << ")\n";
     }
 }
 

@@ -12,74 +12,22 @@
 
 #include "fa_util.hpp"
 #include "fa_core.hpp"
-
 namespace Fa {
-
-    // =========================================================================
-    //  MetaRegistry
-    //  Compile-time static string/ID reflection for Events and Guards
-    // =========================================================================
-
-    struct MetaItem {
-        uint16_t id;
-        const char* name;
+    struct IndexRange {
+        uint16_t start;
+        uint16_t count;
     };
 
-    template <typename TypeListType>
-    struct MetaRegistry;
-
-    template <typename... Items>
-    struct MetaRegistry<TypeList<Items...>> {
-        using List = TypeList<Items...>;
-        static constexpr size_t count = sizeof...(Items);
-
-        static constexpr std::array<MetaItem, count> items = {{
-            { Fa::type_id_v<Items, List>, EventDescriptor<Items>::name }...
-        }};
-
-        static constexpr const char* name_of(uint16_t id) {
-            for (const auto& item : items) {
-                if (item.id == id) return item.name;
-            }
-            return "Unknown";
-        }
+    struct TransitionEdge {
+        uint16_t from_leaf;
+        uint16_t to_state;
+        uint16_t signal_id;
     };
 
-    template <typename T>
-    struct MetaRegistryGuard;
-
-    template <typename... Guards>
-    struct MetaRegistryGuard<TypeList<Guards...>> {
-        using List = TypeList<Guards...>;
-        static constexpr size_t count = sizeof...(Guards);
-
-        static constexpr std::array<MetaItem, count> items = {{
-            { Fa::type_id_v<Guards, List>, GuardDescriptor<Guards>::name }...
-        }};
-    };
-
-    template <typename StateList>
-    struct StateTable;
-
-    template <typename... States>
-    struct StateTable<Fa::TypeList<States...>> {
-        static constexpr size_t count = sizeof...(States);
-        
-        static constexpr std::array<const char*, sizeof...(States)> names = {
-            Fa::StateDescriptor<States>::name...
-        };
-
-        static constexpr const char* get_name(uint16_t state_id) noexcept {
-            if (state_id < names.size()) {
-                return names[state_id];
-            }
-            return "UNKNOWN_STATE";
-        }
-    };
-
+    
     // =========================================================================
     //  MockMachine
-    //  CRTP Base for Host Model Simulation (Zero Hardware Drivers)
+    //  CRTP Base for Host Model Simulation
     // =========================================================================
 
     template <typename AppEvents, typename GuardList, typename ActionList>
@@ -105,31 +53,24 @@ namespace Fa {
     public:
         MockMachine() {
             if constexpr (GuardCount > 0) {
-                // Fold expression guarantees explicit static ID mapping
                 ( (guard_states_[Fa::type_id_v<Guards, GuardTypeList>] = false), ... );
             }
         }
 
-        // --- Interoperability with Guard<P>::eval(m) in fa_ops.hpp ---
         template <typename P>
         bool eval_guard() const {
             constexpr uint16_t id = Fa::type_id_v<P, GuardTypeList>;
             return guard_states_[id];
         }
 
-        // --- Toggled directly by SimRunner set_guard_table_ ---
         template <typename P>
         void set_guard(bool value) {
             constexpr uint16_t id = Fa::type_id_v<P, GuardTypeList>;
             guard_states_[id] = value;
         }
 
-        // --- Interoperability with Action<P>::execute(m) in fa_ops.hpp ---
         template <typename P>
-        void execute_action() {
-            // Simulation default is a clean non-blocking no-op.
-            // Tracing is handled inside fa_ops.hpp prior to execution.
-        }
+        void execute_action() {}
     };
 
     // =========================================================================
@@ -143,10 +84,15 @@ namespace Fa {
         using AppEvents     = typename MachineType::EventVariant;
         using EventTypeList = typename MachineType::EventTypeList;
         using GuardTypeList = typename MachineType::GuardTypeList;
-        using StateTypeList = typename HsmTraits<MachineType>::StateCatalog;
+        using Traits = HsmTraits<MachineType>;
+        using StateTypeList = typename Traits::StateCatalog;
 
         using PostFn     = void (*)(MachineType&);
         using SetGuardFn = void (*)(MachineType&, bool);
+
+        using EventTable = MetaTable<EventDescriptor, AppEvents>;
+        using StateTable = MetaTable<StateDescriptor, StateTypeList>;
+        using GuardTable = MetaTable<GuardDescriptor, GuardTypeList>;
 
     private:
         template <typename T>
@@ -172,7 +118,6 @@ namespace Fa {
 
         static constexpr auto post_table_ = make_post_table(EventTypeList{});
 
-        // --- 2. O(1) Guard Setter Function Table ---
         template <typename GuardPolicy>
         static void set_guard_impl(MachineType& m, bool value) {
             m.template set_guard<GuardPolicy>(value);
@@ -185,7 +130,6 @@ namespace Fa {
 
         static constexpr auto set_guard_table_ = make_guard_table(GuardTypeList{});
 
-        // --- Tab Completion Helpers ---
         template <typename... Events>
         std::vector<std::string> complete_events_impl(const std::string &prefix, TypeList<Events...>) {
             std::vector<std::string> ans;
@@ -208,10 +152,22 @@ namespace Fa {
 
         std::vector<std::string> complete_guards(const std::string &prefix) {
             std::vector<std::string> ans;
-            for (const auto& item : MetaRegistryGuard<GuardTypeList>::items) {
-                std::string name = item.name;
+            for (const auto& g_name : GuardTable::names) {
+                std::string name{g_name};
                 if (name.rfind(prefix, 0) == 0) {
                     std::string match = "set " + name + " ";
+                    ans.push_back(match);
+                }
+            }
+            return ans;
+        }
+
+        std::vector<std::string> complete_states(const std::string &prefix){
+            std::vector<std::string> ans;
+            for(const auto &name: StateTable::names){
+                std::string sname(name);
+                if(sname.rfind(prefix, 0)==0){
+                    std::string match = "reach " + sname + " ";
                     ans.push_back(match);
                 }
             }
@@ -227,13 +183,98 @@ namespace Fa {
                 return active_runner_->complete_events(input.substr(5).c_str());
             } else if (input.rfind("set ", 0) == 0) {
                 return active_runner_->complete_guards(input.substr(4).c_str());
-            } else {
+            } else if(input.rfind("reach ", 0)==0){
+                return active_runner_ ->complete_states(input.substr(6).c_str());
+            }else {
                 if (std::string("send").rfind(input, 0) == 0) return {"send "};
                 if (std::string("set").rfind(input, 0) == 0)  return {"set "};
                 if (std::string("help").rfind(input, 0) == 0) return {"help"};
                 if (std::string("exit").rfind(input, 0) == 0) return {"exit"};
             }
             return std::vector<std::string>{};
+        }
+
+        std::vector<std::vector<uint16_t>> search(uint16_t start_state_id, uint16_t target_state_id) {
+            if (start_state_id >= Traits::StateCount || target_state_id >= Traits::StateCount) {
+                return {};
+            }
+            if (!Traits::is_leaf_state[target_state_id]) {
+                std::cout << "[SIM] Error: Target state is composite. Targets must be leaf states.\n";
+                return {};
+            }
+            if (start_state_id == target_state_id) {
+                return {};
+            }
+
+            std::vector<bool> visited_states(Traits::StateCount, false);
+            std::vector<uint16_t> current_path;
+            std::vector<std::vector<uint16_t>> routes;
+
+            dfs_search(start_state_id, target_state_id, visited_states, current_path, routes);
+
+            return routes;
+        }
+
+        void dfs_search(
+            uint16_t current_state,
+            uint16_t target_state,
+            std::vector<bool>& visited,
+            std::vector<uint16_t>& current_path,
+            std::vector<std::vector<uint16_t>>& routes
+        ) {
+            if (current_state == target_state) {
+                routes.push_back(current_path);
+                return;
+            }
+
+            visited[current_state] = true;
+
+            const auto& range = Traits::state_transition_ranges[current_state];
+            const uint16_t init_sig_idx = Fa::get_index_v<Fa::Init_sig, AppEvents>;
+            const bool current_is_composite = !Traits::is_leaf_state[current_state];
+
+            for (uint16_t i = 0; i < range.count; ++i) {
+                uint16_t trans_idx = range.start + i;
+                const auto& edge = Traits::transitions[trans_idx];
+                uint16_t next_state = edge.to_state;
+
+                if (current_is_composite && edge.signal_id != init_sig_idx) {
+                    continue;
+                }
+
+                if (!visited[next_state]) {
+                    current_path.push_back(trans_idx);
+
+                    dfs_search(next_state, target_state, visited, current_path, routes);
+
+                    current_path.pop_back();
+                }
+            }
+
+            visited[current_state] = false; 
+        }
+
+        void print_path(std::vector<uint16_t> &path){
+            std::string path_str, dest;
+            for(auto ti: path){
+                auto t = HsmTraits<MachineType>::transitions[ti];
+                auto g = HsmTraits<MachineType>::transition_guards[ti];
+                auto src = std::string(StateTable::names[t.from_leaf]);
+                dest = std::string(StateTable::names[t.to_state]);
+                auto sig = EventTable::names[t.signal_id];
+
+                std::string guard_str;
+                for(size_t i=0; i< g.size(); ++i){
+                    if(g[i]==0){
+                        guard_str += " !"+std::string(GuardTable::names[i]);
+                    }else if(g[i]==1){
+                        guard_str += " " + std::string(GuardTable::names[i]);
+                    }
+                }
+
+                path_str += " \033[1;33m" + src + "\033[0m[\033[1;32m" + sig+ "\033[0m: \033[1;36m" + guard_str + "\033[0m]" + " -> ";
+            }
+            std::cout<<path_str<<"\033[1;35m"<<dest<<"\033[0m"<<"\n";
         }
 
     public:
@@ -264,24 +305,21 @@ namespace Fa {
 
         // --- String Name Lookups at CLI Boundary ---
         bool post_by_name(const std::string& name) {
-            for (const auto& item : MetaRegistry<EventTypeList>::items) {
-                if (name == item.name) {
-                    return post_by_id(item.id);
-                }
+            auto id = EventTable::get_id(name);
+            if(id != EventTable::invalid_id){
+                return post_by_id(id);
             }
             return false;
         }
 
         bool set_guard_by_name(const std::string& name, bool state) {
-            for (const auto& item : MetaRegistryGuard<GuardTypeList>::items) {
-                if (name == item.name) {
-                    return set_guard_by_id(item.id, state);
-                }
+            auto id = GuardTable::get_id(name);
+            if(id != GuardTable::invalid_id){
+                return set_guard_by_id(id, state);
             }
             return false;
         }
 
-        // --- Interactive Linenoise REPL Loop ---
         void run_repl() {
             active_runner_ = this;
 
@@ -332,9 +370,23 @@ namespace Fa {
                 else if (cmd == "state") {
                     using Catalog = typename HsmTraits<MachineType>::StateCatalog;
                     uint16_t id = machine_.state_id;
-                    const char* name = StateTable<StateTypeList>::get_name(id);
+                    const char* name = StateTable::get_name(id);
                     
                     std::cout << "\033[1;35m[Machine]\033[0m State: " << name << " (ID: " << id << ")\n";
+                }
+                else if(cmd == "reach"){
+                    std::string state_name;
+                    if(ss >> state_name){
+                        auto target_id = StateTable::get_id(state_name);
+                        if(target_id != StateTable::invalid_id){
+                            auto routes = search(machine_.state_id, target_id);
+                            std::cout<<"Found "<<routes.size()<<" paths\n";
+                            for(auto &path: routes){
+                                print_path(path);
+                            }
+                        }
+                            
+                    }
                 }
                 else {
                     std::cout << "  Unknown command. Type 'help'.\n";
