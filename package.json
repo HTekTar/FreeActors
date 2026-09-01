@@ -1,7 +1,7 @@
 {
   "name": "freeactors-hsm-editor",
   "publisher": "HTekTar",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "displayName": "FreeActors HSM Editor",
   "scripts": {
     "vscode:prepublish": "npm run compile",
