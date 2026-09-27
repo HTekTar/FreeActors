@@ -1,0 +1,31 @@
+{
+  "name": "Conflict",
+  "signals": ["Tick"],
+  "guards": [],
+  "actions": [],
+  "states": [
+    {
+      "id": "STATE_ROOT",
+      "name": "ROOT",
+      "entry": "entry_ROOT()",
+      "exit": "exit_ROOT()",
+      "transitions": [
+        { "event": "Init_sig", "target": "STATE_A" }
+      ]
+    },
+    {
+      "id": "STATE_A",
+      "name": "A",
+      "parent": "STATE_ROOT",
+      "transitions": [
+        { "event": "Tick", "target": "STATE_B" }
+      ],
+      "local_events": ["Tick/count()"]
+    },
+    {
+      "id": "STATE_B",
+      "name": "B",
+      "parent": "STATE_ROOT"
+    }
+  ]
+}

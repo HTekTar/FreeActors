@@ -5,26 +5,29 @@
 #include <type_traits>
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#ifdef FA_SIM
+#include <string>
+#endif
+
+#include "fa_common.hpp"
 
 namespace Fa{
-    enum class Status {
-        Handled,
-        Ignored,
-        Transitioned
-    };
-    // Base marker for the top-level absolute root state
-    struct None {
-        template <typename M, typename E>
-        static Status Dispatch(M&, E const&) { return Status::Ignored; }
-    };
-
-    // Standard uniform function pointer type for the runtime execution engine
-    template<typename M, typename E>
-    using HandlerRef = Status (*) (M &, E const &);
-
     // --- Metaprogramming Path Utilities ---
     template <typename ...Ts> struct TypeList { using FirstType = None; };
     template <typename T, typename ...Ts> struct TypeList<T, Ts...> { using FirstType = T; };
+
+    //typelist size
+    template<typename List>
+    struct type_list_size;
+
+    template<typename ...Ts>
+    struct type_list_size<TypeList<Ts...>>{
+        static constexpr size_t value = sizeof...(Ts);
+    };
+
+    template<typename List>
+    inline constexpr size_t type_list_size_v = type_list_size<List>::value;
 
     template<typename List, typename ...Acc> struct ReverseList;
     template <typename ...Acc> struct ReverseList<TypeList<>, Acc...> { using Type = TypeList<Acc...>; };
@@ -128,5 +131,170 @@ namespace Fa{
 
     template <typename T, typename List>
     inline constexpr uint16_t type_id_v = TypeId<T, List>::value;
+
+    template <template <typename> class Pred, typename InList, typename OutList = TypeList<>>
+    struct filter_types;
+
+    template <template <typename> class Pred, typename... Out>
+    struct filter_types<Pred, TypeList<>, TypeList<Out...>> {
+        using type = TypeList<Out...>;
+    };
+
+    template <template <typename> class Pred, typename Head, typename... Tail, typename... Out>
+    struct filter_types<Pred, TypeList<Head, Tail...>, TypeList<Out...>> {
+        using type = typename std::conditional_t<
+            Pred<Head>::value,
+            filter_types<Pred, TypeList<Tail...>, TypeList<Out..., Head>>,
+            filter_types<Pred, TypeList<Tail...>, TypeList<Out...>>
+        >::type;
+    };
+
+    template <template <typename> class Pred, typename... Ts>
+    using filter_types_t = typename filter_types<Pred, TypeList<Ts...>>::type;
+
+    template<typename T, typename Variant>
+    struct variant_has_type;
+
+    template<typename T, typename ...Ts>
+    struct variant_has_type<T, std::variant<Ts...>>{
+        static constexpr bool value = (std::is_same_v<T, Ts> || ...); 
+    };
+    template<typename T, typename Variant>
+    inline constexpr bool variant_has_type_v = variant_has_type<T, Variant>::value;
+
+    template<typename Actor, typename Evt, typename=void>
+    struct actor_accepts_event: std::false_type{};
+
+    template <typename Actor, typename Evt>
+    struct actor_accepts_event<Actor, Evt, std::void_t<typename Actor::EventType>> {
+        static constexpr bool value = variant_has_type<Evt, typename Actor::EventType>::value;
+    };
+
+    template <typename Actor, typename Evt>
+    inline constexpr bool actor_accepts_event_v = actor_accepts_event<Actor, Evt>::value;
+
+    template <typename T, typename = void>
+    struct is_hsm_actor : std::false_type {};
+
+    template <typename T>
+    struct is_hsm_actor<T, std::void_t<typename T::EventType>> : std::true_type {};
+
+    template <typename T>
+    inline constexpr bool is_hsm_actor_v = is_hsm_actor<T>::value;
+
+
+    template <typename T, typename = void>
+    struct is_time_service : std::false_type{};
+
+    // Periodic process module: has create_task() (e.g. derives from TimeServiceInterface).
+    // Application::init creates its task.
+    template<typename T>
+    struct is_time_service<T, std::void_t<decltype(T::create_task())>>: std::true_type{};
+
+    template <typename T>
+    inline constexpr bool is_time_service_v = is_time_service<T>::value;
+
+    // Module with a tick hook: Application::on_tick_isr calls T::on_tick_isr() every tick (interrupt context).
+    template <typename T, typename = void>
+    struct has_tick_hook : std::false_type{};
+
+    template<typename T>
+    struct has_tick_hook<T, std::void_t<decltype(T::on_tick_isr())>>: std::true_type{};
+
+    template <typename T>
+    inline constexpr bool has_tick_hook_v = has_tick_hook<T>::value;
+
+    template <typename E, typename ...Ms>
+    struct FindActorForEvent;
+
+    template<typename E>
+    struct FindActorForEvent<E>{
+        using type = void;
+    };
+
+    template<typename E, typename Head, typename ... Tail>
+    struct FindActorForEvent<E, Head, Tail...>{
+        template <bool Match, typename Dummy = void>
+        struct Resolver{
+            using type = typename FindActorForEvent<E, Tail...>::type;
+        };
+
+        template<typename Dummy>
+        struct Resolver<true, Dummy>{
+            using type = Head;
+        };
+
+        using type = typename Resolver<actor_accepts_event_v<Head, E>>::type;
+    };
+
+    template <typename E, typename ...Ms>
+    using find_actor_for_event_t = typename FindActorForEvent<E, Ms...>::type;
+
+    // Detection idiom: is_detected_v<Op, Args...> is true when Op<Args...> is well-formed.
+    // Used by the generated hardware contracts (<machine>_hw_contract.hpp).
+    namespace detail {
+        template <typename AlwaysVoid, template <typename...> class Op, typename... Args>
+        struct detector : std::false_type {};
+
+        template <template <typename...> class Op, typename... Args>
+        struct detector<std::void_t<Op<Args...>>, Op, Args...> : std::true_type {};
+    }
+
+    template <template <typename...> class Op, typename... Args>
+    inline constexpr bool is_detected_v = detail::detector<void, Op, Args...>::value;
+
+    // HwPolicy::instance_id if the policy declares one, else 0 (v1 has one instance per machine).
+    template <typename Policy, typename = void>
+    struct InstanceIdOf { static constexpr uint8_t value = 0; };
+
+    template <typename Policy>
+    struct InstanceIdOf<Policy, std::void_t<decltype(Policy::instance_id)>> {
+        static constexpr uint8_t value = Policy::instance_id;
+    };
+
+    // HwPolicy::instance_name if the policy declares one (FA_SIM trace label), else "".
+    template <typename Policy, typename = void>
+    struct InstanceNameOf { static constexpr const char* value = ""; };
+
+    template <typename Policy>
+    struct InstanceNameOf<Policy, std::void_t<decltype(Policy::instance_name)>> {
+        static constexpr const char* value = Policy::instance_name;
+    };
+
+#ifdef FA_SIM
+    template < template <typename> class DescriptorPolicy, typename container>
+    struct MetaTable;
+
+    template < template <typename> class DescriptorPolicy, typename... Items>
+    struct MetaTable<DescriptorPolicy, TypeList<Items...>> {
+        using List = TypeList<Items...>;
+        static constexpr size_t count = sizeof...(Items);
+        static constexpr uint16_t invalid_id = 0xFFFF;
+
+        static constexpr std::array<const char*, count> names = {
+            DescriptorPolicy<Items>::name...
+        };
+
+        static constexpr const char* get_name(uint16_t id) noexcept {
+            if (id < count) {
+                return names[id];
+            }
+            return "UNKNOWN";
+        }
+
+        static uint16_t get_id(std::string const &name) noexcept{
+            for(size_t i=0; i < count; ++i){
+                if(names[i]==name){
+                    return static_cast<uint16_t>(i);
+                }
+            }
+            return invalid_id;
+        } 
+    };
+
+    template<template <typename> class DescriptorPolicy, typename ...Events>
+    struct MetaTable<DescriptorPolicy, std::variant<Events ...>> : MetaTable<DescriptorPolicy, TypeList<Events ...>>{};
+
+#endif // FA_SIM
 }
 #endif

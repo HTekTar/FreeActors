@@ -1,0 +1,150 @@
+{
+  "name": "Timebomb",
+  "signals": [
+    "Tick",
+    "ButtonPressed"
+  ],
+  "guards": [
+    "TimeUp"
+  ],
+  "actions": [],
+  "states": [
+    {
+      "id": "STATE_ROOT",
+      "name": "ROOT",
+      "x": 50,
+      "y": 51.1764705882353,
+      "width": 830.6666666666667,
+      "height": 572,
+      "entry": "entry_ROOT()",
+      "exit": "exit_ROOT()",
+      "transitions": [
+        {
+          "event": "Init_sig",
+          "target": "STATE_5828",
+          "ctrlX": 616.6214185012024,
+          "ctrlY": 120.75286279254126
+        }
+      ]
+    },
+    {
+      "id": "STATE_2405",
+      "name": "ARMED",
+      "parent": "STATE_ROOT",
+      "x": 95,
+      "y": 162.4264705882353,
+      "width": 458,
+      "height": 384,
+      "entry": "entry_ARMED",
+      "exit": "exit_ARMED",
+      "transitions": [
+        {
+          "event": "Init_sig",
+          "target": "STATE_4409"
+        },
+        {
+          "event": "ButtonPressed",
+          "target": "STATE_5828",
+          "ctrlX": 657.0181927696117,
+          "ctrlY": 386.8182228860436
+        }
+      ]
+    },
+    {
+      "id": "STATE_5828",
+      "name": "DISARMED",
+      "parent": "STATE_ROOT",
+      "x": 624.3333333333333,
+      "y": 205.3431372549021,
+      "width": 180,
+      "height": 90,
+      "entry": "entry_DISARMED",
+      "exit": "exit_DISARMED",
+      "transitions": [
+        {
+          "event": "ButtonPressed",
+          "target": "STATE_2405",
+          "ctrlX": 536.0181927696117,
+          "ctrlY": 108.8182228860436
+        }
+      ]
+    },
+    {
+      "id": "STATE_4409",
+      "name": "WAIT",
+      "parent": "STATE_2405",
+      "x": 225,
+      "y": 256.1764705882353,
+      "width": 180,
+      "height": 90,
+      "entry": "entry_WAIT",
+      "exit": "exit_WAIT",
+      "transitions": [
+        {
+          "event": "ButtonPressed",
+          "target": "STATE_4410"
+        }
+      ]
+    },
+    {
+      "id": "STATE_4410",
+      "name": "LEDON",
+      "parent": "STATE_2405",
+      "x": 110,
+      "y": 413.6764705882353,
+      "width": 180,
+      "height": 90,
+      "entry": "entry_LEDON",
+      "exit": "exit_LEDON",
+      "transitions": [
+        {
+          "event": "Tick",
+          "target": "STATE_4411"
+        }
+      ]
+    },
+    {
+      "id": "STATE_4411",
+      "name": "LEDOFF",
+      "parent": "STATE_2405",
+      "x": 367.33333333333337,
+      "y": 434.0931372549021,
+      "width": 180,
+      "height": 90,
+      "entry": "entry_LEDOFF",
+      "exit": "exit_LEDOFF",
+      "transitions": [
+        {
+          "event": "Tick",
+          "target": "STATE_4410",
+          "ctrlX": 328.7902153620861,
+          "ctrlY": 436.8040659305269
+        },
+        {
+          "event": "Tick",
+          "target": "STATE_5634",
+          "guard": "TimeUp",
+          "ctrlX": 622.8701523642786,
+          "ctrlY": 441.9915742871014
+        }
+      ]
+    },
+    {
+      "id": "STATE_5634",
+      "name": "BOOM",
+      "parent": "STATE_ROOT",
+      "x": 657.9999999999997,
+      "y": 499.0931372549018,
+      "width": 180,
+      "height": 90,
+      "entry": "entry_BOOM",
+      "exit": "exit_BOOM",
+      "transitions": [
+        {
+          "event": "ButtonPressed",
+          "target": "STATE_5828"
+        }
+      ]
+    }
+  ]
+}

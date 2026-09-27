@@ -1,0 +1,45 @@
+{
+  "name": "TransitionAction",
+  "signals": ["Leave", "Back"],
+  "guards": [],
+  "actions": [],
+  "states": [
+    {
+      "id": "STATE_ROOT",
+      "name": "ROOT",
+      "entry": "entry_ROOT()",
+      "exit": "exit_ROOT()",
+      "transitions": [
+        { "event": "Init_sig", "target": "STATE_OUTER" }
+      ]
+    },
+    {
+      "id": "STATE_OUTER",
+      "name": "OUTER",
+      "parent": "STATE_ROOT",
+      "entry": "entry_OUTER",
+      "exit": "exit_OUTER",
+      "transitions": [
+        { "event": "Init_sig", "target": "STATE_INNER" },
+        { "event": "Back / stash", "guard": "allowed()", "target": "STATE_OTHER" }
+      ]
+    },
+    {
+      "id": "STATE_INNER",
+      "name": "INNER",
+      "parent": "STATE_OUTER",
+      "entry": "entry_INNER",
+      "exit": "exit_INNER",
+      "transitions": [
+        { "event": "Leave / cleanup()", "target": "STATE_OTHER" }
+      ]
+    },
+    {
+      "id": "STATE_OTHER",
+      "name": "OTHER",
+      "parent": "STATE_ROOT",
+      "entry": "entry_OTHER",
+      "exit": "exit_OTHER"
+    }
+  ]
+}

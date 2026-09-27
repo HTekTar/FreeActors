@@ -4,7 +4,16 @@ src/**
 .gitignore
 .yarnrc
 vscode-extension.iml
+tsconfig.json
 *.tsbuildinfo
-!freeactors_lib/
-!out/freeactors_lib/
+**/*.map
 
+!freeactors_lib/**
+!out/
+
+
+freeactors_lib/fa_mempool.hpp
+freeactors_lib/linenoise.hpp
+out/freeactors_lib/fa_mempool.hpp
+out/freeactors_lib/linenoise.hpp
+tests/**

@@ -2,6 +2,7 @@
 #define FA_TRACE_H
 
 #include "fa_common.hpp"
+#include "fa_util.hpp"
 
 #ifdef FA_SIM
 #include <iostream>
@@ -41,47 +42,75 @@ namespace Fa {
 
 #else
 
+// Target builds: tracing is compiled out unless FA_TRACE is defined. With FA_TRACE, every guard evaluation,
+// action, transition and dispatched event emits one 32-bit trace_token through emit_trace_token(), which the
+// application provides (e.g. an ITM/SWO channel or a RAM ring buffer).
 namespace Fa {
 
     struct [[gnu::packed]] trace_token {
-        uint32_t machine_id  : 5;
-        uint32_t instance_id : 3;
-        uint32_t trace_cat   : 2;
-        uint32_t guard_state : 1;
+        uint32_t machine_id  : 5;   // not yet populated (0)
+        uint32_t instance_id : 3;   // not yet populated (0); reserved for multi-instance support
+        uint32_t trace_cat   : 2;   // TraceCategory
+        uint32_t guard_state : 1;   // guard result, for TRACE_CAT_GUARD
         uint32_t reserved    : 5;
-        uint32_t token_id    : 16;
+        uint32_t token_id    : 16;  // descriptor id, event index, or (src_state << 8 | dst_state)
     };
 
     static_assert(sizeof(trace_token) == 4, "Error: trace_token struct padding layout must be exactly 4 bytes!");
 
+    enum TraceCategory : uint32_t {
+        TRACE_CAT_EVENT      = 0,
+        TRACE_CAT_GUARD      = 1,
+        TRACE_CAT_ACTION     = 2,
+        TRACE_CAT_TRANSITION = 3
+    };
+
+#ifdef FA_TRACE
     extern void emit_trace_token(trace_token token);
 
-    constexpr uint16_t TRACE_CAT_EVENT      = 0x0000;
-    constexpr uint16_t TRACE_CAT_GUARD      = 0x4000;
-    constexpr uint16_t TRACE_CAT_ACTION     = 0x8000;
-    constexpr uint16_t TRACE_CAT_TRANSITION = 0xC000;
+    namespace detail {
+        inline void emit_trace(uint32_t category, uint32_t id, bool guard_state = false) {
+            trace_token token{};
+            token.trace_cat = category;
+            token.guard_state = guard_state ? 1u : 0u;
+            token.token_id = id & 0xFFFFu;
+            emit_trace_token(token);
+        }
+    }
 
     template <typename M, typename P>
     inline void trace_guard(bool passed) {
-        uint16_t token = TRACE_CAT_GUARD | (P::id & 0x3FFF);
-        if (passed) token |= 0x2000;
-        emit_trace_token(token);
+        detail::emit_trace(TRACE_CAT_GUARD, GuardDescriptor<P>::id, passed);
     }
 
     template <typename M, typename P>
-    inline void trace_action(trace_token token) {
-        emit_trace_token(TRACE_CAT_ACTION | (P::id & 0x3FFF));
+    inline void trace_action() {
+        detail::emit_trace(TRACE_CAT_ACTION, ActionDescriptor<P>::id);
     }
 
     template <typename M, typename Src, typename Dest>
-    inline void trace_transition(trace_token token) {
-        uint16_t token = TRACE_CAT_TRANSITION | ((Src::id & 0x7F) << 7) | (Dest::id & 0x7F);
-        emit_trace_token(token);
+    inline void trace_transition() {
+        using Catalog = typename HsmTraits<M>::StateCatalog;
+        detail::emit_trace(TRACE_CAT_TRANSITION, (type_id_v<Src, Catalog> << 8) | type_id_v<Dest, Catalog>);
     }
 
-    inline void trace_event(uint16_t event_index) {
-        emit_trace_token(TRACE_CAT_EVENT | (event_index & 0x3FFF));
+    template <typename EventVariant>
+    inline void trace_event(EventVariant const& e) {
+        detail::emit_trace(TRACE_CAT_EVENT, static_cast<uint32_t>(e.index()));
     }
+#else
+    template <typename M, typename P>
+    inline void trace_guard(bool) {}
+
+    template <typename M, typename P>
+    inline void trace_action() {}
+
+    template <typename M, typename Src, typename Dest>
+    inline void trace_transition() {}
+
+    template <typename EventVariant>
+    inline void trace_event(EventVariant const&) {}
+#endif // FA_TRACE
 }
 
 #endif //FA_SIM

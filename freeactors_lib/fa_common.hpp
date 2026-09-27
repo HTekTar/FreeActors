@@ -2,9 +2,28 @@
 #ifndef FA_COMMON_HPP
 #define FA_COMMON_HPP
 
-#include "fa_util.hpp"
+#include <cstddef>
+#include <cstdint>
 
 namespace Fa{
+    enum class Status {
+        Handled,
+        Ignored,
+        Transitioned
+    };
+    // Base marker for the top-level absolute root state
+    struct None {
+        template <typename M, typename E>
+        static Status Dispatch(M&, E const&) { return Status::Ignored; }
+    };
+
+
+
+    // Standard uniform function pointer type for the runtime execution engine
+    template<typename M, typename E>
+    using HandlerRef = Status (*) (M &, E const &);
+
+
     struct Enter_sig {};
     struct Exit_sig  {};
     struct Init_sig  {};
@@ -29,44 +48,28 @@ namespace Fa{
 
     template <typename E>
     struct ActionDescriptor;
-}
-#ifdef FA_SIM
-#include <string>
 
-namespace Fa{
-    template < template <typename> class DescriptorPolicy, typename container>
-    struct MetaTable;
+    template <typename A>
+    struct ActorTraits;
 
-    template < template <typename> class DescriptorPolicy, typename... Items>
-    struct MetaTable<DescriptorPolicy, TypeList<Items...>> {
-        using List = TypeList<Items...>;
-        static constexpr size_t count = sizeof...(Items);
-        static constexpr uint16_t invalid_id = 0xFFFF;
-
-        static constexpr std::array<const char*, count> names = {
-            DescriptorPolicy<Items>::name...
-        };
-
-        static constexpr const char* get_name(uint16_t id) noexcept {
-            if (id < count) {
-                return names[id];
-            }
-            return "UNKNOWN";
+    // Default actor context: routes nothing. Used standalone and as the target default for Ctx.
+    //
+    // Context interface (what Hsm::post/schedule/cancel forward to):
+    //   post(evt)                                     deliver evt to its receiving actor
+    //   schedule<Owner>(evt, ms, periodic) -> bool    (re)start Owner's timer for evt's type; false if it can't
+    //   cancel<Owner, Evt>()                          stop Owner's pending timer for Evt, if any
+    struct NullContext {
+        template <typename Owner, typename Evt>
+        static bool schedule(Evt const& /*evt*/, uint16_t /*ms*/, bool /*periodic*/) {
+            return false;
         }
 
-        static uint16_t get_id(std::string const &name) noexcept{
-            for(size_t i=0; i < count; ++i){
-                if(names[i]==name){
-                    return static_cast<uint16_t>(i);
-                }
-            }
-            return invalid_id;
-        } 
-    };
+        template <typename Owner, typename Evt>
+        static void cancel() {}
 
-    template<template <typename> class DescriptorPolicy, typename ...Events>
-    struct MetaTable<DescriptorPolicy, std::variant<Events ...>> : MetaTable<DescriptorPolicy, TypeList<Events ...>>{};
+        template <typename Evt>
+        static void post(Evt const& /*evt*/) {}
+    };
 }
-#endif //FA_SIM
 
 #endif

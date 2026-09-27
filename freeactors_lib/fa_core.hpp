@@ -4,19 +4,17 @@
 #include <cstdint>
 #include <type_traits>
 
-#ifdef FA_SIM
+// FreeActors' own checks: assert() in the simulator, configASSERT on target when the application defines it.
+// FA_NO_ASSERT turns them off (e.g. release builds that keep FreeRTOS's own configASSERT).
+#if defined(FA_NO_ASSERT)
+    #define FA_ASSERT(x) ((void)0)
+#elif defined(FA_SIM)
     #include <cassert>
-    #ifndef configASSERT
-        #define configASSERT(x) assert(x)
-    #endif
+    #define FA_ASSERT(x) assert(x)
+#elif defined(configASSERT)
+    #define FA_ASSERT(x) configASSERT(x)
 #else
-    #include "FreeRTOS.h"
-    #include "queue.h"
-    #include "task.h"
-
-    #ifndef configASSERT
-        #define configASSERT(x) ((void)0)
-    #endif
+    #define FA_ASSERT(x) ((void)0)
 #endif
 
 #include "fa_util.hpp"
@@ -31,9 +29,11 @@ namespace Fa {
         using Parent = ParentState;
         using Self = Derived;
 
-        template <typename DestState, typename M>
+        // Requests an external transition; Act (optional) runs between the exit and entry actions.
+        // Sig names the triggering signal when Act takes the event payload.
+        template <typename DestState, typename Act = NoAction, typename Sig = void, typename M>
         static Status TransitionTo(M &machine) {
-            machine.pending_transition = &Transition<Self, DestState>::template execute<M, E>;
+            machine.pending_transition = &Transition<Self, DestState, Act, Sig>::template execute<M, E>;
             return Status::Transitioned;
         }
 
@@ -49,7 +49,9 @@ namespace Fa {
         template<typename M>
         static Status Dispatch(M &machine, E const &event) {
             if (event.index() == get_index_v<ExitToParent_sig, E>) {
-                Derived::template handle<M>(machine, event); 
+                // Unwinding toward a transition's source: run this state's exit action and step up one
+                // level. ExitToParent_sig itself must not reach handle(), whose default case would pass it up via Super().
+                Derived::template handle<M>(machine, E{Exit_sig{}});
                 if constexpr (!std::is_same_v<ParentState, None>) {
                     machine.handler = &ParentState::template Dispatch<M>;
                 } else {
@@ -68,108 +70,75 @@ namespace Fa {
             : handler(HsmTraits<M>::InitialState), 
               pending_transition(nullptr),
               state_id(HsmTraits<M>::InitialStateId)
-#ifndef FA_SIM
-            , queue(nullptr)
-#endif
         {}
-
-        void start(uint8_t prio, uint32_t queueLen, uint32_t stackSize) {
-            configASSERT(handler != nullptr);
-
-#ifndef FA_SIM
-            configASSERT(queue == nullptr);
-
-            queue = xQueueCreate(queueLen, sizeof(E));
-            configASSERT(queue != NULL);
-
-            BaseType_t xResult = xTaskCreate(
-                eventLoop, 
-                "Active_object", 
-                static_cast<configSTACK_DEPTH_TYPE>(stackSize), 
-                this, 
-                prio, 
-                NULL
-            );
-            configASSERT(xResult == pdPASS);
-#else
-            (void)prio;
-            (void)queueLen;
-            (void)stackSize;
-#endif
-        }
-
-        void postFromTask(E const &e) {
-#ifndef FA_SIM
-            configASSERT(queue != NULL);
-            BaseType_t status = xQueueSendToBack(queue, (void *)&e, portMAX_DELAY);
-            configASSERT(status == pdPASS);
-#else
-            // Direct sync dispatch for simulation tests if no queue runtime is provided
-            dispatch(static_cast<M&>(*this), e);
-#endif
-        }
-
-        void postFromISR(E const &e) {
-#ifndef FA_SIM
-            configASSERT(queue != NULL);
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            BaseType_t status = xQueueSendToBackFromISR(queue, (void *)&e, &xHigherPriorityTaskWoken);
-            configASSERT(status == pdPASS);
-            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-#else
-            dispatch(static_cast<M&>(*this), e);
-#endif
-        }
 
         void unwindToState(HandlerRef<M, E> target_source) {
             while (handler != target_source) {
-                configASSERT(handler != nullptr);
+                FA_ASSERT(handler != nullptr);
                 handler(static_cast<M&>(*this), E{ExitToParent_sig{}});
             }
         }
         
+        // Starts the machine: enters the top state (runs its entry action), then follows initial transitions.
+        static void start(M &machine) {
+            dispatch(machine, E{Enter_sig{}});
+            dispatch(machine, E{Init_sig{}});
+        }
+
         static void dispatch(M &machine, E const &e) {
-            configASSERT(machine.handler != nullptr);
+            FA_ASSERT(machine.handler != nullptr);
 
             trace_event<E>(e);
+
+            // The transition receives the event that triggered it, so its action can read the payload.
+            E const init{Init_sig{}};
+            E const *trigger = &e;
 
             Status s = machine.handler(machine, e);
             while (s == Status::Transitioned && machine.pending_transition != nullptr) {
                 auto transition_to_run = machine.pending_transition;
                 machine.pending_transition = nullptr;
                 
-                transition_to_run(machine);
+                transition_to_run(machine, *trigger);
 
-                configASSERT(machine.handler != nullptr);
-                s = machine.handler(machine, E{Init_sig{}});
+                FA_ASSERT(machine.handler != nullptr);
+                trigger = &init;
+                s = machine.handler(machine, init);
             }
+        }
+
+        // M::Context is looked up lazily: M is still incomplete while Hsm<M, E> is being instantiated as its base.
+        //
+        // Timers are owned by this actor and identified by their event type: at most one pending timer per
+        // (this actor, event type). Scheduling a type that is already pending restarts it; cancel<Evt>() stops it.
+        // periodic = true re-arms every ms until cancelled (drift-free: counted from the previous expiry).
+        // Returns false if the timer could not be armed (e.g. the application's timer pool is full).
+        template <typename Evt>
+        bool schedule(Evt const &evt, uint16_t ms, bool periodic = false){
+            return M::Context::template schedule<M>(evt, ms, periodic);
+        }
+
+        template <typename Evt>
+        void cancel(){
+            M::Context::template cancel<M, Evt>();
+        }
+
+        // Same, with the type deduced from a value: this->cancel(Tick{}). Inside an actor (a class template)
+        // this form avoids having to write this->template cancel<Tick>().
+        template <typename Evt>
+        void cancel(Evt const &){
+            cancel<Evt>();
+        }
+
+        template <typename Evt>
+        void post(Evt const &evt){
+            M::Context::post(evt);
         }
 
         HandlerRef<M, E> handler;
-        void (*pending_transition)(M &m);
+        void (*pending_transition)(M &m, E const &e);
         uint16_t state_id;
-
-    private:
-#ifndef FA_SIM
-        static void eventLoop(void *pdata) {
-            configASSERT(pdata != NULL);
-            auto &machine = *static_cast<M*>(pdata);
-
-            dispatch(machine, E{Init_sig{}});
-
-            while (1) {
-                E e; 
-                BaseType_t rxStatus = xQueueReceive(machine.queue, &e, portMAX_DELAY);
-                configASSERT(rxStatus == pdTRUE);
-
-                dispatch(machine, e); 
-            }
-        }
-
-        QueueHandle_t queue;
-#endif
     };
-
 }
 
 #endif // FA_CORE_HPP

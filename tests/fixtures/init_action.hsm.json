@@ -1,0 +1,35 @@
+{
+  "name": "InitAction",
+  "signals": ["Go"],
+  "guards": [],
+  "actions": [],
+  "states": [
+    {
+      "id": "STATE_ROOT",
+      "name": "ROOT",
+      "entry": "entry_ROOT()",
+      "exit": "exit_ROOT()",
+      "transitions": [
+        { "event": "Init_sig/rootSetup()", "target": "STATE_OUTER" }
+      ]
+    },
+    {
+      "id": "STATE_OUTER",
+      "name": "OUTER",
+      "parent": "STATE_ROOT",
+      "entry": "entry_OUTER",
+      "exit": "exit_OUTER",
+      "transitions": [
+        { "event": "Init_sig / setup()", "target": "STATE_INNER" }
+      ]
+    },
+    {
+      "id": "STATE_INNER",
+      "name": "INNER",
+      "parent": "STATE_OUTER",
+      "entry": "entry_INNER",
+      "exit": "exit_INNER",
+      "local_events": ["Go/count()"]
+    }
+  ]
+}

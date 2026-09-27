@@ -102,13 +102,14 @@ namespace Fa {
 
         MachineType& machine_;
         ReplEngine repl_;
+        std::vector<std::vector<uint16_t>> routes;
 
         static inline SimRunner* active_runner_ = nullptr;
 
         // --- 1. O(1) Event Post Function Table ---
         template <typename EventType>
         static void post_impl(MachineType& m) {
-            m.postFromTask(EventType{});
+            MachineType::dispatch(m, EventType{});
         }
 
         template <typename... Events>
@@ -174,6 +175,34 @@ namespace Fa {
             return ans;
         }
 
+        std::vector<std::string> complete_commands(const std::string &prefix){
+            std::vector<std::string> const commands = {
+                "send ","set ","help ","exit","quit","reach ","print ","take "
+            };
+            std::vector<std::string> ans;
+            for(const auto &command: commands){
+                if(command.rfind(prefix, 0)==0){
+                    std::string match = command;
+                    ans.push_back(match);
+                }
+            }
+            return ans;
+        }
+
+        std::vector<std::string> complete_printables(const std::string &prefix){
+            std::vector<std::string> const commands = {
+                "routes", "state"
+            };
+            std::vector<std::string> ans;
+            for(const auto &command: commands){
+                if(command.rfind(prefix, 0)==0){
+                    std::string match = "print " + command;
+                    ans.push_back(match);
+                }
+            }
+            return ans;
+        }
+
         static std::vector<std::string> completion_callback(const std::string &input) {
             if (!active_runner_) return std::vector<std::string>{};
 
@@ -185,42 +214,39 @@ namespace Fa {
                 return active_runner_->complete_guards(input.substr(4).c_str());
             } else if(input.rfind("reach ", 0)==0){
                 return active_runner_ ->complete_states(input.substr(6).c_str());
+            } else if(input.rfind("print ", 0)==0){
+                return active_runner_->complete_printables(input.substr(6));
             }else {
-                if (std::string("send").rfind(input, 0) == 0) return {"send "};
-                if (std::string("set").rfind(input, 0) == 0)  return {"set "};
-                if (std::string("help").rfind(input, 0) == 0) return {"help"};
-                if (std::string("exit").rfind(input, 0) == 0) return {"exit"};
+                return active_runner_->complete_commands(input);
             }
             return std::vector<std::string>{};
         }
 
-        std::vector<std::vector<uint16_t>> search(uint16_t start_state_id, uint16_t target_state_id) {
+        void search(uint16_t start_state_id, uint16_t target_state_id) {
+            routes.clear();
             if (start_state_id >= Traits::StateCount || target_state_id >= Traits::StateCount) {
-                return {};
+                return;
             }
             if (!Traits::is_leaf_state[target_state_id]) {
                 std::cout << "[SIM] Error: Target state is composite. Targets must be leaf states.\n";
-                return {};
+                return;
             }
             if (start_state_id == target_state_id) {
-                return {};
+                return;
             }
 
             std::vector<bool> visited_states(Traits::StateCount, false);
             std::vector<uint16_t> current_path;
-            std::vector<std::vector<uint16_t>> routes;
+            
 
-            dfs_search(start_state_id, target_state_id, visited_states, current_path, routes);
-
-            return routes;
+            dfs_search(start_state_id, target_state_id, visited_states, current_path);
         }
 
         void dfs_search(
             uint16_t current_state,
             uint16_t target_state,
             std::vector<bool>& visited,
-            std::vector<uint16_t>& current_path,
-            std::vector<std::vector<uint16_t>>& routes
+            std::vector<uint16_t>& current_path
         ) {
             if (current_state == target_state) {
                 routes.push_back(current_path);
@@ -245,7 +271,7 @@ namespace Fa {
                 if (!visited[next_state]) {
                     current_path.push_back(trans_idx);
 
-                    dfs_search(next_state, target_state, visited, current_path, routes);
+                    dfs_search(next_state, target_state, visited, current_path);
 
                     current_path.pop_back();
                 }
@@ -272,9 +298,27 @@ namespace Fa {
                     }
                 }
 
-                path_str += " \033[1;33m" + src + "\033[0m[\033[1;32m" + sig+ "\033[0m: \033[1;36m" + guard_str + "\033[0m]" + " -> ";
+                path_str += " \033[1;33m" + src + "\033[0m[\033[1;32m" + sig+ "\033[0m: \033[1;36m" + guard_str + "\033[0m]" + " \n-> ";
             }
-            std::cout<<path_str<<"\033[1;35m"<<dest<<"\033[0m"<<"\n";
+            std::cout<<path_str<<"\033[1;35m"<<dest<<"\033[0m"<<"\n\n";
+        }
+
+        void take_path(std::vector<uint16_t> &path){
+            for(auto ti: path){
+                auto t = HsmTraits<MachineType>::transitions[ti];
+                auto g = HsmTraits<MachineType>::transition_guards[ti];
+
+                for(size_t i=0; i< g.size(); ++i){
+                    if(g[i]==0){
+                        set_guard_by_id(i, false);
+                    }else if(g[i]==1){
+                        set_guard_by_id(i, true);
+                    }
+                }
+                if(t.signal_id != EventTable::get_id("Init_sig")){
+                    post_by_id(t.signal_id);
+                }
+            }
         }
 
     public:
@@ -283,7 +327,7 @@ namespace Fa {
         }
 
         void init() {
-            machine_.postFromTask(AppEvents{Init_sig{}});
+            MachineType::start(machine_);
         }
 
         // --- Fast O(1) Operations ---
@@ -340,9 +384,13 @@ namespace Fa {
                 ss >> cmd;
 
                 if (cmd == "help") {
-                    std::cout << "  send <EventName>      - Post event onto Active Object queue\n";
-                    std::cout << "  set <Guard> <0|1>     - Override mock guard policy state\n";
-                    std::cout << "  exit                  - Terminate simulation run\n";
+                    std::cout << "\tsend <EventName>      - Post event onto Active Object queue\n";
+                    std::cout << "\tset <Guard> <0|1>     - Override mock guard policy state\n";
+                    std::cout << "\tprint <state|routes>  - Print the current state|cached routes\n";
+                    std::cout << "\treach <state>         - cache all available paths to the target state\n";
+                    std::cout << "\ttake <paht number>    - execute the selected path transition to the target state\n";
+                    std::cout << "\texit                  - Terminate simulation run\n";
+                    std::cout << "\thelp                  - prints this help menu\n";
                 } 
                 else if (cmd == "send") {
                     std::string evt_name;
@@ -367,25 +415,47 @@ namespace Fa {
                         std::cout << "  Usage: set <GuardName> <0|1>\n";
                     }
                 } 
-                else if (cmd == "state") {
-                    using Catalog = typename HsmTraits<MachineType>::StateCatalog;
-                    uint16_t id = machine_.state_id;
-                    const char* name = StateTable::get_name(id);
-                    
-                    std::cout << "\033[1;35m[Machine]\033[0m State: " << name << " (ID: " << id << ")\n";
+                else if(cmd == "print"){
+                    std::string printable;
+                    if(ss >> printable){
+                        if (printable == "state") {
+                            using Catalog = typename HsmTraits<MachineType>::StateCatalog;
+                            uint16_t id = machine_.state_id;
+                            const char* name = StateTable::get_name(id);
+                            
+                            std::cout << "\t\033[1;35m" << name << "\033[0m\n";
+                        }else if(printable == "routes"){
+                            size_t i=0;
+                            for(auto &path: routes){
+                                std::cout<<"Path "<<++i<<"\n";
+                                print_path(path);
+                            }
+                        }
+                    }
                 }
                 else if(cmd == "reach"){
                     std::string state_name;
                     if(ss >> state_name){
                         auto target_id = StateTable::get_id(state_name);
                         if(target_id != StateTable::invalid_id){
-                            auto routes = search(machine_.state_id, target_id);
+                            search(machine_.state_id, target_id);
                             std::cout<<"Found "<<routes.size()<<" paths\n";
-                            for(auto &path: routes){
-                                print_path(path);
-                            }
+                            std::cout<<"Use 'print routes' to see available routes.\n";
+                            std::cout<<"Use 'take <path number>' to execute transitions\n";
                         }
                             
+                    }
+                }else if(cmd == "take"){
+                    size_t idx;
+                    if(ss >> idx){
+                        idx--;
+                        if(idx < routes.size()){
+                            take_path(routes[idx]);
+                        }else{
+                            std::cout<<"index out of range\n";
+                        }
+                    }else{
+                        std::cout<<"Ussage: take <path number>\n";
                     }
                 }
                 else {

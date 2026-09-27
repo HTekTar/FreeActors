@@ -7,10 +7,19 @@
 
 namespace Fa{
 
-    template<typename S, typename D>
+    template <typename P>
+    struct Action;
+
+    // Marker for a transition without an action.
+    struct NoAction {};
+
+    // External transition S -> D with an optional transition action Act.
+    // Sig is the triggering signal whose payload Act receives, or void for a parameterless action.
+    // UML order: exit actions (innermost first), then the transition action, then entry actions (outermost first).
+    template<typename S, typename D, typename Act = NoAction, typename Sig = void>
     struct Transition {
         template <typename M, typename E>
-        static void execute(M &machine) {
+        static void execute(M &machine, [[maybe_unused]] E const &event) {
             using SrcPath  = typename BuildPath<S>::Type; 
             using DestPath = typename BuildPath<D>::Type; 
             using MachineStates = typename HsmTraits<M>::StateCatalog;
@@ -26,6 +35,16 @@ namespace Fa{
             machine.unwindToState(&S::template Dispatch<M>);
 
             RouteExecutor<M, E, ExitPath>::run(machine, E{Exit_sig{}});
+
+            if constexpr (!std::is_same_v<Act, NoAction>) {
+                if constexpr (std::is_void_v<Sig>) {
+                    Action<Act>::execute(machine);
+                } else {
+                    // The handler that requested this transition matched Sig, so the alternative is guaranteed.
+                    Action<Act>::execute(machine, *std::get_if<Sig>(&event));
+                }
+            }
+
             RouteExecutor<M, E, EnterPath>::run(machine, E{Enter_sig{}});
 
             machine.handler = &D::template Dispatch<M>;
