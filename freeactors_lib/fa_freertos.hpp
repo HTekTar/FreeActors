@@ -110,5 +110,168 @@ namespace Fa{
             }
         }
     };
+
+    namespace detail {
+        template <typename S, typename T, typename = void>
+        struct has_consume_batch : std::false_type {};
+        template <typename S, typename T>
+        struct has_consume_batch<S, T, std::void_t<decltype(S::consume_batch(std::declval<T const *>(), size_t{}))>>
+            : std::true_type {};
+
+        template <typename S, typename = void>
+        struct has_on_start : std::false_type {};
+        template <typename S>
+        struct has_on_start<S, std::void_t<decltype(S::on_start())>> : std::true_type {};
+
+        template <typename S, typename = void>
+        struct assert_on_full_of : std::true_type {};
+        template <typename S>
+        struct assert_on_full_of<S, std::void_t<decltype(S::assert_on_full)>>
+            : std::bool_constant<S::assert_on_full> {};
+    }
+
+    // Multi-producer, single-consumer service (docs/design/trace.md, section 1).
+    // Derive S from MpscServiceInterface<S, T, N> and give it ONE of
+    //   static void consume(T const &item) noexcept;                    // per item
+    //   static void consume_batch(T const *items, size_t n) noexcept;   // contiguous slices, zero-copy
+    // optionally static void on_start() noexcept (runs once in the task before draining), and
+    // static constexpr bool assert_on_full = false to only count drops. Task settings: TimeServiceTraits<S>.
+    //
+    // Producers: push() from tasks, push_from_isr() from interrupts (or via Hsm::mpsc_push /
+    // Application::mpsc_push_from_isr, routed by T). Each push is a short critical section around one copy.
+    // A full buffer drops the new item and counts it (FA_ASSERT unless assert_on_full is false).
+    // The consumer task is woken only when the buffer goes from empty to non-empty; slots are released only
+    // after S has consumed them, so producers never overwrite items being consumed.
+    template <typename S, typename T, size_t N>
+    struct MpscServiceInterface {
+        using element_type = T;
+
+        static_assert(N > 0, "MpscServiceInterface needs at least one slot");
+        static_assert(std::is_trivially_copyable_v<T>, "MPSC items must be trivially copyable");
+        static_assert(sizeof(T) <= 64, "MPSC items must be small: each push copies one inside a critical section");
+
+        static bool push(T const &item) {
+            bool wake = false;
+            taskENTER_CRITICAL();
+            const bool stored = put(item, wake);
+            taskEXIT_CRITICAL();
+            if (!stored) {
+                on_full();
+                return false;
+            }
+            if (wake && task_handle != nullptr) {
+                xTaskNotifyGive(task_handle);
+            }
+            return true;
+        }
+
+        static bool push_from_isr(T const &item, BaseType_t *higher_priority_task_woken) {
+            bool wake = false;
+            UBaseType_t saved = taskENTER_CRITICAL_FROM_ISR();
+            const bool stored = put(item, wake);
+            taskEXIT_CRITICAL_FROM_ISR(saved);
+            if (!stored) {
+                on_full();
+                return false;
+            }
+            if (wake && task_handle != nullptr) {
+                vTaskNotifyGiveFromISR(task_handle, higher_priority_task_woken);
+            }
+            return true;
+        }
+
+        static uint32_t dropped() { return dropped_; }
+        static size_t high_water() { return high_water_; }
+
+        static void create_task() {
+            task_handle = xTaskCreateStatic(
+                &service_task,
+                TimeServiceTraits<S>::name,
+                TimeServiceTraits<S>::stack_size,
+                nullptr,
+                TimeServiceTraits<S>::priority,
+                task_stack_,
+                &task_tcb_
+            );
+            configASSERT(task_handle != nullptr);
+        }
+
+        static inline TaskHandle_t task_handle{nullptr};
+
+    private:
+        // Caller holds the critical section.
+        static bool put(T const &item, bool &wake) {
+            if (count_ == N) {
+                ++dropped_;
+                return false;
+            }
+            buffer_[head_] = item;
+            head_ = (head_ + 1) % N;
+            ++count_;
+            wake = (count_ == 1);
+            if (count_ > high_water_) {
+                high_water_ = count_;
+            }
+            return true;
+        }
+
+        static void on_full() {
+            if constexpr (detail::assert_on_full_of<S>::value) {
+                FA_ASSERT(false /* MPSC service buffer full: increase N */);
+            }
+        }
+
+        static void consume_span(size_t first, size_t n) {
+            if constexpr (detail::has_consume_batch<S, T>::value) {
+                S::consume_batch(&buffer_[first], n);
+            } else {
+                for (size_t i = 0; i < n; ++i) {
+                    S::consume(buffer_[first + i]);
+                }
+            }
+        }
+
+        // Consumes everything available; items pushed meanwhile are picked up by the next loop pass.
+        static void drain() {
+            for (;;) {
+                taskENTER_CRITICAL();
+                const size_t n = count_;
+                const size_t first = tail_;
+                taskEXIT_CRITICAL();
+                if (n == 0) {
+                    return;
+                }
+                const size_t before_wrap = (n < N - first) ? n : N - first;
+                consume_span(first, before_wrap);
+                if (n > before_wrap) {
+                    consume_span(0, n - before_wrap);
+                }
+                taskENTER_CRITICAL();
+                tail_ = (tail_ + n) % N;
+                count_ -= n;
+                taskEXIT_CRITICAL();
+            }
+        }
+
+        [[noreturn]] static void service_task(void * /*pvParameters*/) {
+            if constexpr (detail::has_on_start<S>::value) {
+                S::on_start();
+            }
+            drain();   // items pushed before the scheduler started (no task to notify then)
+            for (;;) {
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+                drain();
+            }
+        }
+
+        static inline std::array<T, N> buffer_{};
+        static inline size_t head_ = 0;
+        static inline size_t tail_ = 0;
+        static inline size_t count_ = 0;
+        static inline uint32_t dropped_ = 0;
+        static inline size_t high_water_ = 0;
+        static inline StackType_t task_stack_[TimeServiceTraits<S>::stack_size];
+        static inline StaticTask_t task_tcb_;
+    };
 }
 #endif //FA_FREEACTORS_HPP

@@ -131,34 +131,58 @@ TEST_CASE("Fa::test::log(): hardware calls and context traffic on one ordered ti
 }
 
 #ifdef FA_TRACE
-// With FA_TRACE the application provides emit_trace_token(); here it records the tokens.
+// With FA_TRACE the engine hooks hand TraceRecords to the machine's context (M::Context::trace<M>).
+// This test context captures them; in an application they go to Fa::TraceService.
 namespace {
-    std::vector<Fa::trace_token> tokens;
+    struct Traced {
+        Fa::TraceKind kind;
+        uint16_t id;
+    };
+    std::vector<Traced> traced;
+
+    struct TracingContext : Fa::test::RecordingContext {
+        template <typename M>
+        static void trace(Fa::TraceKind kind, uint16_t id) {
+            traced.push_back({kind, id});
+        }
+    };
 }
 
-void Fa::emit_trace_token(Fa::trace_token token) {
-    tokens.push_back(token);
-}
-
-TEST_CASE("FA_TRACE: one dispatch emits event, transition and action tokens in execution order") {
-    using Recorder = TransitionAction::Actor<Timebomb::TestBsp, Fa::test::RecordingContext>;
-    Recorder m;
+TEST_CASE("FA_TRACE: one dispatch produces EVENT, TRANSITION and ACTION records in execution order") {
+    using Traced_Actor = TransitionAction::Actor<Timebomb::TestBsp, TracingContext>;
+    using namespace TransitionAction;
+    Fa::test::reset<Timebomb::TestBsp>();
+    Traced_Actor m;
     start(m);
-    tokens.clear();
+    traced.clear();
 
-    send(m, TransitionAction::Leave{});
+    send(m, Leave{});
 
-    std::vector<uint32_t> categories;
-    for (auto const &t : tokens) categories.push_back(t.trace_cat);
-    CHECK(categories == std::vector<uint32_t>{
-        Fa::TRACE_CAT_EVENT, Fa::TRACE_CAT_TRANSITION,
-        Fa::TRACE_CAT_ACTION, Fa::TRACE_CAT_ACTION, Fa::TRACE_CAT_ACTION, Fa::TRACE_CAT_ACTION});
+    std::vector<Fa::TraceKind> kinds;
+    for (auto const &t : traced) kinds.push_back(t.kind);
+    using K = Fa::TraceKind;
+    CHECK(kinds == std::vector<K>{K::Event, K::Transition, K::Action, K::Action, K::Action, K::Action});
 
-    REQUIRE(tokens.size() == 6);
-    CHECK(tokens[0].token_id == Fa::get_index_v<TransitionAction::Leave, TransitionAction::Event>);
-    using Catalog = TransitionAction::StateCatalog;
-    CHECK(tokens[1].token_id == ((Fa::type_id_v<TransitionAction::INNER, Catalog> << 8) |
-                                  Fa::type_id_v<TransitionAction::OTHER, Catalog>));
-    CHECK(tokens[4].token_id == Fa::ActionDescriptor<TransitionAction::Cleanup>::id);
+    REQUIRE(traced.size() == 6);
+    CHECK(traced[0].id == Fa::get_index_v<Leave, Event>);
+    CHECK(traced[1].id == ((Fa::type_id_v<INNER, StateCatalog> << 8) | Fa::type_id_v<OTHER, StateCatalog>));
+    CHECK(traced[2].id == Fa::ActionDescriptor<Exit_INNER>::id);
+    CHECK(traced[4].id == Fa::ActionDescriptor<Cleanup>::id);
+    CHECK(traced[5].id == Fa::ActionDescriptor<Entry_OTHER>::id);
+}
+
+TEST_CASE("FA_TRACE: a guard evaluation is recorded with its result") {
+    using Traced_Actor = TransitionAction::Actor<Timebomb::TestBsp, TracingContext>;
+    using namespace TransitionAction;
+    Fa::test::reset<Timebomb::TestBsp>();
+    Traced_Actor m;
+    start(m);
+    traced.clear();
+
+    send(m, Back{});                                  // guard allowed() is false: no transition
+    REQUIRE(traced.size() == 2);
+    CHECK(traced[0].kind == Fa::TraceKind::Event);
+    CHECK(traced[1].kind == Fa::TraceKind::GuardFalse);
+    CHECK(traced[1].id == Fa::GuardDescriptor<Allowed>::id);
 }
 #endif // FA_TRACE

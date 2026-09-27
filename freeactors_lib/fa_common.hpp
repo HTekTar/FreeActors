@@ -53,11 +53,44 @@ namespace Fa{
     struct ActorTraits;
 
     // Default actor context: routes nothing. Used standalone and as the target default for Ctx.
+    // ----------------------------------------------------------------------
+    // Trace records (docs/design/trace.md, section 2): 8 bytes, sent little-endian as-is.
+    // ----------------------------------------------------------------------
+    enum class TraceKind : uint8_t {
+        Event         = 0,   // id: event index in the actor's Event variant
+        GuardFalse    = 1,   // id: GuardDescriptor<G>::id
+        GuardTrue     = 2,   // id: GuardDescriptor<G>::id
+        Action        = 3,   // id: ActionDescriptor<A>::id
+        Transition    = 4,   // id: src_state << 8 | dst_state (StateCatalog indices)
+        Dropped       = 5,   // id: target_actor << 8 | event_index; actor = sender
+        Post          = 6,   // id: target_actor << 8 | event_index; actor = sender
+        TimerSchedule = 7,   // id: target_actor << 8 | event_index; actor = owner
+        TimerCancel   = 8,   // id: target_actor << 8 | event_index; actor = owner
+    };
+
+    struct TraceRecord {
+        uint32_t timestamp;  // Out::trace_timestamp() (wraps; the PC unwraps it)
+        uint8_t  kind;       // TraceKind
+        uint8_t  actor;      // actor index in the Application, or a TraceSender id
+        uint16_t id;
+    };
+    static_assert(sizeof(TraceRecord) == 8, "TraceRecord must be exactly 8 bytes");
+
+    // Senders that are not actors (TraceRecord::actor of Post/Dropped records)
+    namespace TraceSender {
+        constexpr uint8_t Isr   = 0xFF;   // interrupt handler (postFromISR)
+        constexpr uint8_t Timer = 0xFE;   // timer expiry
+        constexpr uint8_t Pc    = 0xFD;   // PC command
+        constexpr uint8_t Task  = 0xFC;   // non-actor code in a task: start-up code, periodic modules
+    }
+
     //
-    // Context interface (what Hsm::post/schedule/cancel forward to):
-    //   post(evt)                                     deliver evt to its receiving actor
+    // Context interface (what Hsm::post/schedule/cancel/mpsc_push forward to):
+    //   post<Sender>(evt)                             deliver evt to its receiving actor
     //   schedule<Owner>(evt, ms, periodic) -> bool    (re)start Owner's timer for evt's type; false if it can't
     //   cancel<Owner, Evt>()                          stop Owner's pending timer for Evt, if any
+    //   mpsc_push(item) -> bool                       hand item to the service owning its type
+    //   trace<M>(kind, id)                            record a trace event of machine M (FA_TRACE)
     struct NullContext {
         template <typename Owner, typename Evt>
         static bool schedule(Evt const& /*evt*/, uint16_t /*ms*/, bool /*periodic*/) {
@@ -67,8 +100,16 @@ namespace Fa{
         template <typename Owner, typename Evt>
         static void cancel() {}
 
-        template <typename Evt>
+        template <typename Sender, typename Evt>
         static void post(Evt const& /*evt*/) {}
+
+        template <typename T>
+        static bool mpsc_push(T const& /*item*/) {
+            return false;
+        }
+
+        template <typename M>
+        static void trace(TraceKind /*kind*/, uint16_t /*id*/) {}
     };
 }
 

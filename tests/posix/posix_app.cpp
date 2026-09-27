@@ -4,6 +4,8 @@
 //   - Timebomb (tests/fixtures/timebomb_app_actor.hpp): blinks with a one-shot Tick timer, cancels it on exit
 //   - InitAction counter (below): a periodic Go timer, counted by an internal transition
 //   - TimebombButton (tests/fixtures/timebomb_button.hpp): a periodic process module debouncing the button
+//   - with FA_TRACE: Fa::TraceService writing the trace to the file named by $FA_TRACE_OUT, which run.sh
+//     decodes with tools/fa-trace.js and checks
 // A test task (lowest priority) posts events and watches the actors' states and counters.
 // Actors have higher priority, so a post() is fully handled before post() returns.
 // Prints PASS/FAIL per check and exits non-zero on any failure.
@@ -22,8 +24,32 @@
 #include "fa_test.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+
+#ifdef FA_TRACE
+#include "fa_trace_service.hpp"
+
+// Trace output for the host: frames go to a file, timestamps are microseconds of a monotonic clock.
+struct PosixTraceOut {
+    static inline FILE *file = nullptr;
+    static void trace_write(uint8_t const *data, size_t n) noexcept {
+        if (file != nullptr) {
+            std::fwrite(data, 1, n, file);
+            std::fflush(file);
+        }
+    }
+    static uint32_t trace_timestamp() noexcept {
+        using namespace std::chrono;
+        return static_cast<uint32_t>(duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
+    }
+    static uint32_t trace_timestamp_hz() noexcept { return 1000000; }
+};
+
+template <typename Hw, typename Ctx>
+using HostTrace = Fa::TraceService<Hw, Ctx, PosixTraceOut, 512>;
+#endif
 
 // InitAction actor: once in INNER it schedules Go every GoPeriodMs; each Go runs count() (internal event).
 namespace InitAction {
@@ -73,7 +99,11 @@ struct AppTraits : Fa::DefaultAppTraits {
     using Platform = HostBoard;
 };
 
+#ifdef FA_TRACE
+using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, HostTrace>;
+#else
 using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton>;
+#endif
 using Bomb = Timebomb::Actor<HostBoard, App::AppContext>;
 using Counter = InitAction::Actor<HostBoard, App::AppContext>;
 
@@ -223,6 +253,7 @@ namespace {
         vTaskResume(BombStorage::taskHandle);
         expect("actor keeps working: its 8 queued ButtonPressed are handled (DISARMED -> ... -> LEDON)", bomb_in<LEDON>());
 
+        vTaskDelay(100);   // lets the trace task (lowest priority) send what is still buffered
         std::printf("%s\n", failures == 0 ? "PASS  posix: all runtime checks passed" : "FAIL  posix: runtime checks failed");
         std::fflush(stdout);
         std::_Exit(failures == 0 ? 0 : 1);
@@ -233,6 +264,11 @@ namespace {
 }
 
 int main() {
+#ifdef FA_TRACE
+    if (char const *path = std::getenv("FA_TRACE_OUT")) {
+        PosixTraceOut::file = std::fopen(path, "wb");
+    }
+#endif
     App::init();
     xTaskCreateStatic(run_tests, "tests", configMINIMAL_STACK_SIZE, nullptr, 1, test_stack, &test_tcb);
     vTaskStartScheduler();

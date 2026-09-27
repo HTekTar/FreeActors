@@ -90,3 +90,4 @@ fs.mkdirSync(outDir, { recursive: true });
 for (const [suffix, content] of Object.entries(generate(jsonText, modelPath))) {
     fs.writeFileSync(path.join(outDir, `${lowerName}_${suffix}.hpp`), content);
 }
+fs.writeFileSync(path.join(outDir, `${lowerName}_trace.json`), ext.generateTraceDictionaryString(jsonText));

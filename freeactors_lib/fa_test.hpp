@@ -121,10 +121,19 @@ namespace Fa::test {
             detail::timeline().push_back(std::string("cancel ") + EventDescriptor<Evt>::name);
         }
 
-        template <typename Evt>
+        template <typename Sender, typename Evt>
         static void post(Evt const & /*evt*/) {
             detail::timeline().push_back(std::string("post ") + EventDescriptor<Evt>::name);
         }
+
+        template <typename T>
+        static bool mpsc_push(T const & /*item*/) {
+            detail::timeline().push_back("mpsc_push");
+            return true;
+        }
+
+        template <typename M>
+        static void trace(TraceKind /*kind*/, uint16_t /*id*/) {}
     };
 
     // ----------------------------------------------------------------------

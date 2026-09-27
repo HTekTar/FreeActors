@@ -88,7 +88,7 @@ namespace Fa {
         static void dispatch(M &machine, E const &e) {
             FA_ASSERT(machine.handler != nullptr);
 
-            trace_event<E>(e);
+            trace_event<M>(e);
 
             // The transition receives the event that triggered it, so its action can read the payload.
             E const init{Init_sig{}};
@@ -130,9 +130,16 @@ namespace Fa {
             cancel<Evt>();
         }
 
+        // Sends evt to its receiving actor (routed by type); this actor is recorded as the sender.
         template <typename Evt>
         void post(Evt const &evt){
-            M::Context::post(evt);
+            M::Context::template post<M>(evt);
+        }
+
+        // Hands item to the application service that owns type T (Fa::MpscServiceInterface<S, T, N>).
+        template <typename T>
+        bool mpsc_push(T const &item){
+            return M::Context::mpsc_push(item);
         }
 
         HandlerRef<M, E> handler;

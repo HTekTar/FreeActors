@@ -46,6 +46,9 @@ export const FRAMEWORK_FILES = [
     'fa_sim.hpp',
     'fa_repl.hpp',
     'fa_test.hpp',
+    'fa_frame.hpp',
+    'fa_trace_service.hpp',
+    'fa_cortexm.hpp',
     'doctest.h'
 ];
 
@@ -130,6 +133,25 @@ export function validateHsmModel(jsonText: string): void {
     if (problems.length > 0) {
         throw new Error(`Model conflict — ${problems.join('; ')}`);
     }
+}
+
+// FNV-1a hash of the model's meaning (names, events, guards, actions, transitions) - not its layout, so
+// moving states around in the editor does not change it. The target reports it in the trace HELLO frame.
+export function modelHash(hsm: any): number {
+    const states = ((hsm.states || []) as any[]).map((s: any) => ({
+        id: s.id, name: s.name, parent: s.parent ?? null, entry: s.entry ?? "", exit: s.exit ?? "",
+        transitions: ((s.transitions || []) as any[]).map((t: any) => ({ event: t.event ?? "", guard: t.guard ?? "", target: t.target ?? "" })),
+        local_events: s.local_events || []
+    }));
+    const canonical = JSON.stringify({
+        name: hsm.name, signals: hsm.signals || [], guards: hsm.guards || [], actions: hsm.actions || [], states
+    });
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < canonical.length; i++) {
+        hash ^= canonical.charCodeAt(i) & 0xFF;
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash >>> 0;
 }
 
 interface MethodCatalogItem {
@@ -901,6 +923,7 @@ export function generateCppBlueprintString(jsonText: string): string {
     out += `        using StateCatalog = ${machineName}::StateCatalog;\n`;
     out += `        static constexpr auto InitialState = &${machineName}::ROOT::template Dispatch<${machineName}::Actor<HwPolicy, Ctx>>;\n`;
     out += `        static constexpr uint16_t InitialStateId = type_id_v<${machineName}::ROOT, StateCatalog>;\n`;
+    out += `        static constexpr uint32_t ModelHash = 0x${modelHash(hsm).toString(16).padStart(8, '0')}u;   // reported in the trace HELLO frame\n`;
     out += `    };\n`;
     out += `} // namespace Fa\n\n`;
 
@@ -1379,6 +1402,35 @@ export function generateCMakeListsString(jsonText: string): string {
 }
 
 // ==========================================================================
+// TRACE DICTIONARY (tool-owned <name>_trace.json): turns the numbers in trace records back into names
+// ==========================================================================
+export function generateTraceDictionaryString(jsonText: string): string {
+    const hsm = JSON.parse(jsonText);
+    const machineName = machineNameOf(hsm);
+    const { states, guardCatalog, actionCatalog } = extractCatalogs(hsm, machineName);
+    const signals = ((hsm.signals || []) as string[]).map(s => s.trim()).filter(s => s.length > 0);
+
+    // Descriptor ids are numbered exactly as in generateCppBlueprintString: guards first, then actions, from 1
+    let nextId = 1;
+    const guards: { [id: string]: string } = {};
+    guardCatalog.forEach(({ pascalName }) => { guards[String(nextId++)] = pascalName; });
+    const actions: { [id: string]: string } = {};
+    actionCatalog.forEach(({ pascalName }) => { actions[String(nextId++)] = pascalName; });
+
+    const dictionary = {
+        format: "freeactors-trace-dictionary",
+        version: 1,
+        machine: machineName,
+        model_hash: `0x${modelHash(hsm).toString(16).padStart(8, '0')}`,
+        events: ["Enter_sig", "Exit_sig", "Init_sig", "ExitToParent_sig", ...signals],   // Event variant order
+        states: states.map((s: any) => s.name).filter(Boolean),                          // StateCatalog order
+        guards,
+        actions
+    };
+    return JSON.stringify(dictionary, null, 2) + "\n";
+}
+
+// ==========================================================================
 // DESIGNER TEST SCAFFOLDING (doctest + fa_test.hpp)
 // ==========================================================================
 
@@ -1769,6 +1821,9 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             await vscode.workspace.fs.writeFile(
                                 vscode.Uri.joinPath(folderUri, `${lowerHsmName}_test_bsp.hpp`),
                                 stringToUint8Array(generateCppTestBspString(hsmName, bspContent)));
+                            await vscode.workspace.fs.writeFile(
+                                vscode.Uri.joinPath(folderUri, `${lowerHsmName}_trace.json`),
+                                stringToUint8Array(generateTraceDictionaryString(jsonText)));
 
                             await copyFrameworkFilesToWorkspace(this.context, folderUri);
 

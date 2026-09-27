@@ -166,22 +166,33 @@ inline uint32_t timer_ticks(uint16_t ms) {
 // ==========================================================================
 // TimeEventService: the application's timers, for the actors in List
 // ==========================================================================
-template <typename List, size_t MaxEventPayloadSize = 32, size_t MaxTimers = 16>
+// Receives trace records for timer expiries; Fa::Application implements it (FA_TRACE).
+struct NoTimerTracer {
+    static void trace_record_isr(TraceKind, uint8_t, uint16_t, BaseType_t*) {}
+};
+
+template <typename List, size_t MaxEventPayloadSize = 32, size_t MaxTimers = 16, typename Tracer = NoTimerTracer>
 struct TimeEventService;
 
-template <typename... Ms, size_t MaxEventPayloadSize, size_t MaxTimers>
-struct TimeEventService<TypeList<Ms...>, MaxEventPayloadSize, MaxTimers> {
+template <typename... Ms, size_t MaxEventPayloadSize, size_t MaxTimers, typename Tracer>
+struct TimeEventService<TypeList<Ms...>, MaxEventPayloadSize, MaxTimers, Tracer> {
 private:
     using Actors = TypeList<Ms...>;
     using DeliverFn = void (*)(uint8_t const* payload);
 
     // Tick interrupt: copy the stored bytes into a real event object (well-defined for trivially copyable
     // types, no aliasing through casts) and queue it for actor M without blocking.
+    // An expiry is a post from sender TraceSender::Timer, recorded before the send (trace.md 2.1.1).
     template <typename M>
     static void deliver(uint8_t const* payload) {
         typename M::EventType event;
         std::memcpy(static_cast<void*>(&event), payload, sizeof(event));
+        const uint16_t id = static_cast<uint16_t>((type_id_v<M, Actors> << 8) | event.index());
+#ifndef FA_TRACE_NO_POST
+        Tracer::trace_record_isr(TraceKind::Post, TraceSender::Timer, id, nullptr);
+#endif
         if (xQueueSendFromISR(StaticActorStorage<M>::queueHandle, &event, nullptr) != pdPASS) {
+            Tracer::trace_record_isr(TraceKind::Dropped, TraceSender::Timer, id, nullptr);
             StaticActorStorage<M>::on_queue_full();
         }
     }

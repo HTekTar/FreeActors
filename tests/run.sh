@@ -40,6 +40,7 @@ build_and_run() {
     fi
 }
 
+build_and_run frame_test "$ROOT/tests/frame_test.cpp"
 build_and_run engine_test "$ROOT/tests/engine_test.cpp"
 build_and_run actor_test "$ROOT/tests/actor_test.cpp"
 build_and_run actor_test_fa_trace "$ROOT/tests/actor_test.cpp" -DFA_TRACE
@@ -111,6 +112,7 @@ elif [ -z "${FREERTOS_KERNEL_PATH:-}" ] || [ ! -f "$FREERTOS_KERNEL_PATH/include
 else
     target_compile m4-fpu ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard
     target_compile m4-nofpu ARM_CM3 -mfloat-abi=soft
+    target_compile m4-fpu-trace ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE
 fi
 
 # Runtime integration: a real Fa::Application on the FreeRTOS POSIX port (tasks = Linux threads, real tick).
@@ -130,6 +132,7 @@ posix_run() {
     for variant in posix_app posix_app_noassert; do
         local flags=()
         [ "$variant" = posix_app_noassert ] && flags=(-DFA_NO_ASSERT)
+        flags+=(-DFA_TRACE)
         if ! g++ -std=c++17 -O1 -pthread -Wall -Wextra "${flags[@]}" "${inc[@]}" "$ROOT/tests/posix/posix_app.cpp" \
                  "${objs[@]}" -o "$dir/$variant" 2>> "$dir/build.log"; then
             echo "FAIL  posix: $variant build (first errors below, full log: tests/build/posix/build.log)"
@@ -138,7 +141,7 @@ posix_run() {
             continue
         fi
         echo "== $variant"
-        timeout 30 "$dir/$variant" > "$dir/$variant.out" 2>&1
+        FA_TRACE_OUT="$dir/$variant.trace" timeout 30 "$dir/$variant" > "$dir/$variant.out" 2>&1
         local code=$?
         cat "$dir/$variant.out"
         if [ "$variant" = posix_app ]; then
@@ -152,6 +155,55 @@ posix_run() {
             status=1
         fi
     done
+
+    # The trace of the drop-and-count run, decoded by tools/fa-trace.js with the fixtures' dictionaries
+    local trace="$dir/posix_app_noassert.trace.txt"
+    node "$ROOT/tools/fa-trace.js" --dict "$OUT" --file "$dir/posix_app_noassert.trace" > "$trace" 2> "$trace.stats"
+    echo "== trace ($(cat "$trace.stats"))"
+    expect_trace "$trace" "HELLO: protocol 1, clock 1000000 Hz, actors: 0=Timebomb, 1=Counter"
+    expect_trace "$trace" \
+        "task +\\[POST\\] ButtonPressed -> Timebomb" \
+        "Timebomb +\\[EVENT\\] ButtonPressed +\\(from task, " \
+        "Timebomb +\\[TRANSITION\\] DISARMED ===> ARMED" \
+        "Timebomb +\\[ACTION\\] Entry_ARMED"
+    expect_trace "$trace" \
+        "Timebomb +\\[SCHEDULE\\] Tick -> Timebomb" \
+        "timer +\\[POST\\] Tick -> Timebomb" \
+        "Timebomb +\\[EVENT\\] Tick +\\(from timer, " \
+        "Timebomb +\\[GUARD\\] TimeUp -> PASSED" \
+        "Timebomb +\\[TRANSITION\\] LEDOFF ===> BOOM" \
+        "Timebomb +\\[CANCEL\\] Tick -> Timebomb"
+    expect_trace "$trace" \
+        "timer +\\[POST\\] Go -> Counter" \
+        "Counter +\\[EVENT\\] Go +\\(from timer, " \
+        "Counter +\\[ACTION\\] Count"
+    expect_trace "$trace" \
+        "task +\\[DROPPED\\] ButtonPressed -> Timebomb \\(queue full\\)" \
+        "timer +\\[DROPPED\\] Tick -> Timebomb \\(queue full\\)"
+    if grep -q "warning:" "$trace" || ! grep -q " 0 bad frames" "$trace.stats"; then
+        echo "FAIL  trace: decoder warnings or bad frames (see tests/build/posix/posix_app_noassert.trace.txt)"
+        grep "warning:" "$trace" | head -3
+        status=1
+    else
+        echo "PASS  trace: no decoder warnings (model hashes match), no bad frames"
+    fi
+}
+
+# expect_trace <file> <regex>...: the patterns appear in this order (not necessarily adjacent)
+expect_trace() {
+    local file="$1"
+    shift
+    local from=1 pattern found
+    for pattern in "$@"; do
+        found=$(tail -n +"$from" "$file" | grep -n -m1 -E "$pattern" | cut -d: -f1)
+        if [ -z "$found" ]; then
+            echo "FAIL  trace: missing (in order) '$pattern' (see tests/build/posix/$(basename "$file"))"
+            status=1
+            return
+        fi
+        from=$((from + found))
+    done
+    echo "PASS  trace: $# expected line(s) in order, first: '$1'"
 }
 
 if [ -z "${FREERTOS_KERNEL_PATH:-}" ] || [ ! -f "$FREERTOS_KERNEL_PATH/include/FreeRTOS.h" ]; then

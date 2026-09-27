@@ -57,6 +57,14 @@ Design constraints that apply to every item:
 
 Known limitation (documented, not a bug): a timer that expired and was queued to its actor just before `cancel()` is still delivered. A delivery-time check in the actor's task would close it if a real case needs it.
 
+## v1.0 features
+| # | Item | Status |
+|---|---|---|
+| 41 | Trace, phase 1: `MpscServiceInterface`, `TraceService`, records with sender, framing, dictionary + model hash, `fa-trace` decoder (serial/TCP/file). Runs on the Nucleo | ✅ |
+| 42 | Trace, phase 2: lock-free `SpscServiceInterface`, `CommandService` (post by index, query states, reset, filter, HELLO request), REPL on the board | ⬜ |
+| 43 | Trace, phase 3: live view in the VS Code HSM editor | ⬜ |
+| 44 | Trace transport improvements: interrupt/DMA UART transmit instead of blocking; `Fa::RttOut` | ⬜ |
+
 ## P4 — generator robustness
 | # | Item | Status |
 |---|---|---|
