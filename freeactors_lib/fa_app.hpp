@@ -245,6 +245,16 @@ public:
         return spsc_services_for<T>::FirstType::push(item);
     }
 
+    // ---- DMA ring services (the DMA hardware is the producer) ------------------------------------------
+
+    // From the board's DMA / UART interrupt: the DMA of Service has written up to position.
+    template <template <typename, typename> class Service>
+    static void dma_progress_from_isr(size_t position, BaseType_t* pxHigherPriorityTaskWoken) {
+        using Registered = Service<Hw, AppContext>;
+        static_assert(ListContains<Registered, AllModules>::value, "This DMA ring service is not registered in the Application");
+        Registered::progress_from_isr(position, pxHigherPriorityTaskWoken);
+    }
+
     // ---- Trace (FA_TRACE) --------------------------------------------------------------------------------
 
     // True if a module owning TraceRecords (Fa::TraceService) is registered

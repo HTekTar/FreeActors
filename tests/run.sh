@@ -43,6 +43,8 @@ build_and_run() {
 build_and_run frame_test "$ROOT/tests/frame_test.cpp"
 build_and_run spsc_test "$ROOT/tests/spsc_test.cpp" -O2 -pthread
 build_and_run spsc_test_tsan "$ROOT/tests/spsc_test.cpp" -O1 -g -pthread -fsanitize=thread
+build_and_run dma_test "$ROOT/tests/dma_test.cpp" -O2 -pthread
+build_and_run dma_test_tsan "$ROOT/tests/dma_test.cpp" -O1 -g -pthread -fsanitize=thread
 build_and_run engine_test "$ROOT/tests/engine_test.cpp"
 build_and_run actor_test "$ROOT/tests/actor_test.cpp"
 build_and_run actor_test_fa_trace "$ROOT/tests/actor_test.cpp" -DFA_TRACE

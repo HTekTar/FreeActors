@@ -113,6 +113,41 @@ struct SeqSink : Fa::SpscServiceInterface<SeqSink<Hw, Ctx>, uint32_t, 64> {
     }
 };
 
+// DMA ring service: the tick hook plays a UART with circular DMA and idle-line detection (bursts of 1..5
+// bytes of a running counter, each followed by a position report). The consumer checks every byte.
+template <typename Hw, typename Ctx>
+struct UartRx;
+
+namespace Fa {
+    template <typename Hw, typename Ctx>
+    struct TimeServiceTraits<UartRx<Hw, Ctx>> {
+        static constexpr const char* name     = "UartRx";
+        static constexpr size_t stack_size    = 128;
+        static constexpr UBaseType_t priority = 2;
+    };
+}
+
+template <typename Hw, typename Ctx>
+struct UartRx : Fa::DmaRingInterface<UartRx<Hw, Ctx>, uint8_t, 64> {
+    using Base = Fa::DmaRingInterface<UartRx<Hw, Ctx>, uint8_t, 64>;
+    static inline std::atomic<bool> streaming{false};
+    static inline std::atomic<uint32_t> received{0};
+    static inline std::atomic<uint32_t> wrong{0};
+    static inline std::atomic<uint32_t> not_intact{0};
+    static inline uint8_t expected = 0;
+
+    static void on_start() noexcept { streaming = true; }   // a board would start its DMA here
+
+    static void consume_batch(uint8_t const *data, size_t n) noexcept {
+        for (size_t i = 0; i < n; ++i) {
+            if (data[i] != expected) ++wrong;
+            expected = static_cast<uint8_t>(data[i] + 1);
+            ++received;
+        }
+        if (!Base::span_intact()) ++not_intact;
+    }
+};
+
 // Host board for all modules. Like NucleoBsp it declares instance_id = 1, which must not affect routing.
 // The button level is set by the test task.
 struct HostBoard {
@@ -129,10 +164,11 @@ struct AppTraits : Fa::DefaultAppTraits {
 };
 
 #ifdef FA_TRACE
-using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, HostTrace>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx, HostTrace>;
 #else
-using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx>;
 #endif
+using Rx = UartRx<HostBoard, App::AppContext>;
 using Sink = SeqSink<HostBoard, App::AppContext>;
 using Bomb = Timebomb::Actor<HostBoard, App::AppContext>;
 using Counter = InitAction::Actor<HostBoard, App::AppContext>;
@@ -149,6 +185,18 @@ extern "C" void vApplicationTickHook(void) {
     App::on_tick_isr();
     static uint32_t sequence = 0;
     App::spsc_push_from_isr(sequence++, nullptr);   // the SPSC service's only producer
+
+    // Simulated UART + circular DMA: the "hardware" writes a burst, then the idle-line interrupt reports it
+    static size_t dma_position = 0;
+    static uint8_t next_byte = 0;
+    if (Rx::streaming) {
+        const size_t burst = 1 + sequence % 5;
+        for (size_t i = 0; i < burst; ++i) {
+            Rx::buffer()[dma_position] = next_byte++;
+            dma_position = (dma_position + 1) % Rx::size;
+        }
+        App::dma_progress_from_isr<UartRx>(dma_position, nullptr);
+    }
 }
 
 extern "C" void vApplicationGetIdleTaskMemory(StaticTask_t **tcb, StackType_t **stack, configSTACK_DEPTH_TYPE *size) {
@@ -245,6 +293,14 @@ namespace {
         expect("cancel stops the periodic timer", instance<Counter>().go_count == c1, detail);
 
         expect("Timebomb exploded while the counter ran (in BOOM)", bomb_in<BOOM>());
+
+        // ---- DMA ring service: bursts from the simulated UART DMA every tick, all run long
+        std::snprintf(detail, sizeof detail, "%u bytes, %u wrong, %u not intact, %u overruns, high water %u",
+                      static_cast<unsigned>(Rx::received), static_cast<unsigned>(Rx::wrong),
+                      static_cast<unsigned>(Rx::not_intact), static_cast<unsigned>(Rx::overruns()),
+                      static_cast<unsigned>(Rx::high_water()));
+        expect("DMA ring service: every byte of the DMA stream arrives once, in order, intact, no overruns",
+               Rx::received > 3000 && Rx::wrong == 0 && Rx::not_intact == 0 && Rx::overruns() == 0, detail);
 
         // ---- SPSC service: one item per tick from the tick hook, all run long
         std::snprintf(detail, sizeof detail, "%u received, %u gaps, %u dropped, high water %u",

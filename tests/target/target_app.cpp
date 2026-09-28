@@ -47,15 +47,38 @@ struct SampleSink : Fa::SpscServiceInterface<SampleSink<Hw, Ctx>, uint16_t, 32> 
     static void consume(uint16_t const &sample) noexcept { sum += sample; }
 };
 
+// DMA ring service: a board's UART/DMA interrupt reports the write position
+template <typename Hw, typename Ctx>
+struct CommandRx;
+namespace Fa {
+template <typename Hw, typename Ctx>
+struct TimeServiceTraits<CommandRx<Hw, Ctx>> {
+    static constexpr const char* name     = "CmdRx";
+    static constexpr size_t stack_size    = 128;
+    static constexpr UBaseType_t priority = 2;
+};
+}
+template <typename Hw, typename Ctx>
+struct CommandRx : Fa::DmaRingInterface<CommandRx<Hw, Ctx>, uint8_t, 256> {
+    static inline uint32_t bytes = 0;
+    static void consume_batch(uint8_t const *, size_t n) noexcept { bytes += n; }
+};
+
 struct AppTraits : Fa::DefaultAppTraits {
     using Platform = TargetBoard;
 };
 
 #ifdef FA_TRACE
-using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, Fa::TraceService>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx, Fa::TraceService>;
 #else
-using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;
 #endif
+
+extern "C" void USART3_IRQHandler(void) {
+    BaseType_t woken = pdFALSE;
+    App::dma_progress_from_isr<CommandRx>(17, &woken);   // a board reads the DMA's position here
+    portYIELD_FROM_ISR(woken);
+}
 
 extern "C" void ADC_IRQHandler(void) {
     BaseType_t woken = pdFALSE;

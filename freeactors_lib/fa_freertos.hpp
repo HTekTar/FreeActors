@@ -18,6 +18,7 @@
 
 #include "fa_common.hpp"
 #include "fa_core.hpp"
+#include "fa_dma.hpp"
 #include "fa_spsc.hpp"
 #include "fa_util.hpp"
 
@@ -128,6 +129,24 @@ namespace Fa{
         // never reach a single-producer service
         struct MpscKind {};
         struct SpscKind {};
+        struct DmaKind {};   // addressed by module, not by item type
+
+        template <typename S, typename = void>
+        struct assert_on_overrun_of : std::true_type {};
+        template <typename S>
+        struct assert_on_overrun_of<S, std::void_t<decltype(S::assert_on_overrun)>>
+            : std::bool_constant<S::assert_on_overrun> {};
+
+        template <typename S, typename T, typename = void>
+        struct has_invalidate : std::false_type {};
+        template <typename S, typename T>
+        struct has_invalidate<S, T, std::void_t<decltype(S::invalidate(std::declval<T const *>(), size_t{}))>>
+            : std::true_type {};
+
+        template <typename S, typename = void>
+        struct has_on_overrun : std::false_type {};
+        template <typename S>
+        struct has_on_overrun<S, std::void_t<decltype(S::on_overrun(size_t{}))>> : std::true_type {};
 
         template <typename S, typename = void>
         struct assert_on_full_of : std::true_type {};
@@ -367,6 +386,93 @@ namespace Fa{
         }
 
         static inline SpscRing<T, N> ring_;
+        static inline StackType_t task_stack_[TimeServiceTraits<S>::stack_size];
+        static inline StaticTask_t task_tcb_;
+    };
+
+    // Continuous DMA reception service (docs/design/dma.md, section 3). The DMA hardware is the producer:
+    // the board's interrupt reports its write position with
+    //   App::Application::dma_progress_from_isr<MyService>(position, &woken);
+    // S provides:
+    //   static void consume_batch(T const *data, size_t n) noexcept;   // required: data in place, <= 2 spans
+    //   static void on_start() noexcept;                               // optional: start the stream on the board,
+    //                                                                  // e.g. Hw::rx_stream_start(buffer(), size)
+    //   static void on_overrun(size_t lost) noexcept;                  // optional: unread data was overwritten
+    //   static void invalidate(T const *data, size_t n) noexcept;      // optional: D-cache (Cortex-M7)
+    //   static constexpr bool assert_on_overrun = false;               // optional: only count overruns
+    // Inside consume_batch, span_intact() tells whether the data being consumed was not overwritten meanwhile.
+    template <typename S, typename T, size_t N>
+    struct DmaRingInterface {
+        using element_type = T;
+        using service_kind = detail::DmaKind;
+        static constexpr size_t size = N;
+
+        static T *buffer() { return ring_.buffer(); }
+
+        static void progress_from_isr(size_t position, BaseType_t *higher_priority_task_woken) {
+            bool wake = false;
+            ring_.progress(position, wake);
+            if (wake && task_handle != nullptr) {
+                vTaskNotifyGiveFromISR(task_handle, higher_priority_task_woken);
+            }
+        }
+
+        static bool span_intact() { return ring_.span_intact(); }
+        static uint32_t overruns() { return ring_.overruns(); }
+        static size_t high_water() { return ring_.high_water(); }
+
+        static void create_task() {
+            task_handle = xTaskCreateStatic(
+                &service_task,
+                TimeServiceTraits<S>::name,
+                TimeServiceTraits<S>::stack_size,
+                nullptr,
+                TimeServiceTraits<S>::priority,
+                task_stack_,
+                &task_tcb_
+            );
+            configASSERT(task_handle != nullptr);
+        }
+
+        static inline TaskHandle_t task_handle{nullptr};
+
+    private:
+        static void drain() {
+            while (ring_.available() > 0) {
+                const uint32_t overruns_before = ring_.overruns();
+                ring_.consume_available(
+                    [](T const *data, size_t n) {
+                        if constexpr (detail::has_invalidate<S, T>::value) {
+                            S::invalidate(data, n);
+                        }
+                        S::consume_batch(data, n);
+                    },
+                    [](size_t lost) {
+                        if constexpr (detail::has_on_overrun<S>::value) {
+                            S::on_overrun(lost);
+                        } else {
+                            (void)lost;
+                        }
+                    });
+                if (ring_.overruns() != overruns_before) {
+                    if constexpr (detail::assert_on_overrun_of<S>::value) {
+                        FA_ASSERT(false /* DMA overrun: the consumer fell behind the stream */);
+                    }
+                }
+            }
+        }
+
+        [[noreturn]] static void service_task(void * /*pvParameters*/) {
+            if constexpr (detail::has_on_start<S>::value) {
+                S::on_start();   // starts the stream: data flows only once this consumer runs
+            }
+            for (;;) {
+                drain();
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            }
+        }
+
+        FA_DMA_BUFFER static inline DmaRing<T, N> ring_;
         static inline StackType_t task_stack_[TimeServiceTraits<S>::stack_size];
         static inline StaticTask_t task_tcb_;
     };
