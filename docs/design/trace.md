@@ -23,7 +23,7 @@ Scope: FreeActors v1.0 — a runtime trace from the target to the PC (one-way), 
  ISRs ───┼─► TraceService  (MpscServiceInterface<…, TraceRecord, N>)  
          │      consumer task: frame + trace_write(bytes) ──UART──►  decoder ─► text / REPL / editor view
          │                                                               │
-         └── CommandService (SpscServiceInterface<…, RxChunk, N>)  ◄──UART── commands
+         └── CommandService (DmaRingInterface<…, uint8_t, N>)  ◄──UART (DMA, idle line)── commands
                 consumer task: parse frames, post events, query states
 ```
 
@@ -166,20 +166,9 @@ Checked at compile time with readable `static_assert`s (the hardware-contract de
 
 ### 3.1 `Fa::CommandService<Hw, Ctx>`
 
-An application module on `SpscServiceInterface<CommandService, RxChunk, N>`:
+Receives command bytes through continuous DMA with idle-line detection: it derives from `DmaRingInterface<CommandService, uint8_t, 256>` (see [dma.md](dma.md)), so bytes are consumed in place, without per-byte interrupts. Its `consume_batch` feeds `Fa::frame::Decoder` and executes complete commands; damaged frames fail their CRC. Boards without DMA can feed the same decoder from a per-byte receive interrupt through `SpscServiceInterface`.
 
-```cpp
-struct RxChunk { uint8_t n; uint8_t bytes[7]; };   // 8 bytes, trivially copyable
-```
-
-The board's UART receive interrupt collects bytes into `RxChunk`s and pushes them:
-
-```cpp
-App::Application::spsc_push_from_isr(chunk, &woken);
-portYIELD_FROM_ISR(woken);
-```
-
-The consumer task feeds a frame parser and executes complete commands. Replies go out as trace frames through `mpsc_push` to `TraceService`, so there is one outgoing stream and one decoder.
+Replies go out as trace frames through `mpsc_push` to `TraceService`, so there is one outgoing stream and one decoder.
 
 ### 3.2 Application support (reflection tables built at compile time)
 
@@ -253,7 +242,7 @@ Once per application:
 1. Define `FA_TRACE` in the firmware build.
 2. Register the modules: `Fa::TraceService` (and `Fa::CommandService` for two-way) in `Fa::Application<…>`.
 
-Once per board (the transport, like any driver): `trace_write(bytes, n)`, `trace_timestamp()` / `trace_timestamp_hz`, and for two-way the UART receive interrupt pushing `RxChunk`s (optionally `reset()`).
+Once per board (the transport, like any driver): `trace_write(bytes, n)`, `trace_timestamp()` / `trace_timestamp_hz`, and for two-way `rx_stream_start(buffer, n)` plus the DMA/UART interrupt reporting the write position (dma.md section 3.4; optionally `reset()`).
 
 Provided by the framework, the same on every Cortex-M whatever the vendor:
 - a cycle-counter clock (`DWT->CYCCNT` through CMSIS) usable as `trace_timestamp`;
@@ -278,7 +267,7 @@ At 115 200 baud a UART carries about 11.5 KB/s ≈ 1 300 records/s after framing
 ## 10. Phases
 
 1. `MpscServiceInterface`, `TraceService`, records, framing, dictionary export, decoder CLI.
-2. `SpscServiceInterface`, `CommandService`, reflection tables, REPL on the board.
+2. `SpscServiceInterface`, `DmaRingInterface` ([dma.md](dma.md)), `CommandService`, reflection tables, REPL on the board.
 3. VS Code live view.
 
 ## 11. Decisions
