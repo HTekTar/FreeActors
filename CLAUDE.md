@@ -37,7 +37,7 @@ Three parts, communicating as below:
 
 2. **Extension host** — everything lives in [src/extension.ts](src/extension.ts): `FreeActorsEditorProvider` (a `CustomTextEditorProvider`; the JSON text document is the source of truth, and empty files get a default skeleton with a `ROOT` state) plus a set of string-building `generate*` functions for C++.
 
-3. **C++ framework** — [freeactors_lib/](freeactors_lib/), shipped inside the VSIX (`.vscodeignore` whitelists it) and copied next to the exported code into a `freeactors/` subfolder by `copyFrameworkFilesToWorkspace`. **When adding/renaming a header, update `FRAMEWORK_FILES`** in extension.ts (missing files are only warned about). `doctest.h` (vendored doctest v2.5.3, MIT) and `fa_test.hpp` (test helpers) ship there too. `fa_mempool.hpp` and `linenoise.hpp` remain in the source tree but are deliberately excluded (stripped by `copy-lib`, listed in `.vscodeignore`, absent from `frameworkFiles`).
+3. **C++ framework** — [freeactors_lib/](freeactors_lib/); the build copies it to `out/freeactors_lib/` (the packaged copy) and export copies it from there into a `freeactors/` subfolder of the project (`copyFrameworkFilesToWorkspace`, which also copies the `fa-trace.js` decoder). **When adding/renaming a header, update `FRAMEWORK_FILES`** in extension.ts (missing files are only warned about). `doctest.h` (vendored doctest v2.5.3, MIT) and `fa_test.hpp` (test helpers) ship there too. `fa_mempool.hpp` and `linenoise.hpp` remain in the source tree but are deliberately excluded (stripped by `copy-lib`, listed in `.vscodeignore`, absent from `frameworkFiles`).
 
 ### HSM JSON model
 

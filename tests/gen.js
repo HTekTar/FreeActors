@@ -80,6 +80,7 @@ if (args[0] === '--project') {
     for (const lib of ext.FRAMEWORK_FILES) {
         fs.copyFileSync(path.join(__dirname, '..', 'freeactors_lib', lib), path.join(dir, 'freeactors', lib));
     }
+    fs.copyFileSync(path.join(__dirname, '..', 'tools', 'fa-trace.js'), path.join(dir, 'freeactors', 'fa-trace.js'));
     process.exit(0);
 }
 

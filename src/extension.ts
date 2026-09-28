@@ -54,7 +54,7 @@ export const FRAMEWORK_FILES = [
 
 export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionContext, folderUri: vscode.Uri) {
     const destinationDirUri = vscode.Uri.joinPath(folderUri, 'freeactors');
-    const sourceDirUri = vscode.Uri.joinPath(context.extensionUri, 'freeactors_lib');
+    const sourceDirUri = vscode.Uri.joinPath(context.extensionUri, 'out', 'freeactors_lib');   // packaged copy
 
     try {
         await vscode.workspace.fs.createDirectory(destinationDirUri);
@@ -68,6 +68,13 @@ export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionCon
             } catch (fileErr: any) {
                 console.warn(`[FreeActors] Could not copy ${filename}: ${fileErr.message}`);
             }
+        }
+        // The trace decoder, so projects can run: node freeactors/fa-trace.js --dict . --serial <port>
+        try {
+            const decoder = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(context.extensionUri, 'out', 'fa-trace.js'));
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destinationDirUri, 'fa-trace.js'), decoder);
+        } catch (fileErr: any) {
+            console.warn(`[FreeActors] Could not copy fa-trace.js: ${fileErr.message}`);
         }
     } catch (error: any) {
         vscode.window.showErrorMessage(`❌ Framework Sync Failed: ${error.message}`);

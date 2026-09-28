@@ -1,19 +1,20 @@
+# Files that are not part of the published extension.
+# The framework is packaged from out/freeactors_lib (the build copies freeactors_lib there and removes
+# fa_mempool.hpp and linenoise.hpp); export copies it into projects from there.
 .vscode/**
 .vscode-test/**
 src/**
+tests/**
+docs/**
+tools/**
+freeactors_lib/**
+**/*.map
+**/*.d.ts
 .gitignore
 .yarnrc
 vscode-extension.iml
 tsconfig.json
 *.tsbuildinfo
-**/*.map
-
-!freeactors_lib/**
-!out/
-
-
-freeactors_lib/fa_mempool.hpp
-freeactors_lib/linenoise.hpp
-out/freeactors_lib/fa_mempool.hpp
-out/freeactors_lib/linenoise.hpp
-tests/**
+BACKLOG.md
+CLAUDE.md
+*.vsix

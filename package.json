@@ -1,15 +1,34 @@
 {
   "name": "freeactors-hsm-editor",
   "publisher": "HTekTar",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "displayName": "FreeActors HSM Editor",
+  "description": "Visual hierarchical state machine editor that generates C++17 active objects for FreeRTOS on Arm Cortex-M, with a simulator, generated tests and runtime trace.",
+  "license": "MIT",
+  "categories": [
+    "Visualization",
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "state machine",
+    "statechart",
+    "hsm",
+    "uml",
+    "actor",
+    "active object",
+    "embedded",
+    "freertos",
+    "cortex-m",
+    "c++"
+  ],
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./ && npm run copy-lib",
     "watch:tsc": "tsc -watch -p ./",
     "watch:lib": "nodemon --watch freeactors_lib -e hpp,h,cpp --exec npm run copy-lib",
     "watch": "npm run copy-lib && npm run watch:tsc",
-    "copy-lib": "mkdir -p out/freeactors_lib && cp -r freeactors_lib/* out/freeactors_lib/ && rm -f out/freeactors_lib/fa_mempool.hpp out/freeactors_lib/linenoise.hpp",
+    "copy-lib": "mkdir -p out/freeactors_lib && cp -r freeactors_lib/* out/freeactors_lib/ && rm -f out/freeactors_lib/fa_mempool.hpp out/freeactors_lib/linenoise.hpp && cp tools/fa-trace.js out/fa-trace.js",
     "test": "npm run compile && bash tests/run.sh"
   },
   "main": "./out/extension.js",
