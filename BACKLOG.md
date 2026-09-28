@@ -90,6 +90,12 @@ Known limitation (documented, not a bug): a timer that expired and was queued to
 | 39 | Compiler portability: Clang/LLVM Embedded, Arm Compiler 6, IAR (e.g. `[[gnu::packed]]` in `fa_trace.hpp`) | ⬜ |
 | 40 | Re-entrancy guard: `FA_ASSERT` if an action calls `dispatch()` on its own machine | ⬜ |
 
+## v2
+| # | Item | Status |
+|---|---|---|
+| 48 | Fixed-block memory pools for large event payloads (zero-copy, small queue slots — see #34). Rebuild `fa_mempool.hpp` rather than fix it: critical sections instead of its 64-bit CAS (Cortex-M4 has no 64-bit atomics); a trivially copyable handle for use inside events; explicit `release()` with debug owner/double-free checks; dropped/high-water counters; pool trace records (alloc/free/leak); every place an event can vanish (queue full, timer cancelled, unhandled) releases its block. The current file also has bugs: `operator*`, `current->ctr`, `reset()` frees before destroying | ⬜ |
+| — | Multi-instance state machines (routing, timers and trace ids; `instance_id` kept for this) | ⬜ |
+
 ## P6 — cleanup
 - ✅ `fa_actor.hpp` removed from the framework copy list.
 - ⬜ Events header: identical `FA_SIM` and target branches.
