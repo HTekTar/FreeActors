@@ -5,14 +5,19 @@
 // Continuous (circular) DMA reception ring (docs/design/dma.md, section 3). The core of
 // Fa::DmaRingInterface; no FreeRTOS dependency, so host tests can script DMA positions.
 //
-// The DMA hardware writes the buffer continuously. The board's interrupt (half transfer, transfer
-// complete, and e.g. UART idle line) reports the DMA's write position; progress() turns positions into
-// `written`, the consumer takes spans in place and releases them (`consumed`). Same counters and
-// lost-wake-up-free protocol as Fa::SpscRing (fa_spsc.hpp).
+// The DMA hardware writes the buffer continuously; the board's interrupts report its write position;
+// progress() turns positions into `written`, the consumer takes spans in place and releases them
+// (`consumed`). Same counters and lost-wake-up-free protocol as Fa::SpscRing (fa_spsc.hpp).
 //
-// Assumptions: at least two position reports per lap (half/complete interrupts guarantee it), and
-// interrupts are serviced within half a buffer period. The hardware may then be up to N/2 elements ahead
-// of the last reported position, which is what span_intact() allows for.
+// Vendor-neutral board contract (dma.md section 3.5 shows how different DMA controllers meet it):
+//   1. the DMA fills the buffer continuously: one circular transfer, OR two transfers alternating over the
+//      buffer's two halves (ping-pong / double-buffer DMAs), re-armed by the board;
+//   2. the position is reported at least at every half boundary (N/2 and 0);
+//   3. optionally, partial progress is reported when reception pauses (UART idle line, receive timeout,
+//      or a timer) — without it, data waits for the next half boundary;
+//   4. interrupts are serviced within half a buffer period.
+// The hardware may then be up to N/2 elements ahead of the last reported position, which is what
+// span_intact() allows for.
 //
 // Overruns (the hardware cannot be refused):
 //   - more than N elements unread when the consumer starts: the DMA lapped it. All unread data is
@@ -27,8 +32,9 @@
 #include <cstdint>
 #include <type_traits>
 
-// Place DMA buffers in DMA-capable memory, e.g. #define FA_DMA_BUFFER __attribute__((section(".dma_ram")))
-// (on STM32F4 the CCM RAM is not reachable by DMA). Empty by default.
+// Place DMA buffers in DMA-capable memory, e.g. #define FA_DMA_BUFFER __attribute__((section(".dma_ram"))).
+// Needed on parts where some RAM is not reachable by DMA (core-coupled/tightly-coupled RAM on some
+// vendors' parts). Empty by default.
 #ifndef FA_DMA_BUFFER
 #define FA_DMA_BUFFER
 #endif
@@ -116,7 +122,8 @@ public:
     size_t high_water() const { return high_water_.load(std::memory_order_relaxed); }
 
 private:
-    alignas(32) std::array<T, N> buffer_{};   // 32: a Cortex-M7 cache line, so invalidation never spills over
+    alignas(32) std::array<T, N> buffer_{};   // 32: a cache line (Cortex-M7, vendor system caches), so
+                                             // invalidating the buffer never touches neighbouring data
     size_t last_position_ = 0;               // producer only
     uint32_t span_start_ = 0;                // consumer only
     std::atomic<uint32_t> written_{0};

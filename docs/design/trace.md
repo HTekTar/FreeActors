@@ -160,7 +160,7 @@ static uint32_t trace_timestamp_hz() noexcept;                     // sent to th
                                                                    // the core clock is known only at run time)
 ```
 
-Checked at compile time with readable `static_assert`s (the hardware-contract detection idiom). On Cortex-M3/M4/M7 boards `trace_timestamp()` is typically the DWT cycle counter (`DWT->CYCCNT`, enabled once in `init()`); boards without it can return the RTOS tick count.
+Checked at compile time with readable `static_assert`s (the hardware-contract detection idiom). On Cortex-M3/M4/M7 boards `trace_timestamp()` is typically the DWT cycle counter (`Fa::CortexM::CycleCounter`, enabled once in `init()`). The DWT is optional in ARMv7-M: `CycleCounter::enable()` returns false when a part lacks it, and such boards return the RTOS tick count instead.
 
 ## 3. Commands (PC → target)
 

@@ -86,6 +86,10 @@ namespace detail {
     };
 }
 
+// Interrupt entry points (postFromISR, mpsc_push_from_isr, spsc_push_from_isr, dma_progress_from_isr, and
+// on_tick_isr from the tick hook) call FreeRTOS "FromISR" functions: like any FreeRTOS FromISR API on
+// Cortex-M, they may only be called from interrupts whose priority is at or below (numerically at or above)
+// configMAX_SYSCALL_INTERRUPT_PRIORITY. Pass &woken and end the handler with portYIELD_FROM_ISR(woken).
 template <typename AppTraits, template<typename, typename> class... Modules>
 class Application {
 public:

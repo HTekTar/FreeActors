@@ -398,7 +398,9 @@ namespace Fa{
     //   static void on_start() noexcept;                               // optional: start the stream on the board,
     //                                                                  // e.g. Hw::rx_stream_start(buffer(), size)
     //   static void on_overrun(size_t lost) noexcept;                  // optional: unread data was overwritten
-    //   static void invalidate(T const *data, size_t n) noexcept;      // optional: D-cache (Cortex-M7)
+    //   static void invalidate(T const *data, size_t n) noexcept;      // optional: data cache in front of RAM
+    //                                                                  // (every Cortex-M7; some Cortex-M4 parts
+    //                                                                  // have a vendor system cache, e.g. NXP LMEM)
     //   static constexpr bool assert_on_overrun = false;               // optional: only count overruns
     // Inside consume_batch, span_intact() tells whether the data being consumed was not overwritten meanwhile.
     template <typename S, typename T, size_t N>
