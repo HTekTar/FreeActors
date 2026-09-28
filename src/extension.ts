@@ -49,6 +49,7 @@ export const FRAMEWORK_FILES = [
     'fa_frame.hpp',
     'fa_trace_service.hpp',
     'fa_cortexm.hpp',
+    'fa_spsc.hpp',
     'doctest.h'
 ];
 

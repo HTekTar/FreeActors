@@ -18,6 +18,7 @@
 
 #include "fa_common.hpp"
 #include "fa_core.hpp"
+#include "fa_spsc.hpp"
 #include "fa_util.hpp"
 
 namespace Fa{
@@ -123,6 +124,11 @@ namespace Fa{
         template <typename S>
         struct has_on_start<S, std::void_t<decltype(S::on_start())>> : std::true_type {};
 
+        // Service kinds: Application routes pushes by item type AND kind, so a multi-producer push can
+        // never reach a single-producer service
+        struct MpscKind {};
+        struct SpscKind {};
+
         template <typename S, typename = void>
         struct assert_on_full_of : std::true_type {};
         template <typename S>
@@ -145,6 +151,7 @@ namespace Fa{
     template <typename S, typename T, size_t N>
     struct MpscServiceInterface {
         using element_type = T;
+        using service_kind = detail::MpscKind;
 
         static_assert(N > 0, "MpscServiceInterface needs at least one slot");
         static_assert(std::is_trivially_copyable_v<T>, "MPSC items must be trivially copyable");
@@ -270,6 +277,96 @@ namespace Fa{
         static inline size_t count_ = 0;
         static inline uint32_t dropped_ = 0;
         static inline size_t high_water_ = 0;
+        static inline StackType_t task_stack_[TimeServiceTraits<S>::stack_size];
+        static inline StaticTask_t task_tcb_;
+    };
+
+    // Single-producer, single-consumer service, lock-free (docs/design/dma.md, section 2).
+    // EXACTLY ONE producer: one interrupt handler (push_from_isr) or one task (push), never both, never two.
+    // Consumer contract as MpscServiceInterface: consume(T const&) or zero-copy consume_batch(T const*, n),
+    // optional on_start() and assert_on_full; task settings from TimeServiceTraits<S>.
+    // Routed by item type: Application::spsc_push_from_isr(item, &woken) / Application::spsc_push(item).
+    template <typename S, typename T, size_t N>
+    struct SpscServiceInterface {
+        using element_type = T;
+        using service_kind = detail::SpscKind;
+
+        static bool push_from_isr(T const &item, BaseType_t *higher_priority_task_woken) {
+            bool wake = false;
+            if (!ring_.push(item, wake)) {
+                on_full();
+                return false;
+            }
+            if (wake && task_handle != nullptr) {
+                vTaskNotifyGiveFromISR(task_handle, higher_priority_task_woken);
+            }
+            return true;
+        }
+
+        static bool push(T const &item) {
+            bool wake = false;
+            if (!ring_.push(item, wake)) {
+                on_full();
+                return false;
+            }
+            if (wake && task_handle != nullptr) {
+                xTaskNotifyGive(task_handle);
+            }
+            return true;
+        }
+
+        static uint32_t dropped() { return ring_.dropped(); }
+        static size_t high_water() { return ring_.high_water(); }
+
+        static void create_task() {
+            task_handle = xTaskCreateStatic(
+                &service_task,
+                TimeServiceTraits<S>::name,
+                TimeServiceTraits<S>::stack_size,
+                nullptr,
+                TimeServiceTraits<S>::priority,
+                task_stack_,
+                &task_tcb_
+            );
+            configASSERT(task_handle != nullptr);
+        }
+
+        static inline TaskHandle_t task_handle{nullptr};
+
+    private:
+        static void on_full() {
+            if constexpr (detail::assert_on_full_of<S>::value) {
+                FA_ASSERT(false /* SPSC service buffer full: increase N */);
+            }
+        }
+
+        // Consumes until the ring is empty; the final check pairs with the producer's wake decision
+        // (fa_spsc.hpp), so returning here and sleeping can never strand an item.
+        static void drain() {
+            while (ring_.available() > 0) {
+                ring_.consume_available([](T const *items, size_t n) {
+                    if constexpr (detail::has_consume_batch<S, T>::value) {
+                        S::consume_batch(items, n);
+                    } else {
+                        for (size_t i = 0; i < n; ++i) {
+                            S::consume(items[i]);
+                        }
+                    }
+                });
+            }
+        }
+
+        [[noreturn]] static void service_task(void * /*pvParameters*/) {
+            if constexpr (detail::has_on_start<S>::value) {
+                S::on_start();
+            }
+            for (;;) {
+                drain();   // also picks up items pushed before the scheduler started
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            }
+        }
+
+        static inline SpscRing<T, N> ring_;
         static inline StackType_t task_stack_[TimeServiceTraits<S>::stack_size];
         static inline StaticTask_t task_tcb_;
     };

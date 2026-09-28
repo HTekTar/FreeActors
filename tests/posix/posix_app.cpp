@@ -84,6 +84,35 @@ namespace Fa {
     };
 }
 
+// SPSC service fed from the tick hook (interrupt context) with a running sequence number; the consumer
+// checks that every number arrives exactly once, in order.
+template <typename Hw, typename Ctx>
+struct SeqSink;
+
+namespace Fa {
+    template <typename Hw, typename Ctx>
+    struct TimeServiceTraits<SeqSink<Hw, Ctx>> {
+        static constexpr const char* name     = "SeqSink";
+        static constexpr size_t stack_size    = 128;
+        static constexpr UBaseType_t priority = 2;
+    };
+}
+
+template <typename Hw, typename Ctx>
+struct SeqSink : Fa::SpscServiceInterface<SeqSink<Hw, Ctx>, uint32_t, 64> {
+    static inline std::atomic<uint32_t> received{0};
+    static inline std::atomic<uint32_t> gaps{0};
+    static inline uint32_t next = 0;
+
+    static void consume_batch(uint32_t const *items, size_t n) noexcept {
+        for (size_t i = 0; i < n; ++i) {
+            if (items[i] != next) ++gaps;
+            next = items[i] + 1;
+            ++received;
+        }
+    }
+};
+
 // Host board for all modules. Like NucleoBsp it declares instance_id = 1, which must not affect routing.
 // The button level is set by the test task.
 struct HostBoard {
@@ -100,10 +129,11 @@ struct AppTraits : Fa::DefaultAppTraits {
 };
 
 #ifdef FA_TRACE
-using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, HostTrace>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, HostTrace>;
 #else
-using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink>;
 #endif
+using Sink = SeqSink<HostBoard, App::AppContext>;
 using Bomb = Timebomb::Actor<HostBoard, App::AppContext>;
 using Counter = InitAction::Actor<HostBoard, App::AppContext>;
 
@@ -117,6 +147,8 @@ M &instance() {
 // --------------------------------------------------------------------------
 extern "C" void vApplicationTickHook(void) {
     App::on_tick_isr();
+    static uint32_t sequence = 0;
+    App::spsc_push_from_isr(sequence++, nullptr);   // the SPSC service's only producer
 }
 
 extern "C" void vApplicationGetIdleTaskMemory(StaticTask_t **tcb, StackType_t **stack, configSTACK_DEPTH_TYPE *size) {
@@ -213,6 +245,13 @@ namespace {
         expect("cancel stops the periodic timer", instance<Counter>().go_count == c1, detail);
 
         expect("Timebomb exploded while the counter ran (in BOOM)", bomb_in<BOOM>());
+
+        // ---- SPSC service: one item per tick from the tick hook, all run long
+        std::snprintf(detail, sizeof detail, "%u received, %u gaps, %u dropped, high water %u",
+                      static_cast<unsigned>(Sink::received), static_cast<unsigned>(Sink::gaps),
+                      static_cast<unsigned>(Sink::dropped()), static_cast<unsigned>(Sink::high_water()));
+        expect("SPSC service: every item from the tick hook arrives once, in order, none dropped",
+               Sink::received > 1000 && Sink::gaps == 0 && Sink::dropped() == 0, detail);
 
         // ---- Periodic process module: TimebombButton samples the button every 5 ms and debounces it
         auto bounce = [](int ticks) {

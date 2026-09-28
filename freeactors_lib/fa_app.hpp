@@ -59,13 +59,14 @@ namespace detail {
     // Marker sender for posts that do not come from an actor
     struct ExternalSender {};
 
-    // Predicate: module M is an MPSC service for items of type T
-    template <typename T>
+    // Predicate: module M is a service of kind Kind (MpscKind / SpscKind) for items of type T
+    template <typename T, typename Kind>
     struct owns_items {
         template <typename M, typename = void>
         struct pred : std::false_type {};
         template <typename M>
-        struct pred<M, std::void_t<typename M::element_type>> : std::is_same<typename M::element_type, T> {};
+        struct pred<M, std::void_t<typename M::element_type, typename M::service_kind>>
+            : std::bool_constant<std::is_same_v<typename M::element_type, T> && std::is_same_v<typename M::service_kind, Kind>> {};
     };
 
     template <typename M, typename = void>
@@ -100,9 +101,11 @@ public:
     template <typename Evt>
     static constexpr size_t receivers_of = (static_cast<size_t>(actor_accepts_event_v<Modules<Hw, AppContext>, Evt>) + ... + 0);
 
-    // Registered MPSC services owning items of type T (routing requires exactly one)
+    // Registered MPSC / SPSC services owning items of type T (routing requires exactly one)
     template <typename T>
-    using services_for = typename filter_types<detail::owns_items<T>::template pred, AllModules>::type;
+    using services_for = typename filter_types<detail::owns_items<T, detail::MpscKind>::template pred, AllModules>::type;
+    template <typename T>
+    using spsc_services_for = typename filter_types<detail::owns_items<T, detail::SpscKind>::template pred, AllModules>::type;
 
     // Actors as the PC sees them: index = position in ActorList (also the timer and trace actor id)
     static constexpr size_t actor_count = detail::ActorTable<ActorList>::count;
@@ -224,6 +227,22 @@ public:
         static_assert(type_list_size_v<services_for<T>> > 0, "No registered MPSC service owns this item type");
         static_assert(type_list_size_v<services_for<T>> == 1, "Ambiguous: several MPSC services own this item type");
         return services_for<T>::FirstType::push_from_isr(item, pxHigherPriorityTaskWoken);
+    }
+
+    // ---- SPSC services (exactly one producer each) --------------------------------------------------------
+
+    template <typename T>
+    static bool spsc_push_from_isr(T const& item, BaseType_t* pxHigherPriorityTaskWoken) {
+        static_assert(type_list_size_v<spsc_services_for<T>> > 0, "No registered SPSC service owns this item type");
+        static_assert(type_list_size_v<spsc_services_for<T>> == 1, "Ambiguous: several SPSC services own this item type");
+        return spsc_services_for<T>::FirstType::push_from_isr(item, pxHigherPriorityTaskWoken);
+    }
+
+    template <typename T>
+    static bool spsc_push(T const& item) {
+        static_assert(type_list_size_v<spsc_services_for<T>> > 0, "No registered SPSC service owns this item type");
+        static_assert(type_list_size_v<spsc_services_for<T>> == 1, "Ambiguous: several SPSC services own this item type");
+        return spsc_services_for<T>::FirstType::push(item);
     }
 
     // ---- Trace (FA_TRACE) --------------------------------------------------------------------------------

@@ -61,6 +61,9 @@ Known limitation (documented, not a bug): a timer that expired and was queued to
 | # | Item | Status |
 |---|---|---|
 | 41 | Trace, phase 1: `MpscServiceInterface`, `TraceService`, records with sender, framing, dictionary + model hash, `fa-trace` decoder (serial/TCP/file). Runs on the Nucleo | ✅ |
+| 45 | `SpscServiceInterface` (lock-free, one producer; `SpscRing` core stress-tested under ThreadSanitizer) | ✅ |
+| 46 | `DmaRingInterface` (continuous DMA: UART idle line and fixed blocks, overrun detection, `span_intact()`) | ⬜ |
+| 47 | Fixed-block DMA example (ADC) | ⬜ |
 | 42 | Trace, phase 2: lock-free `SpscServiceInterface`, `CommandService` (post by index, query states, reset, filter, HELLO request), REPL on the board | ⬜ |
 | 43 | Trace, phase 3: live view in the VS Code HSM editor | ⬜ |
 | 44 | Trace transport improvements: interrupt/DMA UART transmit instead of blocking; `Fa::RttOut` | ⬜ |
