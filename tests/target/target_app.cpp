@@ -12,9 +12,6 @@
 #include "timebomb_app_actor.hpp"      // realistic actor: blinks with a Tick timer (tests/fixtures)
 #include "timebomb_button.hpp"         // periodic process module: debounced button (tests/fixtures)
 #include "fa_cortexm.hpp"
-#ifdef FA_TRACE
-#include "fa_trace_service.hpp"
-#endif
 #include "fa_app.hpp"
 
 // Stand-in board providing Timebomb's hardware requirements (tests/fixtures/timebomb.bsp_policy.hpp).
@@ -68,11 +65,7 @@ struct AppTraits : Fa::DefaultAppTraits {
     using Platform = TargetBoard;
 };
 
-#ifdef FA_TRACE
-using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx, Fa::TraceService>;
-#else
-using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;
-#endif
+using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;   // + trace with FA_TRACE
 
 extern "C" void USART3_IRQHandler(void) {
     BaseType_t woken = pdFALSE;

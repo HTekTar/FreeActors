@@ -4,15 +4,14 @@
 // ==========================================================================
 // Fa::TraceService — sends the application's trace to the PC (docs/design/trace.md, sections 2 and 4).
 //
-// Register it as a module and define FA_TRACE:
-//   using Application = Fa::Application<Traits, MyMachine::Actor, Fa::TraceService>;
+// Built into Fa::Application, like the timer service: define FA_TRACE and the application creates it
+// (do not add it to the module list). Options in your AppTraits: TraceOut, TraceBufferRecords.
 //
-// Output policy (default: the board, Hw) must provide:
+// Output policy (default: the board, AppTraits::Platform) must provide:
 //   static void trace_write(uint8_t const *data, size_t n) noexcept;  // may block: called from the trace task
 //   static uint32_t trace_timestamp() noexcept;                       // any context, including interrupts
 //   static uint32_t trace_timestamp_hz() noexcept;                    // sent to the PC in HELLO
-// A different transport without touching the board:
-//   template <typename Hw, typename Ctx> using MyTrace = Fa::TraceService<Hw, Ctx, MyOut>;
+// A different transport without touching the board:  struct Traits : ... { using TraceOut = MyOut; };
 //
 // Frames sent: HELLO at start-up and again every 256 RECORDS frames (so a PC that starts listening later
 // still learns the clock and actor names), RECORDS (up to 31 records each), LOST after the buffer overflowed.

@@ -257,8 +257,17 @@ function openSerial(port, baud, onData, onEnd) {
         process.exit(1);
     }
     // Linux/macOS fallback: configure the device with stty, then read it as a file
+    if (!fs.existsSync(port)) {
+        console.error(`serial: ${port} does not exist - is the board connected? (list ports: ls /dev/tty{ACM,USB}* on Linux, ls /dev/cu.* on macOS)`);
+        process.exit(1);
+    }
     const flag = process.platform === 'darwin' ? '-f' : '-F';
-    execFileSync('stty', [flag, port, String(baud), 'raw', '-echo', 'cs8', '-cstopb', '-parenb']);
+    try {
+        execFileSync('stty', [flag, port, String(baud), 'raw', '-echo', 'cs8', '-cstopb', '-parenb'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch (e) {
+        console.error(`serial: cannot configure ${port}: ${String(e.stderr || e.message).trim()}`);
+        process.exit(1);
+    }
     const stream = fs.createReadStream(port);
     stream.on('data', onData);
     stream.on('end', onEnd);

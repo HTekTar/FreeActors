@@ -4,8 +4,8 @@
 //   - Timebomb (tests/fixtures/timebomb_app_actor.hpp): blinks with a one-shot Tick timer, cancels it on exit
 //   - InitAction counter (below): a periodic Go timer, counted by an internal transition
 //   - TimebombButton (tests/fixtures/timebomb_button.hpp): a periodic process module debouncing the button
-//   - with FA_TRACE: Fa::TraceService writing the trace to the file named by $FA_TRACE_OUT, which run.sh
-//     decodes with tools/fa-trace.js and checks
+//   - with FA_TRACE: the built-in trace service writes the trace to the file named by $FA_TRACE_OUT
+//     (AppTraits::TraceOut), which run.sh decodes with tools/fa-trace.js and checks
 // A test task (lowest priority) posts events and watches the actors' states and counters.
 // Actors have higher priority, so a post() is fully handled before post() returns.
 // Prints PASS/FAIL per check and exits non-zero on any failure.
@@ -29,8 +29,6 @@
 #include <cstdlib>
 
 #ifdef FA_TRACE
-#include "fa_trace_service.hpp"
-
 // Trace output for the host: frames go to a file, timestamps are microseconds of a monotonic clock.
 struct PosixTraceOut {
     static inline FILE *file = nullptr;
@@ -46,9 +44,6 @@ struct PosixTraceOut {
     }
     static uint32_t trace_timestamp_hz() noexcept { return 1000000; }
 };
-
-template <typename Hw, typename Ctx>
-using HostTrace = Fa::TraceService<Hw, Ctx, PosixTraceOut, 512>;
 #endif
 
 // InitAction actor: once in INNER it schedules Go every GoPeriodMs; each Go runs count() (internal event).
@@ -161,13 +156,13 @@ struct HostBoard {
 
 struct AppTraits : Fa::DefaultAppTraits {
     using Platform = HostBoard;
+#ifdef FA_TRACE
+    using TraceOut = PosixTraceOut;                      // trace to a file instead of the board
+    static constexpr size_t TraceBufferRecords = 512;
+#endif
 };
 
-#ifdef FA_TRACE
-using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx, HostTrace>;
-#else
 using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx>;
-#endif
 using Rx = UartRx<HostBoard, App::AppContext>;
 using Sink = SeqSink<HostBoard, App::AppContext>;
 using Bomb = Timebomb::Actor<HostBoard, App::AppContext>;

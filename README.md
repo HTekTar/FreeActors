@@ -51,7 +51,7 @@ Draw hierarchical state machines in VS Code and turn them into C++17 active obje
 
 ## Runtime trace
 
-Define `FA_TRACE`, add `Fa::TraceService` to the application, and give the board a transport (for example a UART to the debugger's virtual COM port):
+Define `FA_TRACE` — the application then creates its built-in trace service — and give the board a transport (for example a UART to the debugger's virtual COM port):
 
 ```cpp
 static void trace_write(uint8_t const *data, size_t n) noexcept;   // send bytes

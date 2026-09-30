@@ -7,12 +7,19 @@
 #include "fa_util.hpp"
 #include "fa_freertos.hpp"
 #include "fa_timeEvent.hpp"
+#ifdef FA_TRACE
+#include "fa_trace_service.hpp"
+#endif
 
 namespace Fa {
 
 struct DefaultAppTraits {
     static constexpr size_t MaxTimerPayloadSize = 16;   // bytes per pending timer (largest actor event variant)
     static constexpr size_t MaxTimers           = 16;   // pending timers across all actors
+
+    // Trace (built in; only with FA_TRACE). Optional in your traits:
+    //   using TraceOut = MyTransport;                        // where trace bytes go; default: Platform (the board)
+    //   static constexpr size_t TraceBufferRecords = 256;    // trace buffer, 8 bytes per record; default: 128
 };
 
 // The Ctx each module gets inside an Application: routes post/schedule/cancel/mpsc_push/trace to it.
@@ -69,6 +76,20 @@ namespace detail {
             : std::bool_constant<std::is_same_v<typename M::element_type, T> && std::is_same_v<typename M::service_kind, Kind>> {};
     };
 
+    // AppTraits::TraceOut if given, else the board (Platform)
+    template <typename Traits, typename = void>
+    struct trace_out_of { using type = typename Traits::Platform; };
+    template <typename Traits>
+    struct trace_out_of<Traits, std::void_t<typename Traits::TraceOut>> { using type = typename Traits::TraceOut; };
+
+    // AppTraits::TraceBufferRecords if given, else 128
+    template <typename Traits, typename = void>
+    struct trace_buffer_records_of { static constexpr size_t value = 128; };
+    template <typename Traits>
+    struct trace_buffer_records_of<Traits, std::void_t<decltype(Traits::TraceBufferRecords)>> {
+        static constexpr size_t value = Traits::TraceBufferRecords;
+    };
+
     template <typename M, typename = void>
     struct model_hash_of { static constexpr uint32_t value = 0; };
     template <typename M>
@@ -100,6 +121,11 @@ public:
     using AllModules = TypeList<Modules<Hw, AppContext>...>;
     using ActorList = typename filter_types<is_hsm_actor, AllModules>::type;
     using TimerService = TimeEventService<ActorList, AppTraits::MaxTimerPayloadSize, AppTraits::MaxTimers, Application>;
+#ifdef FA_TRACE
+    // Built-in trace service, like the timer service: FA_TRACE is the only switch
+    using Tracer = TraceService<Hw, AppContext, typename detail::trace_out_of<AppTraits>::type,
+                                detail::trace_buffer_records_of<AppTraits>::value>;
+#endif
 
     // Number of registered modules that accept event type Evt (routing requires exactly one)
     template <typename Evt>
@@ -128,6 +154,9 @@ public:
 
     static void init() {
         AppTraits::Platform::init();
+#ifdef FA_TRACE
+        Tracer::create_task();
+#endif
         (init_module<Modules<Hw,AppContext>>(), ...);
     }
 
@@ -261,14 +290,13 @@ public:
 
     // ---- Trace (FA_TRACE) --------------------------------------------------------------------------------
 
-    // True if a module owning TraceRecords (Fa::TraceService) is registered
-    static constexpr bool has_trace_service = type_list_size_v<services_for<TraceRecord>> == 1;
+    // The trace service is built in; registering it as a module as well would start a second one
+    static_assert(type_list_size_v<services_for<TraceRecord>> == 0,
+        "Fa::TraceService is built into Fa::Application (enabled by FA_TRACE): remove it from the module list");
 
     static void trace_record(TraceKind kind, uint8_t actor, uint16_t id) {
 #ifdef FA_TRACE
-        if constexpr (has_trace_service) {
-            services_for<TraceRecord>::FirstType::record(kind, actor, id);
-        }
+        Tracer::record(kind, actor, id);
 #else
         (void)kind; (void)actor; (void)id;
 #endif
@@ -276,9 +304,7 @@ public:
 
     static void trace_record_isr(TraceKind kind, uint8_t actor, uint16_t id, BaseType_t* pxHigherPriorityTaskWoken) {
 #ifdef FA_TRACE
-        if constexpr (has_trace_service) {
-            services_for<TraceRecord>::FirstType::record_from_isr(kind, actor, id, pxHigherPriorityTaskWoken);
-        }
+        Tracer::record_from_isr(kind, actor, id, pxHigherPriorityTaskWoken);
 #else
         (void)kind; (void)actor; (void)id; (void)pxHigherPriorityTaskWoken;
 #endif

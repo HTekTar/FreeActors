@@ -141,14 +141,17 @@ The actor index could later carry an instance number for multi-instance support 
 
 ### 2.3 `Fa::TraceService<Hw, Ctx, Out = Hw>`
 
-An application module on `MpscServiceInterface<TraceService, TraceRecord, N>` (N from `AppTraits`, default 128 → 1 KB). It implements `consume_batch`: frames the records and writes them with `Out::trace_write`. It also sends the `HELLO` frame at start-up and a `LOST` frame after drops (the gap marker).
+An `MpscServiceInterface<TraceService, TraceRecord, N>`. It implements `consume_batch`: frames the records and writes them with `Out::trace_write`. It also sends the `HELLO` frame at start-up and a `LOST` frame after drops (the gap marker).
 
-Registered like any module; `Out` defaults to the board and can be swapped with an alias template:
+**Built into `Fa::Application`**, like the timer service: with `FA_TRACE` the application creates it and starts its task; without it nothing exists. It is not added to the module list (a `static_assert` says so if it is). Configuration, optional, in `AppTraits`:
 
 ```cpp
-using Application = Fa::Application<Traits, Timebomb::Actor, App::ButtonPoller, Fa::TraceService>;
-
-template <typename Hw, typename Ctx> using RttTrace = Fa::TraceService<Hw, Ctx, Board::RttOut>;
+struct Traits : Fa::DefaultAppTraits {
+    using Platform = Board::NucleoF446ZE;
+    using TraceOut = Board::RttOut;                     // default: Platform (the board)
+    static constexpr size_t TraceBufferRecords = 256;   // default: 128 (8 bytes each)
+};
+using Application = Fa::Application<Traits, Timebomb::Actor, App::ButtonPoller>;   // same with or without FA_TRACE
 ```
 
 ### 2.4 Output policy contract (default: the board)
@@ -239,8 +242,7 @@ The blueprint also gets `constexpr uint32_t model_hash` (a hash of the model), w
 ## 7. What the designer writes
 
 Once per application:
-1. Define `FA_TRACE` in the firmware build.
-2. Register the modules: `Fa::TraceService` (and `Fa::CommandService` for two-way) in `Fa::Application<…>`.
+1. Define `FA_TRACE` in the firmware build — the application then creates the trace service itself (and, in phase 2, the command service with its own switch). Optional settings go in `AppTraits` (section 2.3).
 
 Once per board (the transport, like any driver): `trace_write(bytes, n)`, `trace_timestamp()` / `trace_timestamp_hz`, and for two-way `rx_stream_start(buffer, n)` plus the DMA/UART interrupt reporting the write position (dma.md section 3.4; optionally `reset()`).
 
