@@ -1,6 +1,6 @@
 # Single-producer services and continuous DMA — design
 
-Status: **proposal for review**. Nothing here is implemented yet.
+Status: **agreed**. Phases 1–3 implemented in the library (reference-board wiring pending); phase 4 pending.
 Scope: FreeActors v1.0 — a lock-free single-producer service, and continuous (circular) DMA reception built on it. First user: the command side of the trace (`CommandService`, trace.md section 3) receiving over UART with idle-line detection.
 
 ## Goals
@@ -166,7 +166,7 @@ void rx_pause_isr() {                          // idle line, receive timeout, or
 
 ## 4. `CommandService` on a DMA ring
 
-`Fa::CommandService<Hw, Ctx, In = Hw>` derives from `DmaRingInterface<CommandService, uint8_t, 256>`; its `consume_batch` feeds `Fa::frame::Decoder` and executes complete commands (trace.md section 3). Boards without DMA can feed the same decoder from a per-byte receive interrupt through `SpscServiceInterface` instead; the command logic does not depend on where the bytes come from.
+`Fa::CommandService<Hw, Ctx, In = Hw>` derives from `DmaRingInterface<CommandService, uint8_t, 256>` when `In` provides `rx_stream_start`; its `consume_batch` feeds `Fa::frame::Decoder` and executes complete commands (trace.md section 3). Boards without DMA feed the same decoder from a per-byte receive interrupt through `SpscServiceInterface` instead (chosen automatically); the command logic does not depend on where the bytes come from.
 
 ## 5. Testing
 

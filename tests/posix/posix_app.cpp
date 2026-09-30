@@ -6,6 +6,8 @@
 //   - TimebombButton (tests/fixtures/timebomb_button.hpp): a periodic process module debouncing the button
 //   - with FA_TRACE: the built-in trace service writes the trace to the file named by $FA_TRACE_OUT
 //     (AppTraits::TraceOut), which run.sh decodes with tools/fa-trace.js and checks
+//   - with FA_TRACE_COMMANDS: the built-in command service receives PC command frames through a simulated
+//     UART receive DMA (the tick hook); replies (ACK, STATES) appear in the decoded trace
 // A test task (lowest priority) posts events and watches the actors' states and counters.
 // Actors have higher priority, so a post() is fully handled before post() returns.
 // Prints PASS/FAIL per check and exits non-zero on any failure.
@@ -21,12 +23,15 @@
 #include "timebomb_button.hpp"
 #include "initaction_hsm.hpp"
 #include "fa_app.hpp"
+#include "fa_spsc.hpp"
 #include "fa_test.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
+#include <variant>
 
 #ifdef FA_TRACE
 // Trace output for the host: frames go to a file, timestamps are microseconds of a monotonic clock.
@@ -152,6 +157,17 @@ struct HostBoard {
     static void set_led(bool) {}
     static uint16_t read_adc(uint8_t) { return 0; }
     static bool read_button() { return button; }
+#ifdef FA_TRACE_COMMANDS
+    // Command input with receive DMA (the tick hook plays the DMA); no reset(): RESET is refused
+    static inline uint8_t *rx_buffer = nullptr;
+    static inline size_t rx_size = 0;
+    static inline std::atomic<bool> rx_streaming{false};
+    static void rx_stream_start(uint8_t *buffer, size_t n) noexcept {
+        rx_buffer = buffer;
+        rx_size = n;
+        rx_streaming = true;
+    }
+#endif
 };
 
 struct AppTraits : Fa::DefaultAppTraits {
@@ -167,6 +183,11 @@ using Rx = UartRx<HostBoard, App::AppContext>;
 using Sink = SeqSink<HostBoard, App::AppContext>;
 using Bomb = Timebomb::Actor<HostBoard, App::AppContext>;
 using Counter = InitAction::Actor<HostBoard, App::AppContext>;
+
+#ifdef FA_TRACE_COMMANDS
+// The "PC side of the UART": the test task queues command bytes, the tick hook moves them into the DMA buffer
+static Fa::SpscRing<uint8_t, 1024> pc_wire;
+#endif
 
 template <typename M>
 M &instance() {
@@ -192,6 +213,24 @@ extern "C" void vApplicationTickHook(void) {
         }
         App::dma_progress_from_isr<UartRx>(dma_position, nullptr);
     }
+
+#ifdef FA_TRACE_COMMANDS
+    // Simulated command UART + circular DMA: bytes from the PC land in the buffer, then the idle line reports
+    static size_t command_position = 0;
+    if (HostBoard::rx_streaming) {
+        bool arrived = false;
+        pc_wire.consume_available([&](uint8_t const *data, size_t n) {
+            for (size_t i = 0; i < n; ++i) {
+                HostBoard::rx_buffer[command_position] = data[i];
+                command_position = (command_position + 1) % HostBoard::rx_size;
+            }
+            arrived = true;
+        });
+        if (arrived) {
+            App::command_rx_progress_from_isr(command_position, nullptr);
+        }
+    }
+#endif
 }
 
 extern "C" void vApplicationGetIdleTaskMemory(StaticTask_t **tcb, StackType_t **stack, configSTACK_DEPTH_TYPE *size) {
@@ -228,6 +267,24 @@ namespace {
         }
         return -1;
     }
+
+#ifdef FA_TRACE_COMMANDS
+    // Sends one command frame over the simulated UART and gives the target time to handle it
+    void send_command(uint8_t type, std::initializer_list<uint8_t> body, bool corrupt = false) {
+        uint8_t wire[Fa::frame::MaxEncoded];
+        const size_t n = Fa::frame::encode(type, body.begin(), body.size(), wire);
+        if (corrupt) wire[1] ^= 0x40;                     // a damaged byte: the CRC must reject the frame
+        bool wake = false;
+        for (size_t i = 0; i < n; ++i) pc_wire.push(wire[i], wake);
+        vTaskDelay(5);
+    }
+
+    template <typename Variant, typename T, size_t I = 0>
+    constexpr uint8_t event_index() {
+        if constexpr (std::is_same_v<std::variant_alternative_t<I, Variant>, T>) return I;
+        else return event_index<Variant, T, I + 1>();
+    }
+#endif
 
     template <typename S>
     bool bomb_in() {
@@ -323,6 +380,36 @@ namespace {
         vTaskDelay(30);
         expect("button module: one debounced press posts exactly one ButtonPressed (BOOM -> DISARMED)",
                bomb_in<DISARMED>());
+
+#ifdef FA_TRACE_COMMANDS
+        // ---- Commands from the PC: frames through the simulated receive DMA, replies in the trace
+        {
+            namespace cmd = Fa::command_frame;
+            using Bus = Bomb::EventType;
+            const uint8_t pressed = event_index<Bus, ButtonPressed>();
+            const uint8_t tick = event_index<Bus, Tick>();
+            send_command(cmd::Post, {1, 0, pressed});                  // POST ButtonPressed -> Timebomb
+            expect("command POST: the PC's ButtonPressed reaches Timebomb (DISARMED -> WAIT)", bomb_in<WAIT>());
+            send_command(cmd::Post, {2, 0, tick, 0x55});               // Tick has no payload: refused
+            send_command(cmd::Post, {3, 0, 0});                        // Enter_sig: reserved, refused
+            send_command(cmd::Post, {4, 9, pressed});                  // no actor 9
+            expect("command POST: wrong payload size, reserved signal, unknown actor post nothing", bomb_in<WAIT>());
+            send_command(cmd::QueryStates, {5});
+            send_command(cmd::Reset, {6});                             // HostBoard has no reset(): refused
+            const uint32_t bad_before = App::Commander::bad_frames();
+            send_command(cmd::Post, {7, 0, pressed}, true);            // damaged on the wire
+            std::snprintf(detail, sizeof detail, "bad frames %u", static_cast<unsigned>(App::Commander::bad_frames() - bad_before));
+            expect("command with a damaged byte: rejected by its CRC, counted, not executed",
+                   App::Commander::bad_frames() == bad_before + 1 && bomb_in<WAIT>(), detail);
+            send_command(cmd::Post, {8, 0, pressed});                  // WAIT -> LEDON
+            send_command(cmd::Post, {9, 0, pressed});                  // defuse: LEDON -> DISARMED
+            expect("command POSTs: WAIT -> LEDON -> DISARMED", bomb_in<DISARMED>());
+            send_command(cmd::Filter, {10, 0, 0, 0, 0, 0, 0});         // trace off
+            expect("command FILTER: masks set", App::Tracer::kinds_mask == 0 && App::Tracer::actors_mask == 0);
+            send_command(cmd::Filter, {11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});   // back on
+            send_command(cmd::HelloRequest, {});
+        }
+#endif
 
         // ---- Full queue: posts and timer deliveries never block; lost events are counted (and asserted in debug)
         using BombStorage = Fa::StaticActorStorage<Bomb>;

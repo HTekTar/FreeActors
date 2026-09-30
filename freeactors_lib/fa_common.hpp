@@ -76,6 +76,17 @@ namespace Fa{
     };
     static_assert(sizeof(TraceRecord) == 8, "TraceRecord must be exactly 8 bytes");
 
+    // Result of a command from the PC (trace.md section 4.2, ACK frame)
+    enum class CommandStatus : uint8_t {
+        Ok           = 0,
+        UnknownActor = 1,
+        UnknownEvent = 2,   // no such event index, or a reserved signal (Enter/Exit/Init/ExitToParent)
+        PayloadSize  = 3,   // payload bytes do not match the event's size
+        QueueFull    = 4,
+        NotSupported = 5,   // unknown command, or not provided by the board (e.g. reset)
+        BadFrame     = 6,
+    };
+
     // Senders that are not actors (TraceRecord::actor of Post/Dropped records)
     namespace TraceSender {
         constexpr uint8_t Isr   = 0xFF;   // interrupt handler (postFromISR)

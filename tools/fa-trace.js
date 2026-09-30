@@ -52,6 +52,7 @@ function cobsDecode(input) {
 
 const Kind = { Event: 0, GuardFalse: 1, GuardTrue: 2, Action: 3, Transition: 4, Dropped: 5, Post: 6, TimerSchedule: 7, TimerCancel: 8 };
 const Senders = { 0xFF: 'ISR', 0xFE: 'timer', 0xFD: 'PC', 0xFC: 'task' };
+const CommandStatus = ['ok', 'unknown actor', 'unknown event', 'payload size mismatch', 'queue full', 'not supported', 'bad frame'];
 
 function loadDictionaries(paths) {
     const byMachine = new Map();
@@ -209,6 +210,16 @@ function createDecoder(dictionaries, out) {
             const n = (body[0] | (body[1] << 8) | (body[2] << 16) | (body[3] * 0x1000000)) >>> 0;
             stats.lostRecords += n;
             out(`--- ${n} trace record(s) lost on the target (buffer full) ---`);
+        } else if (type === 0x04) {
+            // STATES (reply to QUERY_STATES): sequence, actor count, u16 state per actor
+            const states = [];
+            for (let a = 0; a < body[1] && 3 + 2 * a < body.length; a++) {
+                states.push(`${actorName(a)}=${stateName(a, body[2 + 2 * a] | (body[3 + 2 * a] << 8))}`);
+            }
+            out(`--- STATES #${body[0]}: ${states.join(', ')}`);
+        } else if (type === 0x05) {
+            // ACK (reply to a command): sequence, status
+            out(`--- ACK #${body[0]}: ${CommandStatus[body[1]] || `status ${body[1]}`}`);
         } else {
             out(`--- frame type 0x${type.toString(16)} (${body.length} bytes) ---`);
         }

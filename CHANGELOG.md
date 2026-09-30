@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Framework
+- The trace service is built into the application (`FA_TRACE`), like the timer service.
+- Lock-free single-producer services (`SpscServiceInterface`) and continuous DMA reception (`DmaRingInterface`).
+- Commands from the PC (`FA_TRACE_COMMANDS`): post an event to any actor, query every actor's state, reset, set the trace filter; replies (`ACK`, `STATES`) are decoded by `fa-trace`. Input through receive DMA or one byte per interrupt.
+- `Fa::CortexM::system_reset()`.
+
 ## 0.0.5
 
 ### Editor and export

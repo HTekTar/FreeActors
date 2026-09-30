@@ -64,7 +64,7 @@ Known limitation (documented, not a bug): a timer that expired and was queued to
 | 45 | `SpscServiceInterface` (lock-free, one producer; `SpscRing` core stress-tested under ThreadSanitizer) | ✅ |
 | 46 | `DmaRingInterface` (continuous DMA: UART idle line and fixed blocks, overrun detection, `span_intact()`); overrun paths tested on the ring (host), not yet through the FreeRTOS service | ✅ |
 | 47 | Fixed-block DMA example (ADC) | ⬜ |
-| 42 | Trace, phase 2: lock-free `SpscServiceInterface`, `CommandService` (post by index, query states, reset, filter, HELLO request), REPL on the board | ⬜ |
+| 42 | Trace, phase 2: built-in `CommandService` (`FA_TRACE_COMMANDS`; DMA or per-byte input; post by index, query states, reset, filter, HELLO request), replies decoded by `fa-trace`. Tested on the POSIX port; pending: sending commands from `fa-trace` (REPL on the board), Nucleo USART3 RX DMA | ◐ |
 | 43 | Trace, phase 3: live view in the VS Code HSM editor | ⬜ |
 | 44 | Trace transport improvements: interrupt/DMA UART transmit instead of blocking; `Fa::RttOut` | ⬜ |
 

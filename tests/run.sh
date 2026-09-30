@@ -117,6 +117,7 @@ else
     target_compile m4-fpu ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard
     target_compile m4-nofpu ARM_CM3 -mfloat-abi=soft
     target_compile m4-fpu-trace ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE
+    target_compile m4-fpu-trace-commands ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS
 fi
 
 # Runtime integration: a real Fa::Application on the FreeRTOS POSIX port (tasks = Linux threads, real tick).
@@ -136,7 +137,7 @@ posix_run() {
     for variant in posix_app posix_app_noassert; do
         local flags=()
         [ "$variant" = posix_app_noassert ] && flags=(-DFA_NO_ASSERT)
-        flags+=(-DFA_TRACE)
+        flags+=(-DFA_TRACE -DFA_TRACE_COMMANDS)
         if ! g++ -std=c++17 -O1 -pthread -Wall -Wextra "${flags[@]}" "${inc[@]}" "$ROOT/tests/posix/posix_app.cpp" \
                  "${objs[@]}" -o "$dir/$variant" 2>> "$dir/build.log"; then
             echo "FAIL  posix: $variant build (first errors below, full log: tests/build/posix/build.log)"
@@ -184,6 +185,24 @@ posix_run() {
     expect_trace "$trace" \
         "task +\\[DROPPED\\] ButtonPressed -> Timebomb \\(queue full\\)" \
         "timer +\\[DROPPED\\] Tick -> Timebomb \\(queue full\\)"
+    expect_trace "$trace" \
+        "PC +\\[POST\\] ButtonPressed -> Timebomb" \
+        "Timebomb +\\[EVENT\\] ButtonPressed +\\(from PC, " \
+        "ACK #1: ok" \
+        "ACK #2: payload size mismatch" \
+        "ACK #3: unknown event" \
+        "ACK #4: unknown actor" \
+        "STATES #5: Timebomb=WAIT, Counter=INNER" \
+        "ACK #6: not supported" \
+        "ACK #8: ok" \
+        "Timebomb +\\[TRANSITION\\] ARMED ===> DISARMED" \
+        "ACK #9: ok" \
+        "ACK #10: ok" \
+        "ACK #11: ok"
+    if grep -q "ACK #7" "$trace"; then
+        echo "FAIL  trace: the damaged command #7 was answered"
+        status=1
+    fi
     if grep -q "warning:" "$trace" || ! grep -q " 0 bad frames" "$trace.stats"; then
         echo "FAIL  trace: decoder warnings or bad frames (see tests/build/posix/posix_app_noassert.trace.txt)"
         grep "warning:" "$trace" | head -3

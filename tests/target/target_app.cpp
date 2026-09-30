@@ -25,6 +25,9 @@ struct TargetBoard {
     static void trace_write(uint8_t const *, size_t) noexcept {}
     static uint32_t trace_timestamp() noexcept { return Fa::CortexM::CycleCounter::now(); }
     static uint32_t trace_timestamp_hz() noexcept { return 16000000; }
+
+    // Command input (FA_TRACE_COMMANDS) without receive DMA: one byte per UART interrupt (UART4 below)
+    static void reset() noexcept { Fa::CortexM::system_reset(); }
 };
 
 // SPSC service with an interrupt producer (compiles the lock-free path with M4 flags)
@@ -65,13 +68,21 @@ struct AppTraits : Fa::DefaultAppTraits {
     using Platform = TargetBoard;
 };
 
-using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;   // + trace with FA_TRACE
+using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;   // + trace with FA_TRACE, + commands with FA_TRACE_COMMANDS
 
 extern "C" void USART3_IRQHandler(void) {
     BaseType_t woken = pdFALSE;
     App::dma_progress_from_isr<CommandRx>(17, &woken);   // a board reads the DMA's position here
     portYIELD_FROM_ISR(woken);
 }
+
+#ifdef FA_TRACE_COMMANDS
+extern "C" void UART4_IRQHandler(void) {
+    BaseType_t woken = pdFALSE;
+    App::command_rx_byte_from_isr(0x00, &woken);          // a board reads the received byte here
+    portYIELD_FROM_ISR(woken);
+}
+#endif
 
 extern "C" void ADC_IRQHandler(void) {
     BaseType_t woken = pdFALSE;

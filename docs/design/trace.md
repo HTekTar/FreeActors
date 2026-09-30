@@ -1,6 +1,6 @@
 # Trace and remote control — design
 
-Status: **agreed** (phase 1 in progress).
+Status: **agreed**. Phase 1 implemented; phase 2: `CommandService`, reflection and decoder replies implemented, REPL on the board pending.
 Scope: FreeActors v1.0 — a runtime trace from the target to the PC (one-way), and commands from the PC to the target (two-way).
 
 ## Goals
@@ -167,22 +167,30 @@ Checked at compile time with readable `static_assert`s (the hardware-contract de
 
 ## 3. Commands (PC → target)
 
-### 3.1 `Fa::CommandService<Hw, Ctx>`
+### 3.1 `Fa::CommandService<Hw, Ctx, In = Hw>` (`fa_command_service.hpp`)
 
-Receives command bytes through continuous DMA with idle-line detection: it derives from `DmaRingInterface<CommandService, uint8_t, 256>` (see [dma.md](dma.md)), so bytes are consumed in place, without per-byte interrupts. Its `consume_batch` feeds `Fa::frame::Decoder` and executes complete commands; damaged frames fail their CRC. Boards without DMA can feed the same decoder from a per-byte receive interrupt through `SpscServiceInterface`.
+Built into `Fa::Application` like the trace service: define `FA_TRACE_COMMANDS` (it requires `FA_TRACE`) and the application creates it. `AppTraits::CommandIn` names the command input (default: the board).
 
-Replies go out as trace frames through `mpsc_push` to `TraceService`, so there is one outgoing stream and one decoder.
+The input is chosen at compile time from what `In` provides:
+
+- **Receive DMA** (preferred): `In::rx_stream_start(uint8_t *buffer, size_t n)` exists → the service derives from `DmaRingInterface<CommandService, uint8_t, 256>` ([dma.md](dma.md)); bytes are consumed in place, without per-byte interrupts. The service starts the stream from its task, then the board's interrupt calls `App::Application::command_rx_progress_from_isr(position, &woken)`.
+- **One byte per interrupt**: otherwise → `SpscServiceInterface<CommandService, uint8_t, 64>`; the board's receive interrupt calls `App::Application::command_rx_byte_from_isr(byte, &woken)`.
+
+Using the wrong entry point is a compile error. `consume_batch` feeds `Fa::frame::Decoder` and executes complete commands; damaged frames fail their CRC and are counted (`App::Application::Commander::bad_frames()`), never answered. Overruns and full queues are counted, not asserted: they only cost frames.
+
+Replies go out as **control records** through the trace buffer (`TraceRecord::kind` ≥ `0x80`, never filtered): the trace task is the only writer of the output, and a reply follows the trace records that preceded the command's effect. The trace task turns them into `HELLO`, `ACK` and `STATES` frames. `RESET` is acknowledged first, then after 50 ms (time for the ACK to leave) the service calls `In::reset()`; `Fa::CortexM::system_reset()` works on any Cortex-M.
 
 ### 3.2 Application support (reflection tables built at compile time)
 
 ```cpp
 // Fa::Context<App>
 static CommandStatus post_by_index(uint8_t actor, uint8_t event, uint8_t const *payload, size_t n);
-static uint16_t state_of(uint8_t actor);
-static uint8_t actor_count();
+static uint16_t state_of(size_t actor);
+static void trace_control(uint8_t kind, uint16_t id);          // a reply for the trace task
+static void set_trace_filter(uint32_t kinds, uint32_t actors);
 ```
 
-`post_by_index` rebuilds the event from its bytes (events are trivially copyable; the payload size must match exactly) and posts it through normal routing and the queue-full policy. Reset uses a board policy function, `static void reset() noexcept;` (optional; the command is refused if the board does not provide it).
+`post_by_index` rebuilds the event from its bytes (the payload size must equal `sizeof(Event)`, or 0 for an empty event) and posts it to that actor with the PC as sender (`POST` records show `PC`), under the queue-full policy (`QueueFull` if dropped). Reserved signals (`Enter`, `Exit`, `Init`, `ExitToParent`) are refused as unknown events; events that are not trivially copyable are refused as not supported. `state_of` is the actor's current leaf state, as an index into the dictionary's `states`. Reset uses a board policy function, `static void reset() noexcept;` (optional; the command is refused if the board does not provide it).
 
 ## 4. Wire format
 
@@ -201,7 +209,7 @@ Each frame is `type (1 byte) · body · CRC-16/CCITT-FALSE (2 bytes, little-endi
 | `0x01` | `HELLO` | `u8 protocol_version` (1) · `u32 trace_timestamp_hz` · `u8 actor_count` · per actor: `u8 name_length` · name (`ActorTraits<A>::Name`, already in flash as the task name) · `u32 model_hash` |
 | `0x02` | `RECORDS` | `u8 sequence` · `TraceRecord[]` (up to 31 per frame) |
 | `0x03` | `LOST` | `u32 records_dropped` since the previous `LOST` |
-| `0x04` | `STATES` | `u8 command_sequence` · per actor: `u16 state_index` |
+| `0x04` | `STATES` | `u8 command_sequence` · `u8 actor_count` · per actor: `u16 state_index` |
 | `0x05` | `ACK` | `u8 command_sequence` · `u8 status` (0 ok, 1 unknown actor, 2 unknown event, 3 payload size mismatch, 4 queue full, 5 not supported, 6 bad frame) |
 
 `sequence` lets the PC detect lost frames (transport errors) separately from `LOST` (buffer overflow on the target).
@@ -242,7 +250,7 @@ The blueprint also gets `constexpr uint32_t model_hash` (a hash of the model), w
 ## 7. What the designer writes
 
 Once per application:
-1. Define `FA_TRACE` in the firmware build — the application then creates the trace service itself (and, in phase 2, the command service with its own switch). Optional settings go in `AppTraits` (section 2.3).
+1. Define `FA_TRACE` in the firmware build — the application then creates the trace service itself; add `FA_TRACE_COMMANDS` for the command service. Optional settings go in `AppTraits` (section 2.3).
 
 Once per board (the transport, like any driver): `trace_write(bytes, n)`, `trace_timestamp()` / `trace_timestamp_hz`, and for two-way `rx_stream_start(buffer, n)` plus the DMA/UART interrupt reporting the write position (dma.md section 3.4; optionally `reset()`).
 

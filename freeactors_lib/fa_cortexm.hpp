@@ -15,6 +15,9 @@
 // enable() returns false when the counter is not implemented; use the RTOS tick count instead then
 // (xTaskGetTickCount / xTaskGetTickCountFromISR, trace_timestamp_hz = configTICK_RATE_HZ).
 // Cortex-M0/M0+ never have one.
+//
+// Fa::CortexM::system_reset() — resets the whole chip (AIRCR.SYSRESETREQ), e.g. as the board's reset() for
+// the RESET command:  static void reset() noexcept { Fa::CortexM::system_reset(); }
 // ==========================================================================
 
 #include <cstdint>
@@ -48,6 +51,16 @@ namespace Fa::CortexM {
         static volatile uint32_t &dwt_cyccnt() { return *reinterpret_cast<volatile uint32_t *>(0xE0001004u); }
         static volatile uint32_t &dwt_lar()    { return *reinterpret_cast<volatile uint32_t *>(0xE0001FB0u); }
     };
+
+    // Requests a system reset and waits for it (same as CMSIS NVIC_SystemReset)
+    [[noreturn]] inline void system_reset() {
+        volatile uint32_t &aircr = *reinterpret_cast<volatile uint32_t *>(0xE000ED0Cu);
+        __asm volatile("dsb" ::: "memory");                          // finish outstanding memory accesses
+        aircr = (0x05FAu << 16) | (aircr & (7u << 8)) | (1u << 2);   // VECTKEY, keep PRIGROUP, SYSRESETREQ
+        __asm volatile("dsb" ::: "memory");
+        for (;;) {
+        }
+    }
 
 } // namespace Fa::CortexM
 

@@ -14,7 +14,11 @@
 // A different transport without touching the board:  struct Traits : ... { using TraceOut = MyOut; };
 //
 // Frames sent: HELLO at start-up and again every 256 RECORDS frames (so a PC that starts listening later
-// still learns the clock and actor names), RECORDS (up to 31 records each), LOST after the buffer overflowed.
+// still learns the clock and actor names), RECORDS (up to 31 records each), LOST after the buffer overflowed,
+// and the replies to PC commands (HELLO, ACK, STATES; see fa_command_service.hpp).
+//
+// Replies travel through the trace buffer as control records (kind >= 0x80, never filtered), so the trace
+// task stays the only writer of the output and a reply appears after the records that preceded it.
 // The trace task runs at the lowest application priority (TimeServiceTraits below).
 // ==========================================================================
 
@@ -36,6 +40,12 @@ namespace trace_frame {
     constexpr uint8_t States  = 0x04;
     constexpr uint8_t Ack     = 0x05;
     constexpr size_t RecordsPerFrame = 31;   // 1 + 31 * 8 = 249 bytes <= frame::MaxBody
+
+    // Control record kinds (TraceRecord::kind): requests to the trace task, not trace records
+    constexpr uint8_t ControlHello  = 0x80;   // send HELLO now
+    constexpr uint8_t ControlAck    = 0x81;   // id: command sequence << 8 | CommandStatus
+    constexpr uint8_t ControlStates = 0x82;   // id: command sequence; body read when the frame is built
+    constexpr bool is_control(uint8_t kind) { return kind >= 0x80; }
 }
 
 namespace detail {
@@ -105,6 +115,11 @@ struct TraceService : MpscServiceInterface<TraceService<Hw, Ctx, Out, N>, TraceR
         }
     }
 
+    // A control record (trace_frame::Control*): not filtered. From a task.
+    static void control(uint8_t kind, uint16_t id) {
+        Base::push(TraceRecord{Out::trace_timestamp(), kind, 0, id});
+    }
+
     // ---- Consumer side (the trace task) -----------------------------------------------------------------
 
     static void on_start() noexcept {
@@ -114,28 +129,71 @@ struct TraceService : MpscServiceInterface<TraceService<Hw, Ctx, Out, N>, TraceR
     static void consume_batch(TraceRecord const *records, size_t n) noexcept {
         report_lost();
         while (n > 0) {
-            if (sequence_ == 0 && sent_first_records_) {
-                send_hello();                              // periodic HELLO for late listeners
+            if (trace_frame::is_control(records[0].kind)) {
+                send_control(records[0]);
+                ++records;
+                --n;
+                continue;
             }
-            sent_first_records_ = true;
-            const size_t count = n < trace_frame::RecordsPerFrame ? n : trace_frame::RecordsPerFrame;
-            uint8_t body[1 + trace_frame::RecordsPerFrame * sizeof(TraceRecord)];
-            body[0] = sequence_++;
-            for (size_t i = 0; i < count; ++i) {
-                uint8_t *p = body + 1 + i * sizeof(TraceRecord);
-                detail::put_u32(p, records[i].timestamp);
-                p[4] = records[i].kind;
-                p[5] = records[i].actor;
-                p[6] = static_cast<uint8_t>(records[i].id);
-                p[7] = static_cast<uint8_t>(records[i].id >> 8);
+            size_t count = 0;                              // trace records up to the next control record
+            while (count < n && count < trace_frame::RecordsPerFrame && !trace_frame::is_control(records[count].kind)) {
+                ++count;
             }
-            send(trace_frame::Records, body, 1 + count * sizeof(TraceRecord));
+            send_records(records, count);
             records += count;
             n -= count;
         }
     }
 
 private:
+    static void send_records(TraceRecord const *records, size_t count) {
+        if (sequence_ == 0 && sent_first_records_) {
+            send_hello();                                  // periodic HELLO for late listeners
+        }
+        sent_first_records_ = true;
+        uint8_t body[1 + trace_frame::RecordsPerFrame * sizeof(TraceRecord)];
+        body[0] = sequence_++;
+        for (size_t i = 0; i < count; ++i) {
+            uint8_t *p = body + 1 + i * sizeof(TraceRecord);
+            detail::put_u32(p, records[i].timestamp);
+            p[4] = records[i].kind;
+            p[5] = records[i].actor;
+            p[6] = static_cast<uint8_t>(records[i].id);
+            p[7] = static_cast<uint8_t>(records[i].id >> 8);
+        }
+        send(trace_frame::Records, body, 1 + count * sizeof(TraceRecord));
+    }
+
+    // Replies to PC commands.  ACK: sequence, status.  STATES: sequence, actor count, u16 state per actor.
+    static void send_control(TraceRecord const &r) {
+        switch (r.kind) {
+            case trace_frame::ControlHello:
+                send_hello();
+                break;
+            case trace_frame::ControlAck: {
+                const uint8_t body[2] = {static_cast<uint8_t>(r.id >> 8), static_cast<uint8_t>(r.id)};
+                send(trace_frame::Ack, body, sizeof(body));
+                break;
+            }
+            case trace_frame::ControlStates: {
+                uint8_t body[frame::MaxBody];
+                size_t count = Ctx::actor_count();
+                if (count > (frame::MaxBody - 2) / 2) count = (frame::MaxBody - 2) / 2;
+                body[0] = static_cast<uint8_t>(r.id);
+                body[1] = static_cast<uint8_t>(count);
+                for (size_t a = 0; a < count; ++a) {
+                    const uint16_t state = Ctx::state_of(a);
+                    body[2 + 2 * a] = static_cast<uint8_t>(state);
+                    body[3 + 2 * a] = static_cast<uint8_t>(state >> 8);
+                }
+                send(trace_frame::States, body, 2 + 2 * count);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
     static void send(uint8_t type, uint8_t const *body, size_t n) {
         uint8_t wire[frame::MaxEncoded];
         const size_t length = frame::encode(type, body, n, wire);
