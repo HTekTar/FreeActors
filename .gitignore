@@ -40,3 +40,6 @@ Thumbs.db
 # /freeactors/
 # Engine test build output
 /tests/build/
+
+# Extension packages: published as GitHub Releases, not tracked
+*.vsix
