@@ -18,3 +18,6 @@ tsconfig.json
 BACKLOG.md
 CLAUDE.md
 *.vsix
+README.md
+MARKETPLACE.md
+# (GitHub front page; the Marketplace page is MARKETPLACE.md via --readme-path)

@@ -29,7 +29,8 @@
     "watch:lib": "nodemon --watch freeactors_lib -e hpp,h,cpp --exec npm run copy-lib",
     "watch": "npm run copy-lib && npm run watch:tsc",
     "copy-lib": "mkdir -p out/freeactors_lib && cp -r freeactors_lib/* out/freeactors_lib/ && rm -f out/freeactors_lib/fa_mempool.hpp out/freeactors_lib/linenoise.hpp && cp tools/fa-trace.js out/fa-trace.js",
-    "test": "npm run compile && bash tests/run.sh"
+    "test": "npm run compile && bash tests/run.sh",
+    "package": "npx @vscode/vsce package --readme-path MARKETPLACE.md --allow-missing-repository"
   },
   "main": "./out/extension.js",
   "activationEvents": [
