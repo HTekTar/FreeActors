@@ -145,9 +145,9 @@ Early preview (0.0.x), heading for 1.0. Working and verified on one board; the m
 
 ## How it was built
 
-I designed and wrote the foundation on my own: the hierarchical state machine engine (`fa_core.hpp`, the type-list metaprogramming in `fa_util.hpp`, the compile-time reflection), the code generator, and the desktop simulator with its reachability analysis.
+The state machine engine (`fa_core.hpp`, the type-list metaprogramming in `fa_util.hpp`, the compile-time reflection), the code generator and the desktop simulator were written by hand, using common C++ metaprogramming techniques (type lists, detection idioms).
 
-I used an AI coding assistant (Claude, by Anthropic) for the visual editor, and to grow the project into a runtime platform: the FreeRTOS services, the trace transport and commands, DMA reception, the health monitor, `fa-trace`, the test harness and the design documents. Commits it co-wrote are marked `Co-Authored-By`. I set the goals and the architecture, decided between the design alternatives, reviewed the changes, and verified the behaviour on the hardware.
+The visual editor and the runtime platform (FreeRTOS services, trace transport and commands, DMA reception, the health monitor, `fa-trace`, the test harness and the design documents) were developed with an AI coding assistant (Claude, by Anthropic); those commits are marked `Co-Authored-By`. Design decisions and testing on the hardware were done by me.
 
 ## License
 
