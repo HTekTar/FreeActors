@@ -19,10 +19,83 @@
 #include "fa_common.hpp"
 #include "fa_core.hpp"
 #include "fa_dma.hpp"
+#include "fa_health.hpp"
 #include "fa_spsc.hpp"
 #include "fa_util.hpp"
 
 namespace Fa{
+    // Health probes (FA_HEALTH, docs/design/health.md): every task loop below brackets each unit of work with
+    // a HealthStep. Without FA_HEALTH both are empty and compile to nothing.
+#ifdef FA_HEALTH
+    using HealthProbe = ProgressProbe;
+    struct HealthStep {
+        explicit HealthStep(HealthProbe &probe) : probe_(probe) { probe_.begin(static_cast<uint32_t>(xTaskGetTickCount())); }
+        ~HealthStep() { probe_.end(static_cast<uint32_t>(xTaskGetTickCount())); }
+        HealthStep(HealthStep const &) = delete;
+        HealthStep &operator=(HealthStep const &) = delete;
+    private:
+        HealthProbe &probe_;
+    };
+    static_assert(sizeof(TickType_t) >= 4, "FA_HEALTH needs 32-bit ticks (configUSE_16_BIT_TICKS 0); probes keep the low 32 bits");
+#else
+    struct HealthProbe {};
+    struct HealthStep {
+        explicit HealthStep(HealthProbe &) {}
+    };
+#endif
+
+    // Pause gate (FA_DEBUG_COMMANDS: pause / resume / health test from the PC). Checked by every task loop
+    // below at a unit-of-work boundary, never in the middle of one: a paused task holds no lock it would not
+    // hold between steps. While paused (and until the first drain after resuming) full queues and DMA
+    // overruns are counted without FA_ASSERT: they are the expected result of the pause.
+#ifdef FA_DEBUG_COMMANDS
+    struct PauseGate {
+        enum Mode : uint8_t { Running = 0, Paused = 1, HealthTest = 2 };
+        std::atomic<uint8_t> mode{Running};
+        std::atomic<bool> was_paused{false};
+
+        // In the task itself. Returns true if it waited.
+        bool wait_while_paused() {
+            bool waited = false;
+            while (mode.load(std::memory_order_acquire) != Running) {
+                waited = true;
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            }
+            return waited;
+        }
+        bool excused() const { return mode.load(std::memory_order_relaxed) != Running || was_paused.load(std::memory_order_relaxed); }
+        void clear_excuse() { if (mode.load(std::memory_order_relaxed) == Running) was_paused.store(false, std::memory_order_relaxed); }
+
+        // From the command service's task
+        void pause(Mode m) {
+            was_paused.store(true, std::memory_order_relaxed);
+            mode.store(m, std::memory_order_release);
+        }
+        void resume(TaskHandle_t task) {
+            mode.store(Running, std::memory_order_release);
+            if (task != nullptr) xTaskNotifyGive(task);
+        }
+    };
+#else
+    struct PauseGate {
+        bool wait_while_paused() { return false; }
+        bool excused() const { return false; }
+        void clear_excuse() {}
+    };
+#endif
+
+    // One task the framework runs, as the health monitor and the pause commands see it (built at compile
+    // time by Fa::Application; index = position in the table, names in the MODULES frame)
+    struct TaskEntry {
+        HealthProbe *probe;
+        PauseGate *gate;
+        bool (*pending)();
+        TaskHandle_t (*task)();
+        char const *name;
+        HealthLimits limits;   // ticks
+        bool builtin;          // the framework's own services: cannot be paused
+    };
+
     template <typename Actor>
     struct StaticActorStorage {
         using Traits    = ActorTraits<Actor>;
@@ -45,17 +118,34 @@ namespace Fa{
         // because a full queue means QueueLength is too small or the actor is stuck.
         static void on_queue_full() {
             dropped.fetch_add(1, std::memory_order_relaxed);
-            FA_ASSERT(false /* actor queue full: increase ActorTraits::QueueLength */);
+            if (!pause_gate.excused()) {
+                FA_ASSERT(false /* actor queue full: increase ActorTraits::QueueLength */);
+            }
         }
 
+        // Health: one unit of work = one run-to-completion step; pending = events queued
+        inline static HealthProbe health_probe;
+        inline static PauseGate pause_gate;
+        inline static std::atomic<bool> holding{false};   // paused with an event already taken
+        static bool health_pending() { return holding.load(std::memory_order_relaxed) || uxQueueMessagesWaiting(queueHandle) > 0; }
+        static TaskHandle_t health_task() { return taskHandle; }
+
         [[noreturn]] static void taskLoop(void* /*pvParameters*/) {
-            Actor::start(instance);
+            {
+                HealthStep step(health_probe);
+                Actor::start(instance);
+            }
 
             EventType event;
             BaseType_t rxStatus;
             for (;;) {
-                rxStatus = xQueueReceive(queueHandle, &event, portMAX_DELAY);
+                rxStatus = xQueueReceive(queueHandle, &event, portMAX_DELAY);   // waiting here is never a fault
                 configASSERT(rxStatus  == pdPASS);
+                holding.store(true, std::memory_order_relaxed);
+                pause_gate.wait_while_paused();             // paused: nothing is handled after the pause
+                holding.store(false, std::memory_order_relaxed);
+                pause_gate.clear_excuse();
+                HealthStep step(health_probe);
                 Actor::dispatch(instance, event);
             }
         }
@@ -87,6 +177,13 @@ namespace Fa{
         static inline StackType_t  s_timer_task_stack[TimeServiceTraits<S>::stack_size];
         static inline StaticTask_t task_tcb;
         static inline constexpr TickType_t tick_delay = ms_to_ticks_clamped(DelayMs);
+        static constexpr size_t period_ms = DelayMs;
+
+        // Health: one unit of work = one task() call; an iteration is always due (pending)
+        static inline HealthProbe health_probe;
+        static inline PauseGate pause_gate;
+        static bool health_pending() { return true; }
+        static TaskHandle_t health_task() { return task_handle; }
 
         static void create_task() {
             task_handle = xTaskCreateStatic(
@@ -107,7 +204,12 @@ namespace Fa{
             TickType_t xLastWakeTime = xTaskGetTickCount();
             for (;;) {
                 vTaskDelayUntil(&xLastWakeTime, tick_delay);
+                if (pause_gate.wait_while_paused()) {
+                    xLastWakeTime = xTaskGetTickCount();     // resumed: no burst of missed iterations
+                    pause_gate.clear_excuse();
+                }
 
+                HealthStep step(health_probe);
                 S::task();
             }
         }
@@ -209,6 +311,12 @@ namespace Fa{
         static uint32_t dropped() { return dropped_; }
         static size_t high_water() { return high_water_; }
 
+        // Health: one unit of work = one consumed span; pending = items buffered
+        static inline HealthProbe health_probe;
+        static inline PauseGate pause_gate;
+        static bool health_pending() { return count_ > 0; }
+        static TaskHandle_t health_task() { return task_handle; }
+
         static void create_task() {
             task_handle = xTaskCreateStatic(
                 &service_task,
@@ -243,11 +351,14 @@ namespace Fa{
 
         static void on_full() {
             if constexpr (detail::assert_on_full_of<S>::value) {
-                FA_ASSERT(false /* MPSC service buffer full: increase N */);
+                if (!pause_gate.excused()) {
+                    FA_ASSERT(false /* MPSC service buffer full: increase N */);
+                }
             }
         }
 
         static void consume_span(size_t first, size_t n) {
+            HealthStep step(health_probe);
             if constexpr (detail::has_consume_batch<S, T>::value) {
                 S::consume_batch(&buffer_[first], n);
             } else {
@@ -259,6 +370,8 @@ namespace Fa{
 
         // Consumes everything available; items pushed meanwhile are picked up by the next loop pass.
         static void drain() {
+            pause_gate.wait_while_paused();
+            pause_gate.clear_excuse();
             for (;;) {
                 taskENTER_CRITICAL();
                 const size_t n = count_;
@@ -337,6 +450,12 @@ namespace Fa{
         static uint32_t dropped() { return ring_.dropped(); }
         static size_t high_water() { return ring_.high_water(); }
 
+        // Health: one unit of work = one consumed span; pending = items buffered
+        static inline HealthProbe health_probe;
+        static inline PauseGate pause_gate;
+        static bool health_pending() { return ring_.available() > 0; }
+        static TaskHandle_t health_task() { return task_handle; }
+
         static void create_task() {
             task_handle = xTaskCreateStatic(
                 &service_task,
@@ -355,15 +474,20 @@ namespace Fa{
     private:
         static void on_full() {
             if constexpr (detail::assert_on_full_of<S>::value) {
-                FA_ASSERT(false /* SPSC service buffer full: increase N */);
+                if (!pause_gate.excused()) {
+                    FA_ASSERT(false /* SPSC service buffer full: increase N */);
+                }
             }
         }
 
         // Consumes until the ring is empty; the final check pairs with the producer's wake decision
         // (fa_spsc.hpp), so returning here and sleeping can never strand an item.
         static void drain() {
+            pause_gate.wait_while_paused();
+            pause_gate.clear_excuse();
             while (ring_.available() > 0) {
                 ring_.consume_available([](T const *items, size_t n) {
+                    HealthStep step(health_probe);
                     if constexpr (detail::has_consume_batch<S, T>::value) {
                         S::consume_batch(items, n);
                     } else {
@@ -423,6 +547,12 @@ namespace Fa{
         static uint32_t overruns() { return ring_.overruns(); }
         static size_t high_water() { return ring_.high_water(); }
 
+        // Health: one unit of work = one consumed span; pending = unread data
+        static inline HealthProbe health_probe;
+        static inline PauseGate pause_gate;
+        static bool health_pending() { return ring_.available() > 0; }
+        static TaskHandle_t health_task() { return task_handle; }
+
         static void create_task() {
             task_handle = xTaskCreateStatic(
                 &service_task,
@@ -440,10 +570,13 @@ namespace Fa{
 
     private:
         static void drain() {
+            pause_gate.wait_while_paused();
+            const bool excused = pause_gate.excused();       // overruns caused by the pause are expected
             while (ring_.available() > 0) {
                 const uint32_t overruns_before = ring_.overruns();
                 ring_.consume_available(
                     [](T const *data, size_t n) {
+                        HealthStep step(health_probe);
                         if constexpr (detail::has_invalidate<S, T>::value) {
                             S::invalidate(data, n);
                         }
@@ -458,10 +591,13 @@ namespace Fa{
                     });
                 if (ring_.overruns() != overruns_before) {
                     if constexpr (detail::assert_on_overrun_of<S>::value) {
-                        FA_ASSERT(false /* DMA overrun: the consumer fell behind the stream */);
+                        if (!excused) {
+                            FA_ASSERT(false /* DMA overrun: the consumer fell behind the stream */);
+                        }
                     }
                 }
             }
+            pause_gate.clear_excuse();
         }
 
         [[noreturn]] static void service_task(void * /*pvParameters*/) {

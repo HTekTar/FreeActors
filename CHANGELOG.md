@@ -5,8 +5,11 @@
 ### Framework
 - The trace service is built into the application (`FA_TRACE`), like the timer service.
 - Lock-free single-producer services (`SpscServiceInterface`) and continuous DMA reception (`DmaRingInterface`).
-- Commands from the PC (`FA_TRACE_COMMANDS`): post an event to any actor, query every actor's state, reset, set the trace filter; replies (`ACK`, `STATES`) are decoded by `fa-trace`. Input through receive DMA or one byte per interrupt.
+- Commands from the PC (`FA_TRACE_COMMANDS`): post an event to any actor, query every actor's state, reset, set the trace filter; type them in `fa-trace` while the trace runs (or script them with `--encode`); replies appear in the trace. Input through receive DMA or one byte per interrupt.
 - `Fa::CortexM::system_reset()`.
+- Health monitor and watchdog manager (`FA_HEALTH`): every task the framework runs is checked without code in the modules (stuck in a step, work waiting without progress, optional idle timeout); the hardware watchdog is fed only while all are healthy; the fault that caused a reset is reported at the next start-up; `health` in `fa-trace` shows each task's status, longest step and free stack.
+- Debug commands (`FA_DEBUG_COMMANDS`): `pause` / `resume` any task between steps, `health test` to prove the watchdog chain on the real board; `reset` now needs this switch too.
+- `fa-trace`: colored output in a terminal, `events` and Tab completion, recognises a target restart.
 
 ## 0.0.5
 

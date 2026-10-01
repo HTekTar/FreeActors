@@ -1,6 +1,6 @@
 # Trace and remote control — design
 
-Status: **agreed**. Phase 1 implemented; phase 2: `CommandService`, reflection and decoder replies implemented, REPL on the board pending.
+Status: **agreed**. Phases 1 and 2 implemented (phase 2 tested on the POSIX port; reference-board command input pending).
 Scope: FreeActors v1.0 — a runtime trace from the target to the PC (one-way), and commands from the PC to the target (two-way).
 
 ## Goals
@@ -211,6 +211,8 @@ Each frame is `type (1 byte) · body · CRC-16/CCITT-FALSE (2 bytes, little-endi
 | `0x03` | `LOST` | `u32 records_dropped` since the previous `LOST` |
 | `0x04` | `STATES` | `u8 command_sequence` · `u8 actor_count` · per actor: `u16 state_index` |
 | `0x05` | `ACK` | `u8 command_sequence` · `u8 status` (0 ok, 1 unknown actor, 2 unknown event, 3 payload size mismatch, 4 queue full, 5 not supported, 6 bad frame) |
+| `0x06` | `MODULES` | health monitor (`FA_HEALTH`): names of the monitored tasks, after `HELLO` ([health.md](health.md) section 6) |
+| `0x07` | `HEALTH` | reply to `QUERY_HEALTH` ([health.md](health.md) section 6) |
 
 `sequence` lets the PC detect lost frames (transport errors) separately from `LOST` (buffer overflow on the target).
 
@@ -223,6 +225,12 @@ Each frame is `type (1 byte) · body · CRC-16/CCITT-FALSE (2 bytes, little-endi
 | `0x83` | `RESET` | `u8 command_sequence` |
 | `0x84` | `HELLO_REQUEST` | — (target answers with `HELLO`; for a PC connecting mid-run) |
 | `0x85` | `FILTER` | `u8 command_sequence` · `u16 kinds_mask` (bit n = kind n) · `u32 actors_mask` (bit n = actor n) |
+| `0x86` | `QUERY_HEALTH` | `u8 command_sequence` (`FA_HEALTH`; answered with `HEALTH`) |
+| `0x87` | `PAUSE` | `u8 command_sequence` · `u8 task` (`FA_DEBUG_COMMANDS`, [health.md](health.md) section 7) |
+| `0x88` | `RESUME` | `u8 command_sequence` · `u8 task` (`FA_DEBUG_COMMANDS`) |
+| `0x89` | `HEALTH_TEST` | `u8 command_sequence` · `u8 task` (`FA_DEBUG_COMMANDS` and `FA_HEALTH`) |
+
+`RESET` and the three task commands stop the machine: they need `FA_DEBUG_COMMANDS` as well, and are answered `not supported` without it. ACK status 7 is `not allowed` (e.g. pausing the framework's own services).
 
 ## 5. Dictionary (ids → names)
 
@@ -244,7 +252,14 @@ The blueprint also gets `constexpr uint32_t model_hash` (a hash of the model), w
   - **TCP**, e.g. OpenOCD's RTT server (`rtt server start <port> 0`, needs a debug probe and an RTT `Out` policy on the target) or any serial-to-network bridge;
   - **file or pipe**, for recorded traces and the POSIX test.
   `serialport` is the extension's first native dependency: the `.vsix` must ship its prebuilt binaries for every platform, or be published per platform (`vsce --target`). Development and CI testing happen on Linux; Windows needs a check on a Windows machine or CI runner.
-- **Phase 2 — REPL on the board**: the existing REPL commands (`send`, `print state`) sent as command frames; replies and trace shown as today.
+- **Phase 2 — commands from `fa-trace`**: with `--serial` or `--tcp` (and a terminal), commands typed while the trace runs are sent as command frames; replies appear in the trace, each `ACK` labelled with its command:
+  - `post <actor> <event> [payload bytes in hex]` — actor and event by name (from `HELLO` and the dictionary) or number; payloads are the event's raw bytes (little-endian);
+  - `states`, `reset`, `hello`;
+  - `pause <task>`, `resume <task>`, `health test <task>` (`FA_DEBUG_COMMANDS`, [health.md](health.md) section 7);
+  - `health` — every monitored task's status, longest step and free stack (`FA_HEALTH`, [health.md](health.md));
+  - `events [actor]` — the events each actor accepts (answered locally from `HELLO` and the dictionaries); Tab completes commands, actors, events and filter kinds;
+  - `filter all` | `filter <kinds> [actors]`, e.g. `filter transition,event Timebomb` (kinds: event, guard, action, transition, dropped, post, timer, or a number mask).
+  Scripted, without a target: `fa-trace --dict <folder> --actors Timebomb,Counter --encode "post Timebomb ButtonPressed" > cmds.bin` (`--actors` names the application's actors in order, as `HELLO` would). The POSIX test feeds such a script to the target.
 - **Phase 3 — VS Code live view**: the HSM editor highlights each actor's active state as the target runs; a trace panel.
 
 ## 7. What the designer writes

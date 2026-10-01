@@ -45,6 +45,7 @@ build_and_run spsc_test "$ROOT/tests/spsc_test.cpp" -O2 -pthread
 build_and_run spsc_test_tsan "$ROOT/tests/spsc_test.cpp" -O1 -g -pthread -fsanitize=thread
 build_and_run dma_test "$ROOT/tests/dma_test.cpp" -O2 -pthread
 build_and_run dma_test_tsan "$ROOT/tests/dma_test.cpp" -O1 -g -pthread -fsanitize=thread
+build_and_run health_test "$ROOT/tests/health_test.cpp"
 build_and_run engine_test "$ROOT/tests/engine_test.cpp"
 build_and_run actor_test "$ROOT/tests/actor_test.cpp"
 build_and_run actor_test_fa_trace "$ROOT/tests/actor_test.cpp" -DFA_TRACE
@@ -90,13 +91,15 @@ fi
 # Target compile check: the firmware code path built for Cortex-M4 with arm-none-eabi-g++ and real FreeRTOS
 # headers, with and without FPU. Compiled, not linked. Needs FREERTOS_KERNEL_PATH (a FreeRTOS kernel
 # "Source" folder, containing include/ and portable/); skipped if it or the toolchain is missing.
+# Any function frame over 256 bytes fails the build (-Werror=stack-usage): framework tasks have small stacks
+# (e.g. the trace task: 256 words), and the POSIX port, with its large thread stacks, cannot show an overflow.
 # target_compile <label> <FreeRTOS port dir> <float flags...>
 target_compile() {
     local label="$1" port="$2"
     shift 2
     local obj="$OUT/target_$label.o"
     if arm-none-eabi-g++ -std=c++17 -mcpu=cortex-m4 -mthumb "$@" -Os -fno-exceptions -fno-rtti \
-           -ffunction-sections -fdata-sections -Wall -Wextra \
+           -ffunction-sections -fdata-sections -Wall -Wextra -Werror=stack-usage=256 \
            -I"$ROOT/tests/target" -I"$FREERTOS_KERNEL_PATH/include" -I"$FREERTOS_KERNEL_PATH/portable/GCC/$port" \
            -I"$OUT" -I"$ROOT/tests/fixtures" -I"$ROOT/freeactors_lib" \
            -c "$ROOT/tests/target/target_app.cpp" -o "$obj" 2> "$OUT/target_$label.compile.log"; then
@@ -118,6 +121,7 @@ else
     target_compile m4-nofpu ARM_CM3 -mfloat-abi=soft
     target_compile m4-fpu-trace ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE
     target_compile m4-fpu-trace-commands ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS
+    target_compile m4-fpu-trace-commands-health ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS -DFA_HEALTH -DFA_DEBUG_COMMANDS
 fi
 
 # Runtime integration: a real Fa::Application on the FreeRTOS POSIX port (tasks = Linux threads, real tick).
@@ -134,10 +138,18 @@ posix_run() {
     done
     # posix_app with FreeActors assertions: must pass every check, then stop at the queue-full assertion (exit 3)
     # posix_app_noassert (-DFA_NO_ASSERT): a full queue drops and counts events; must pass every check (exit 0)
+    # Commands as the PC tool encodes them; the target runs them after its own command checks
+    node "$ROOT/tools/fa-trace.js" --dict "$OUT" --actors Timebomb,Counter \
+        --encode "post Timebomb ButtonPressed" \
+        --encode "filter transition Timebomb" \
+        --encode "post 0 ButtonPressed" \
+        --encode "filter all" \
+        --encode "post Timebomb 5" \
+        --encode "states" > "$dir/commands.bin" || { echo "FAIL  fa-trace --encode"; status=1; }
     for variant in posix_app posix_app_noassert; do
         local flags=()
         [ "$variant" = posix_app_noassert ] && flags=(-DFA_NO_ASSERT)
-        flags+=(-DFA_TRACE -DFA_TRACE_COMMANDS)
+        flags+=(-DFA_TRACE -DFA_TRACE_COMMANDS -DFA_HEALTH -DFA_DEBUG_COMMANDS)
         if ! g++ -std=c++17 -O1 -pthread -Wall -Wextra "${flags[@]}" "${inc[@]}" "$ROOT/tests/posix/posix_app.cpp" \
                  "${objs[@]}" -o "$dir/$variant" 2>> "$dir/build.log"; then
             echo "FAIL  posix: $variant build (first errors below, full log: tests/build/posix/build.log)"
@@ -146,14 +158,17 @@ posix_run() {
             continue
         fi
         echo "== $variant"
-        FA_TRACE_OUT="$dir/$variant.trace" timeout 30 "$dir/$variant" > "$dir/$variant.out" 2>&1
+        FA_TRACE_OUT="$dir/$variant.trace" FA_COMMANDS_IN="$dir/commands.bin" timeout 30 "$dir/$variant" > "$dir/$variant.out" 2>&1
         local code=$?
         cat "$dir/$variant.out"
         if [ "$variant" = posix_app ]; then
-            if [ $code -eq 3 ] && grep -q "ASSERT .*fa_freertos.hpp" "$dir/$variant.out" && ! grep -q "^FAIL" "$dir/$variant.out"; then
+            # the assertion must be the queue-full one: the line right after the test's announcement
+            if [ $code -eq 3 ] && grep -A1 "^INFO  posix: queue full, expecting the queue-full assertion next" "$dir/$variant.out" \
+                    | grep -q "^ASSERT .*fa_freertos.hpp" && ! grep -q "^FAIL" "$dir/$variant.out"; then
                 echo "PASS  posix: full queue stops at the queue-full assertion when assertions are enabled"
             else
-                echo "FAIL  posix: expected every check to pass, then the queue-full assertion (exit 3), got exit $code"
+                echo "FAIL  posix: expected every check to pass, then the queue-full assertion (exit 3), got exit $code" \
+                     "after: $(grep -v '^PASS' "$dir/$variant.out" | tail -2 | tr '\n' ' ')"
                 status=1
             fi
         elif [ $code -ne 0 ]; then
@@ -199,6 +214,52 @@ posix_run() {
         "ACK #9: ok" \
         "ACK #10: ok" \
         "ACK #11: ok"
+    # the fa-trace --encode script: sequence numbers restart at 1 after the target's own checks (#11)
+    expect_trace "$trace" \
+        "ACK #11: ok" \
+        "ACK #1: ok" \
+        "ACK #2: ok" \
+        "Timebomb +\\[TRANSITION\\] WAIT ===> LEDON" \
+        "ACK #3: ok" \
+        "ACK #4: ok" \
+        "PC +\\[POST\\] ButtonPressed -> Timebomb" \
+        "ACK #5: ok" \
+        "STATES #6: Timebomb=DISARMED, Counter=INNER"
+    local filtered
+    filtered=$(sed -n '/ACK #2: ok/,/ACK #4: ok/p' "$trace" | grep -v -e "ACK #" -e "TRANSITION" || true)
+    if [ -n "$filtered" ]; then
+        echo "FAIL  trace: 'filter transition Timebomb' let other records through:"
+        echo "$filtered" | head -3
+        status=1
+    else
+        echo "PASS  trace: 'filter transition Timebomb' passes Timebomb's transitions only"
+    fi
+    # health monitor (FA_HEALTH): start-up report of the pre-loaded "previous run", then the injected faults
+    expect_trace "$trace" \
+        "health monitor watches: 0=Timebomb, 1=Counter, 2=Button, 3=SeqSink, 4=UartRx, 5=Worker, 6=FaTrace, 7=FaCmd" \
+        "health +\\[RESET\\] started after: watchdog" \
+        "health +\\[HEALTH\\] Button no progress for 750 ms with work waiting +\\(previous run"
+    expect_trace "$trace" \
+        "health +\\[HEALTH\\] Worker stuck: busy 3[0-9][0-9] ms in one step" \
+        "health +\\[HEALTH\\] Timebomb no progress for 3[0-9][0-9] ms with work waiting" \
+        "health +\\[HEALTH\\] SeqSink idle: no input for 2[0-9][0-9] ms" \
+        "HEALTH #12: started after watchdog, up [0-9.]+ s, watchdog no longer fed" \
+        "^ +Timebomb +ok +[0-9]+ ms +[0-9]+ words" \
+        "^ +SeqSink +IDLE" \
+        "^ +Worker +ok +4[0-9][0-9] ms"
+    # pause / resume / health test (FA_DEBUG_COMMANDS)
+    expect_trace "$trace" \
+        "ACK #20: ok" \
+        "ACK #21: not allowed" \
+        "ACK #22: unknown actor" \
+        "HEALTH #23: " \
+        "^ +Timebomb +PAUSED" \
+        "ACK #24: ok" \
+        "ACK #25: ok" \
+        "ACK #26: ok"
+    expect_trace "$trace" \
+        "ACK #13: ok" \
+        "health +\\[HEALTH\\] Counter no progress for 3[0-9][0-9] ms with work waiting"
     if grep -q "ACK #7" "$trace"; then
         echo "FAIL  trace: the damaged command #7 was answered"
         status=1

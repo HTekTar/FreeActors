@@ -148,6 +148,8 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *h, uint16_t posit
 }
 ```
 
+Caution with this HAL path: on any receive error (including a framing error when the PC opens the port) the HAL aborts the DMA and calls `HAL_UART_ErrorCallback`; restarting it resets the DMA to the start of the buffer, out of step with the ring. The reference board (timebomb repository, `Board::NucleoF446ZE`) therefore programs the DMA stream and the USART's idle-line interrupt directly: errors only set flags, reception never stops, and the half-transfer, transfer-complete and idle-line interrupts all report the current position (`N - NDTR`).
+
 Example — a double-buffer (ping-pong) DMA, in outline:
 
 ```cpp

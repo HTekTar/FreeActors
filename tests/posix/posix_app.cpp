@@ -8,6 +8,9 @@
 //     (AppTraits::TraceOut), which run.sh decodes with tools/fa-trace.js and checks
 //   - with FA_TRACE_COMMANDS: the built-in command service receives PC command frames through a simulated
 //     UART receive DMA (the tick hook); replies (ACK, STATES) appear in the decoded trace
+//   - with FA_HEALTH: the built-in health monitor watches every task and feeds HostBoard's simulated
+//     watchdog. The whole run must cause no fault; then a hang, a starved actor and an idle service are
+//     injected (drop-and-count build only, which gets past the full-queue check)
 // A test task (lowest priority) posts events and watches the actors' states and counters.
 // Actors have higher priority, so a post() is fully handled before post() returns.
 // Prints PASS/FAIL per check and exits non-zero on any failure.
@@ -30,6 +33,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <variant>
 
@@ -95,6 +99,7 @@ namespace Fa {
         static constexpr const char* name     = "SeqSink";
         static constexpr size_t stack_size    = 128;
         static constexpr UBaseType_t priority = 2;
+        static constexpr uint32_t MaxIdleMs   = 200;   // health: items arrive every tick; silence is a fault
     };
 }
 
@@ -148,6 +153,31 @@ struct UartRx : Fa::DmaRingInterface<UartRx<Hw, Ctx>, uint8_t, 64> {
     }
 };
 
+// Periodic module that can be told to hang inside one iteration (health monitor test)
+template <typename Hw, typename Ctx>
+struct Worker;
+
+namespace Fa {
+    template <typename Hw, typename Ctx>
+    struct TimeServiceTraits<Worker<Hw, Ctx>> {
+        static constexpr const char* name     = "Worker";
+        static constexpr size_t stack_size    = 128;
+        static constexpr UBaseType_t priority = 2;
+    };
+}
+
+template <typename Hw, typename Ctx>
+struct Worker : Fa::TimeServiceInterface<Worker<Hw, Ctx>, 10> {
+    static inline std::atomic<uint32_t> hang_ms{0};
+    static inline std::atomic<uint32_t> iterations{0};
+    static void task() noexcept {
+        ++iterations;
+        if (const uint32_t ms = hang_ms.exchange(0)) {
+            vTaskDelay(pdMS_TO_TICKS(ms));          // stuck inside one iteration
+        }
+    }
+};
+
 // Host board for all modules. Like NucleoBsp it declares instance_id = 1, which must not affect routing.
 // The button level is set by the test task.
 struct HostBoard {
@@ -157,6 +187,13 @@ struct HostBoard {
     static void set_led(bool) {}
     static uint16_t read_adc(uint8_t) { return 0; }
     static bool read_button() { return button; }
+
+    // Simulated hardware watchdog (FA_HEALTH): records start and feeding; "started after a watchdog reset"
+    static inline std::atomic<uint32_t> watchdog_timeout{0};
+    static inline std::atomic<uint32_t> kicks{0};
+    static void watchdog_start(uint32_t timeout_ms) noexcept { watchdog_timeout = timeout_ms; }
+    static void watchdog_kick() noexcept { ++kicks; }
+    static Fa::ResetCause reset_cause() noexcept { return Fa::ResetCause::Watchdog; }
 #ifdef FA_TRACE_COMMANDS
     // Command input with receive DMA (the tick hook plays the DMA); no reset(): RESET is refused
     static inline uint8_t *rx_buffer = nullptr;
@@ -172,13 +209,26 @@ struct HostBoard {
 
 struct AppTraits : Fa::DefaultAppTraits {
     using Platform = HostBoard;
+#ifdef FA_HEALTH
+    static constexpr size_t HealthCheckMs = 20;
+    static constexpr uint32_t MaxStepMs = 300;
+    struct Fault { uint8_t task; Fa::HealthFault fault; uint32_t elapsed_ms; };
+    static inline Fault faults[8];
+    static inline std::atomic<size_t> fault_count{0};
+    static void on_health_fault(uint8_t task, Fa::HealthFault fault, uint32_t elapsed_ms) noexcept {
+        const size_t i = fault_count;
+        if (i < 8) faults[i] = Fault{task, fault, elapsed_ms};
+        ++fault_count;
+    }
+#endif
 #ifdef FA_TRACE
     using TraceOut = PosixTraceOut;                      // trace to a file instead of the board
     static constexpr size_t TraceBufferRecords = 512;
 #endif
 };
 
-using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx, Worker>;
+using Work = Worker<HostBoard, App::AppContext>;
 using Rx = UartRx<HostBoard, App::AppContext>;
 using Sink = SeqSink<HostBoard, App::AppContext>;
 using Bomb = Timebomb::Actor<HostBoard, App::AppContext>;
@@ -188,6 +238,8 @@ using Counter = InitAction::Actor<HostBoard, App::AppContext>;
 // The "PC side of the UART": the test task queues command bytes, the tick hook moves them into the DMA buffer
 static Fa::SpscRing<uint8_t, 1024> pc_wire;
 #endif
+
+static std::atomic<bool> feed_sink{true};   // the health test silences the SPSC producer
 
 template <typename M>
 M &instance() {
@@ -200,7 +252,9 @@ M &instance() {
 extern "C" void vApplicationTickHook(void) {
     App::on_tick_isr();
     static uint32_t sequence = 0;
-    App::spsc_push_from_isr(sequence++, nullptr);   // the SPSC service's only producer
+    if (feed_sink) {
+        App::spsc_push_from_isr(sequence++, nullptr);   // the SPSC service's only producer
+    }
 
     // Simulated UART + circular DMA: the "hardware" writes a burst, then the idle-line interrupt reports it
     static size_t dma_position = 0;
@@ -285,6 +339,14 @@ namespace {
         else return event_index<Variant, T, I + 1>();
     }
 #endif
+
+    // Index of a framework task by name (health monitor and pause commands)
+    [[maybe_unused]] uint8_t task_index(char const *name) {
+        for (size_t i = 0; i < App::watched_count; ++i) {
+            if (std::strcmp(App::watched_name(i), name) == 0) return static_cast<uint8_t>(i);
+        }
+        return 0xFF;
+    }
 
     template <typename S>
     bool bomb_in() {
@@ -409,10 +471,67 @@ namespace {
             send_command(cmd::Filter, {11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});   // back on
             send_command(cmd::HelloRequest, {});
         }
+
+        // ---- Commands encoded by the PC tool (fa-trace --encode, run.sh), one frame at a time
+        if (char const *path = std::getenv("FA_COMMANDS_IN")) {
+            if (FILE *in = std::fopen(path, "rb")) {
+                int byte;
+                bool wake = false;
+                while ((byte = std::fgetc(in)) != EOF) {
+                    pc_wire.push(static_cast<uint8_t>(byte), wake);
+                    if (byte == 0) vTaskDelay(5);             // end of a frame
+                }
+                std::fclose(in);
+            }
+            expect("commands from fa-trace --encode: three ButtonPressed, WAIT -> LEDON -> DISARMED", bomb_in<DISARMED>());
+        }
+
+#ifdef FA_DEBUG_COMMANDS
+        // ---- pause / resume from the PC: between steps, no asserts on the full queue, no health fault
+        {
+            namespace cmd = Fa::command_frame;
+            using BombStorage = Fa::StaticActorStorage<Bomb>;
+            const uint8_t bomb = task_index("Timebomb");
+            const uint32_t dropped_before = BombStorage::dropped;
+            const uint32_t steps_before = BombStorage::health_probe.progress;
+            send_command(cmd::Pause, {20, bomb});
+            for (int i = 0; i < 10; ++i) {
+                App::post(ButtonPressed{});                  // 1 taken and held, 8 queued, 1 dropped
+            }
+            vTaskDelay(450);                                 // longer than MaxStepMs: a paused task is no fault
+            std::snprintf(detail, sizeof detail, "dropped %u, health faults %u",
+                          static_cast<unsigned>(BombStorage::dropped - dropped_before), static_cast<unsigned>(AppTraits::fault_count));
+            expect("pause: a paused actor handles nothing; its full queue drops without asserting; no health fault",
+                   bomb_in<DISARMED>() && BombStorage::dropped - dropped_before == 1 && AppTraits::fault_count == 0, detail);
+            send_command(cmd::Pause, {21, task_index("FaCmd")});   // the framework's own services: refused
+            send_command(cmd::Pause, {22, 99});
+            send_command(cmd::QueryHealth, {23});
+            send_command(cmd::Resume, {24, bomb});
+            vTaskDelay(20);
+            std::snprintf(detail, sizeof detail, "%u steps after resume", static_cast<unsigned>(BombStorage::health_probe.progress - steps_before));
+            expect("resume: the 9 events kept are handled in order (D-W-LEDON x3, back in DISARMED)",
+                   bomb_in<DISARMED>() && BombStorage::health_probe.progress - steps_before == 9, detail);
+
+            const uint8_t worker = task_index("Worker");
+            send_command(cmd::Pause, {25, worker});
+            const uint32_t paused_at = Work::iterations;
+            vTaskDelay(100);
+            const uint32_t while_paused = Work::iterations - paused_at;
+            send_command(cmd::Resume, {26, worker});
+            const uint32_t resumed_at = Work::iterations;
+            vTaskDelay(100);
+            const uint32_t after = Work::iterations - resumed_at;
+            std::snprintf(detail, sizeof detail, "%u iterations while paused, %u in 100 ms after resume (period 10 ms)",
+                          static_cast<unsigned>(while_paused), static_cast<unsigned>(after));
+            expect("pause a periodic module: no iterations while paused, normal rate after resume (no catch-up burst)",
+                   while_paused == 0 && after >= 8 && after <= 12, detail);
+        }
+#endif
 #endif
 
         // ---- Full queue: posts and timer deliveries never block; lost events are counted (and asserted in debug)
         using BombStorage = Fa::StaticActorStorage<Bomb>;
+        const uint32_t dropped_before = BombStorage::dropped;
         vTaskSuspend(BombStorage::taskHandle);
         for (size_t i = 0; i < Fa::ActorTraits<Bomb>::QueueLength; ++i) {
             App::post(ButtonPressed{});                   // fills the suspended actor's queue
@@ -424,11 +543,76 @@ namespace {
         App::post(ButtonPressed{});                       // no room: dropped (asserts here unless FA_NO_ASSERT)
         App::schedule(Tick{}, 1);                         // expires into the full queue: dropped in the tick ISR
         vTaskDelay(5);
-        std::snprintf(detail, sizeof detail, "dropped = %u", static_cast<unsigned>(BombStorage::dropped));
+        std::snprintf(detail, sizeof detail, "dropped = %u", static_cast<unsigned>(BombStorage::dropped - dropped_before));
         expect("full queue: post() and timer delivery drop instead of blocking, and both are counted",
-               BombStorage::dropped == 2, detail);
+               BombStorage::dropped - dropped_before == 2, detail);
         vTaskResume(BombStorage::taskHandle);
         expect("actor keeps working: its 8 queued ButtonPressed are handled (DISARMED -> ... -> LEDON)", bomb_in<LEDON>());
+
+#ifdef FA_HEALTH
+        // ---- Health monitor: silent through everything above, then three injected faults
+        {
+            auto index_of = [](char const *name) {
+                for (size_t i = 0; i < App::watched_count; ++i) {
+                    if (std::strcmp(App::watched_name(i), name) == 0) return static_cast<int>(i);
+                }
+                return -1;
+            };
+            auto has_fault = [](int task, Fa::HealthFault kind) {
+                const size_t n = AppTraits::fault_count < 8 ? AppTraits::fault_count.load() : 8;
+                for (size_t i = 0; i < n; ++i) {
+                    if (AppTraits::faults[i].task == task && AppTraits::faults[i].fault == kind) return true;
+                }
+                return false;
+            };
+            const long uptime = static_cast<long>(xTaskGetTickCount());
+            std::snprintf(detail, sizeof detail, "%u faults, %u kicks in %ld ms, watchdog timeout %u ms",
+                          static_cast<unsigned>(AppTraits::fault_count), static_cast<unsigned>(HostBoard::kicks),
+                          uptime, static_cast<unsigned>(HostBoard::watchdog_timeout));
+            expect("health: no fault during the whole run, watchdog started and fed every check",
+                   AppTraits::fault_count == 0 && HostBoard::watchdog_timeout == 1000 &&
+                   HostBoard::kicks > static_cast<uint32_t>(uptime / AppTraits::HealthCheckMs / 2), detail);
+
+            const uint32_t bomb_steps = BombStorage::health_probe.progress;
+            std::snprintf(detail, sizeof detail, "Timebomb: %u steps, Counter: %u steps", static_cast<unsigned>(bomb_steps),
+                          static_cast<unsigned>(Fa::StaticActorStorage<Counter>::health_probe.progress));
+            expect("health: actor probes count every run-to-completion step (start-up + each event)",
+                   bomb_steps > 30 && Fa::StaticActorStorage<Counter>::health_probe.progress > 40, detail);
+
+            Work::hang_ms = 450;                                // one iteration blocks longer than MaxStepMs (300)
+            vTaskDelay(600);
+            const uint32_t kicks = HostBoard::kicks;
+            vTaskDelay(100);
+            std::snprintf(detail, sizeof detail, "faults %u, kicks after the fault %u",
+                          static_cast<unsigned>(AppTraits::fault_count), static_cast<unsigned>(HostBoard::kicks - kicks));
+            expect("health: a hung periodic module is Stuck, and the watchdog is no longer fed",
+                   has_fault(index_of("Worker"), Fa::HealthFault::Stuck) && HostBoard::kicks == kicks, detail);
+
+            vTaskSuspend(BombStorage::taskHandle);              // starved: an event waits, the task never runs
+            App::post(ButtonPressed{});
+            vTaskDelay(500);
+            vTaskResume(BombStorage::taskHandle);
+            expect("health: an actor with an event waiting and no progress is NoProgress",
+                   has_fault(index_of("Timebomb"), Fa::HealthFault::NoProgress));
+
+            feed_sink = false;                                  // the SPSC producer goes silent
+            vTaskDelay(400);
+            expect("health: a service whose input stops (MaxIdleMs) is Idle", has_fault(index_of("SeqSink"), Fa::HealthFault::Idle));
+
+#ifdef FA_DEBUG_COMMANDS
+            send_command(Fa::command_frame::HealthTest, {13, task_index("Counter")});   // idle actor, paused as a fault
+            vTaskDelay(500);
+            expect("health test from the PC: the paused task counts as NoProgress", has_fault(index_of("Counter"), Fa::HealthFault::NoProgress));
+#endif
+
+            expect("health: the first fault (Worker, Stuck) is kept in no-init RAM for the next start-up",
+                   Fa::health_record.valid() && Fa::health_record.module == index_of("Worker") &&
+                   Fa::health_record.fault == static_cast<uint8_t>(Fa::HealthFault::Stuck));
+#ifdef FA_TRACE_COMMANDS
+            send_command(Fa::command_frame::QueryHealth, {12});
+#endif
+        }
+#endif
 
         vTaskDelay(100);   // lets the trace task (lowest priority) send what is still buffered
         std::printf("%s\n", failures == 0 ? "PASS  posix: all runtime checks passed" : "FAIL  posix: runtime checks failed");
@@ -445,6 +629,10 @@ int main() {
     if (char const *path = std::getenv("FA_TRACE_OUT")) {
         PosixTraceOut::file = std::fopen(path, "wb");
     }
+#endif
+#ifdef FA_HEALTH
+    // As if the previous run had ended in a watchdog reset: the button module (task 2, "Button") stopped iterating
+    Fa::health_record.store(2, Fa::HealthFault::NoProgress, 750);
 #endif
     App::init();
     xTaskCreateStatic(run_tests, "tests", configMINIMAL_STACK_SIZE, nullptr, 1, test_stack, &test_tcb);

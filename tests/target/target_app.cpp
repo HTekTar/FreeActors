@@ -22,12 +22,21 @@ struct TargetBoard {
     static bool read_button() { return false; }
 
     // Trace transport (FA_TRACE): a real board sends the bytes over a UART; the cycle counter is the clock
-    static void trace_write(uint8_t const *, size_t) noexcept {}
+    static void trace_write(uint8_t const *data, size_t n) noexcept {   // like a UART driver: every byte is used
+        for (size_t i = 0; i < n; ++i) *reinterpret_cast<volatile uint32_t *>(0x40004804u) = data[i];
+    }
     static uint32_t trace_timestamp() noexcept { return Fa::CortexM::CycleCounter::now(); }
     static uint32_t trace_timestamp_hz() noexcept { return 16000000; }
 
     // Command input (FA_TRACE_COMMANDS) without receive DMA: one byte per UART interrupt (UART4 below)
     static void reset() noexcept { Fa::CortexM::system_reset(); }
+
+    // Hardware watchdog (FA_HEALTH): like a real board, register writes the compiler must keep
+    static void watchdog_start(uint32_t timeout_ms) noexcept { *reinterpret_cast<volatile uint32_t *>(0x40003008u) = timeout_ms; }
+    static void watchdog_kick() noexcept { *reinterpret_cast<volatile uint32_t *>(0x40003000u) = 0xAAAAu; }
+    static Fa::ResetCause reset_cause() noexcept {
+        return (*reinterpret_cast<volatile uint32_t *>(0x40023874u) & (1u << 29)) ? Fa::ResetCause::Watchdog : Fa::ResetCause::Other;
+    }
 };
 
 // SPSC service with an interrupt producer (compiles the lock-free path with M4 flags)
@@ -68,7 +77,7 @@ struct AppTraits : Fa::DefaultAppTraits {
     using Platform = TargetBoard;
 };
 
-using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;   // + trace with FA_TRACE, + commands with FA_TRACE_COMMANDS
+using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;   // + trace with FA_TRACE, + commands with FA_TRACE_COMMANDS, + health with FA_HEALTH
 
 extern "C" void USART3_IRQHandler(void) {
     BaseType_t woken = pdFALSE;

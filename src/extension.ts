@@ -52,6 +52,8 @@ export const FRAMEWORK_FILES = [
     'fa_spsc.hpp',
     'fa_dma.hpp',
     'fa_command_service.hpp',
+    'fa_health.hpp',
+    'fa_health_monitor.hpp',
     'doctest.h'
 ];
 

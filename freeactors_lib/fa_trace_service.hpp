@@ -39,12 +39,16 @@ namespace trace_frame {
     constexpr uint8_t Lost    = 0x03;
     constexpr uint8_t States  = 0x04;
     constexpr uint8_t Ack     = 0x05;
+    constexpr uint8_t Modules = 0x06;   // names of the tasks the health monitor watches (FA_HEALTH), after HELLO
+    constexpr uint8_t Health  = 0x07;   // reply to QUERY_HEALTH
     constexpr size_t RecordsPerFrame = 31;   // 1 + 31 * 8 = 249 bytes <= frame::MaxBody
+    static_assert(1 + RecordsPerFrame * sizeof(TraceRecord) <= frame::MaxBody, "a RECORDS frame must fit one body");
 
     // Control record kinds (TraceRecord::kind): requests to the trace task, not trace records
     constexpr uint8_t ControlHello  = 0x80;   // send HELLO now
     constexpr uint8_t ControlAck    = 0x81;   // id: command sequence << 8 | CommandStatus
     constexpr uint8_t ControlStates = 0x82;   // id: command sequence; body read when the frame is built
+    constexpr uint8_t ControlHealth = 0x83;   // id: command sequence; body read when the frame is built
     constexpr bool is_control(uint8_t kind) { return kind >= 0x80; }
 }
 
@@ -75,8 +79,9 @@ struct TraceService;
 template <typename Hw, typename Ctx, typename Out, size_t N>
 struct TimeServiceTraits<TraceService<Hw, Ctx, Out, N>> {
     static constexpr const char* name     = "FaTrace";
-    static constexpr size_t stack_size    = 256;   // words: frame buffers live on this stack
+    static constexpr size_t stack_size    = 256;   // words
     static constexpr UBaseType_t priority = 1;     // lowest application priority: uses otherwise idle time
+    static constexpr uint32_t MaxStepMs   = 2000;  // health budget: a full buffer over a slow UART takes a while
 };
 
 template <typename Hw, typename Ctx, typename Out, size_t N>
@@ -99,7 +104,8 @@ struct TraceService : MpscServiceInterface<TraceService<Hw, Ctx, Out, N>, TraceR
 
     static bool enabled(TraceKind kind, uint8_t actor) {
         const bool kind_on = (kinds_mask >> static_cast<uint8_t>(kind)) & 1u;
-        const bool actor_on = actor >= 32 || ((actors_mask >> actor) & 1u);
+        const bool health = kind >= TraceKind::HealthFault;   // actor field is a task index, not an actor
+        const bool actor_on = health || actor >= 32 || ((actors_mask >> actor) & 1u);
         return kind_on && actor_on;
     }
 
@@ -151,7 +157,7 @@ private:
             send_hello();                                  // periodic HELLO for late listeners
         }
         sent_first_records_ = true;
-        uint8_t body[1 + trace_frame::RecordsPerFrame * sizeof(TraceRecord)];
+        uint8_t *body = body_;
         body[0] = sequence_++;
         for (size_t i = 0; i < count; ++i) {
             uint8_t *p = body + 1 + i * sizeof(TraceRecord);
@@ -175,8 +181,14 @@ private:
                 send(trace_frame::Ack, body, sizeof(body));
                 break;
             }
+            case trace_frame::ControlHealth: {
+                body_[0] = static_cast<uint8_t>(r.id);
+                const size_t n = Ctx::health_report(body_ + 1, frame::MaxBody - 1);
+                send(trace_frame::Health, body_, 1 + n);
+                break;
+            }
             case trace_frame::ControlStates: {
-                uint8_t body[frame::MaxBody];
+                uint8_t *body = body_;
                 size_t count = Ctx::actor_count();
                 if (count > (frame::MaxBody - 2) / 2) count = (frame::MaxBody - 2) / 2;
                 body[0] = static_cast<uint8_t>(r.id);
@@ -195,16 +207,15 @@ private:
     }
 
     static void send(uint8_t type, uint8_t const *body, size_t n) {
-        uint8_t wire[frame::MaxEncoded];
-        const size_t length = frame::encode(type, body, n, wire);
+        const size_t length = frame::encode(type, body, n, wire_);
         if (length > 0) {
-            Out::trace_write(wire, length);
+            Out::trace_write(wire_, length);
         }
     }
 
     // HELLO: protocol version, timestamp frequency, and every actor's name and model hash
     static void send_hello() {
-        uint8_t body[frame::MaxBody];
+        uint8_t *body = body_;
         size_t n = 0;
         body[n++] = trace_frame::ProtocolVersion;
         detail::put_u32(body + n, Out::trace_timestamp_hz());
@@ -221,6 +232,27 @@ private:
             n += 4;
         }
         send(trace_frame::Hello, body, n);
+        send_modules();
+    }
+
+    // MODULES (FA_HEALTH): u8 count · per task: u8 name_length · name. Indices match HealthFault records.
+    static void send_modules() {
+        if constexpr (Ctx::module_count() > 0) {
+            uint8_t *body = body_;
+            size_t n = 1;
+            size_t count = 0;
+            for (size_t m = 0; m < Ctx::module_count(); ++m) {
+                char const *name = Ctx::module_name(m);
+                size_t length = 0;
+                while (name[length] != '\0' && length < 32) ++length;
+                if (n + 1 + length > frame::MaxBody) break;
+                body[n++] = static_cast<uint8_t>(length);
+                for (size_t i = 0; i < length; ++i) body[n++] = static_cast<uint8_t>(name[i]);
+                ++count;
+            }
+            body[0] = static_cast<uint8_t>(count);
+            send(trace_frame::Modules, body, n);
+        }
     }
 
     // LOST: records dropped since the previous report (the gap marker)
@@ -233,6 +265,10 @@ private:
             reported_lost_ = dropped;
         }
     }
+
+    // Frame buffers: static, not on the trace task's stack (only the trace task builds frames)
+    static inline uint8_t body_[frame::MaxBody];
+    static inline uint8_t wire_[frame::MaxEncoded];
 
     static inline uint8_t sequence_ = 0;
     static inline bool sent_first_records_ = false;

@@ -15,6 +15,7 @@
                                                              the task stack buffer only holds the thread record */
 #define configMAX_TASK_NAME_LEN                     16
 #define configUSE_16_BIT_TICKS                      0
+#define INCLUDE_uxTaskGetStackHighWaterMark         1
 #define configIDLE_SHOULD_YIELD                     1
 
 /* FreeActors allocates every task and queue statically */

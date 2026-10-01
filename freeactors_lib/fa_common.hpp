@@ -66,6 +66,9 @@ namespace Fa{
         Post          = 6,   // id: target_actor << 8 | event_index; actor = sender
         TimerSchedule = 7,   // id: target_actor << 8 | event_index; actor = owner
         TimerCancel   = 8,   // id: target_actor << 8 | event_index; actor = owner
+        HealthFault   = 9,   // actor = monitored module index; id: bit 15 previous run, bits 12-14 HealthFault,
+                             //   bits 0-11 elapsed ms (capped at 4095)  (FA_HEALTH, docs/design/health.md)
+        HealthReset   = 10,  // actor = TraceSender::Health; id: ResetCause of this start-up
     };
 
     struct TraceRecord {
@@ -85,6 +88,7 @@ namespace Fa{
         QueueFull    = 4,
         NotSupported = 5,   // unknown command, or not provided by the board (e.g. reset)
         BadFrame     = 6,
+        NotAllowed   = 7,   // e.g. pausing the framework's own services
     };
 
     // Senders that are not actors (TraceRecord::actor of Post/Dropped records)
@@ -93,6 +97,7 @@ namespace Fa{
         constexpr uint8_t Timer = 0xFE;   // timer expiry
         constexpr uint8_t Pc    = 0xFD;   // PC command
         constexpr uint8_t Task  = 0xFC;   // non-actor code in a task: start-up code, periodic modules
+        constexpr uint8_t Health = 0xFB;  // the health monitor (HealthReset records)
     }
 
     //

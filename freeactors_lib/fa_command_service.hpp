@@ -15,7 +15,10 @@
 //   one byte per interrupt (no rx_stream_start):
 //       App::Application::command_rx_byte_from_isr(byte, &woken);        portYIELD_FROM_ISR(woken);
 // Optional:
-//     static void reset() noexcept;   // RESET command; refused (NotSupported) without it
+//     static void reset() noexcept;   // RESET command (needs FA_DEBUG_COMMANDS); refused (NotSupported) without it
+//
+// FA_DEBUG_COMMANDS unlocks the commands that stop the machine: PAUSE, RESUME, HEALTH_TEST and RESET. Leave it
+// off in release builds: the command input is not authenticated. Without it they are answered NotSupported.
 //
 // Damaged input needs no special care: every command frame carries a CRC, so bytes lost to an overrun
 // only cost the frames they were part of (the PC sees no ACK and may retry).
@@ -38,6 +41,10 @@ namespace command_frame {
     constexpr uint8_t Reset        = 0x83;   // u8 sequence
     constexpr uint8_t HelloRequest = 0x84;   // (no body)
     constexpr uint8_t Filter       = 0x85;   // u8 sequence, u16 kinds_mask, u32 actors_mask
+    constexpr uint8_t QueryHealth  = 0x86;   // u8 sequence (FA_HEALTH; refused without it)
+    constexpr uint8_t Pause        = 0x87;   // u8 sequence, u8 task (FA_DEBUG_COMMANDS)
+    constexpr uint8_t Resume       = 0x88;   // u8 sequence, u8 task (FA_DEBUG_COMMANDS)
+    constexpr uint8_t HealthTest   = 0x89;   // u8 sequence, u8 task (FA_DEBUG_COMMANDS and FA_HEALTH)
 
     constexpr size_t DmaBufferBytes = 256;   // receive DMA ring; frames may span reports and the wrap
     constexpr size_t ByteQueueBytes = 64;    // per-byte reception: bytes queued between interrupt and task
@@ -127,6 +134,13 @@ private:
             case command_frame::QueryStates:
                 Ctx::trace_control(trace_frame::ControlStates, sequence);
                 break;
+            case command_frame::QueryHealth:
+                if constexpr (Ctx::health_enabled) {
+                    Ctx::trace_control(trace_frame::ControlHealth, sequence);
+                } else {
+                    ack(sequence, CommandStatus::NotSupported);
+                }
+                break;
             case command_frame::Filter:
                 if (n != 7) {
                     ack(sequence, CommandStatus::BadFrame);
@@ -138,7 +152,25 @@ private:
                     ack(sequence, CommandStatus::Ok);
                 }
                 break;
+            case command_frame::Pause:
+            case command_frame::Resume:
+            case command_frame::HealthTest:
+#ifdef FA_DEBUG_COMMANDS
+                if (n != 2) {
+                    ack(sequence, CommandStatus::BadFrame);
+                } else if (type == command_frame::Pause) {
+                    ack(sequence, Ctx::pause_task(body[1]));
+                } else if (type == command_frame::Resume) {
+                    ack(sequence, Ctx::resume_task(body[1]));
+                } else {
+                    ack(sequence, Ctx::health_test_task(body[1]));
+                }
+#else
+                ack(sequence, CommandStatus::NotSupported);
+#endif
+                break;
             case command_frame::Reset:
+#ifdef FA_DEBUG_COMMANDS
                 if constexpr (detail::has_reset<In>::value) {
                     ack(sequence, CommandStatus::Ok);
                     vTaskDelay(pdMS_TO_TICKS(command_frame::ResetDelayMs));   // let the trace task send the ACK
@@ -146,6 +178,9 @@ private:
                 } else {
                     ack(sequence, CommandStatus::NotSupported);
                 }
+#else
+                ack(sequence, CommandStatus::NotSupported);   // stopping the machine needs FA_DEBUG_COMMANDS
+#endif
                 break;
             default:
                 ack(sequence, CommandStatus::NotSupported);

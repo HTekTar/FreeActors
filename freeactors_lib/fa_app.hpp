@@ -19,6 +19,17 @@
 #endif
 #include "fa_command_service.hpp"
 #endif
+#ifdef FA_DEBUG_COMMANDS
+#ifndef FA_TRACE_COMMANDS
+#error "FA_DEBUG_COMMANDS needs FA_TRACE_COMMANDS: it unlocks commands from the PC (pause, resume, health test, reset)"
+#endif
+#endif
+#ifdef FA_HEALTH
+#include "fa_health_monitor.hpp"
+#endif
+#if defined(FA_HEALTH) || defined(FA_DEBUG_COMMANDS)
+#define FA_TASK_TABLE   // the table of framework tasks (health monitor, pause commands)
+#endif
 
 namespace Fa {
 
@@ -31,6 +42,13 @@ struct DefaultAppTraits {
     //   static constexpr size_t TraceBufferRecords = 256;    // trace buffer, 8 bytes per record; default: 128
     // Commands from the PC (built in; only with FA_TRACE_COMMANDS). Optional in your traits:
     //   using CommandIn = MyReceiver;                        // where command bytes come from; default: Platform
+    // Health monitor and watchdog manager (built in; only with FA_HEALTH). Optional in your traits:
+    //   static constexpr size_t HealthCheckMs = 100;         // how often every task is checked; default: 100
+    //   static constexpr uint32_t MaxStepMs = 500;           // default budget per step for every task; default: 500
+    //   static constexpr uint32_t WatchdogTimeoutMs = 1000;  // >= 3 x HealthCheckMs; default: 1000
+    //   using Watchdog = MyWatchdog;                         // watchdog_start/kick, reset_cause; default: Platform
+    //   static void on_health_fault(uint8_t task, Fa::HealthFault fault, uint32_t elapsed_ms) noexcept;   // e.g. safe outputs
+    // Per task (ActorTraits<A> or TimeServiceTraits<S>): MaxStepMs (override), MaxIdleMs (opt-in idle check).
 };
 
 // The Ctx each module gets inside an Application: routes post/schedule/cancel/mpsc_push/trace to it.
@@ -74,6 +92,18 @@ struct Context {
     static uint16_t state_of(size_t actor) { return App::state_of(actor); }
     static void trace_control(uint8_t kind, uint16_t id) { App::trace_control(kind, id); }
     static void set_trace_filter(uint32_t kinds, uint32_t actors) { App::set_trace_filter(kinds, actors); }
+
+    // Health (FA_HEALTH): records with a raw actor field, the HEALTH reply, monitored task names
+    static void trace_raw(TraceKind kind, uint8_t actor, uint16_t id) { App::trace_record(kind, actor, id); }
+    static constexpr bool health_enabled = App::health_enabled;
+    static size_t health_report(uint8_t* out, size_t max) { return App::health_report(out, max); }
+    static constexpr size_t module_count() { return App::watched_count; }
+#ifdef FA_DEBUG_COMMANDS
+    static CommandStatus pause_task(uint8_t task) { return App::control_task(task, App::TaskControl::Pause); }
+    static CommandStatus resume_task(uint8_t task) { return App::control_task(task, App::TaskControl::Resume); }
+    static CommandStatus health_test_task(uint8_t task) { return App::control_task(task, App::TaskControl::HealthTest); }
+#endif
+    static char const* module_name(size_t i) { return App::watched_name(i); }
 
     // Application description, for services such as TraceService (HELLO frame)
     static constexpr size_t actor_count() { return App::actor_count; }
@@ -120,12 +150,83 @@ namespace detail {
         static constexpr size_t value = Traits::TraceBufferRecords;
     };
 
+    // Optional numeric settings: Traits::Name if present, else Default
+#define FA_OPTIONAL_SETTING(Name, Type)                                                                 \
+    template <typename Traits, Type Default, typename = void>                                         \
+    struct Name##_of { static constexpr Type value = Default; };                                       \
+    template <typename Traits, Type Default>                                                           \
+    struct Name##_of<Traits, Default, std::void_t<decltype(Traits::Name)>> {                           \
+        static constexpr Type value = static_cast<Type>(Traits::Name);                                 \
+    };
+    FA_OPTIONAL_SETTING(HealthCheckMs, size_t)
+    FA_OPTIONAL_SETTING(MaxStepMs, uint32_t)
+    FA_OPTIONAL_SETTING(MaxIdleMs, uint32_t)
+    FA_OPTIONAL_SETTING(WatchdogTimeoutMs, uint32_t)
+#undef FA_OPTIONAL_SETTING
+
+    // AppTraits::Watchdog if given, else the board (Platform)
+    template <typename Traits, typename = void>
+    struct watchdog_of { using type = typename Traits::Platform; };
+    template <typename Traits>
+    struct watchdog_of<Traits, std::void_t<typename Traits::Watchdog>> { using type = typename Traits::Watchdog; };
+
+    template <typename Traits, typename = void>
+    struct has_health_hook : std::false_type {};
+    template <typename Traits>
+    struct has_health_hook<Traits, std::void_t<decltype(Traits::on_health_fault(uint8_t{}, HealthFault{}, uint32_t{}))>>
+        : std::true_type {};
+
+    template <typename M, typename = void>
+    struct is_periodic_module : std::false_type {};
+    template <typename M>
+    struct is_periodic_module<M, std::void_t<decltype(M::period_ms)>> : std::true_type {};
+
     template <typename M, typename = void>
     struct model_hash_of { static constexpr uint32_t value = 0; };
     template <typename M>
     struct model_hash_of<M, std::void_t<decltype(HsmTraits<M>::ModelHash)>> {
         static constexpr uint32_t value = HsmTraits<M>::ModelHash;
     };
+
+#ifdef FA_TASK_TABLE
+    // Every task the framework runs: actors, then services and periodic modules, then built-in services
+    template <typename AppTraits>
+    struct TaskTable {
+        static constexpr uint32_t ms_ticks(uint32_t ms) { return ms == 0 ? 0 : static_cast<uint32_t>(ms_to_ticks_clamped(ms)); }
+        static constexpr uint32_t default_step_ms = MaxStepMs_of<AppTraits, 500>::value;
+
+        template <typename A>
+        static constexpr TaskEntry actor_entry() {
+            using Storage = StaticActorStorage<A>;
+            constexpr uint32_t step = MaxStepMs_of<ActorTraits<A>, default_step_ms>::value;
+            constexpr uint32_t idle = MaxIdleMs_of<ActorTraits<A>, 0>::value;
+            return TaskEntry{ &Storage::health_probe, &Storage::pause_gate, &Storage::health_pending, &Storage::health_task,
+                              ActorTraits<A>::Name, HealthLimits{ ms_ticks(step), ms_ticks(step), ms_ticks(idle) }, false };
+        }
+
+        template <typename S, bool Builtin>
+        static constexpr TaskEntry service_entry() {
+            using Traits = TimeServiceTraits<S>;
+            constexpr uint32_t step = MaxStepMs_of<Traits, default_step_ms>::value;
+            constexpr uint32_t idle = MaxIdleMs_of<Traits, 0>::value;
+            // A periodic module must complete an iteration every period: allow three periods plus a step
+            constexpr uint32_t stall = is_periodic_module<S>::value ? static_cast<uint32_t>(3 * period_of<S>()) + step : step;
+            return TaskEntry{ &S::health_probe, &S::pause_gate, &S::health_pending, &S::health_task, Traits::name,
+                              HealthLimits{ ms_ticks(step), ms_ticks(stall), ms_ticks(idle) }, Builtin };
+        }
+
+        template <typename S>
+        static constexpr size_t period_of() {
+            if constexpr (is_periodic_module<S>::value) return S::period_ms; else return 0;
+        }
+
+        template <typename... As, typename... Ss, typename... Bs>
+        static constexpr auto make(TypeList<As...>, TypeList<Ss...>, TypeList<Bs...>) {
+            return std::array<TaskEntry, sizeof...(As) + sizeof...(Ss) + sizeof...(Bs)>{
+                actor_entry<As>()..., service_entry<Ss, false>()..., service_entry<Bs, true>()... };
+        }
+    };
+#endif
 
     template <typename List>
     struct ActorTable;
@@ -159,6 +260,79 @@ public:
 #ifdef FA_TRACE_COMMANDS
     // Built-in command service (commands from the PC): FA_TRACE_COMMANDS is the switch
     using Commander = CommandService<Hw, AppContext, typename detail::command_in_of<AppTraits>::type>;
+#endif
+
+    // Tasks the health monitor watches: actors (same indices as the trace), then periodic modules and
+    // services in module order, then the built-in trace and command services
+    using ServiceList = typename filter_types<is_time_service, AllModules>::type;
+    using BuiltinServices = TypeList<
+#ifdef FA_TRACE
+        Tracer
+#endif
+#ifdef FA_TRACE_COMMANDS
+        , Commander
+#endif
+    >;
+#ifdef FA_TASK_TABLE
+    // Every task the framework runs (index = health task index = MODULES frame order)
+    static constexpr auto tasks = detail::TaskTable<AppTraits>::make(ActorList{}, ServiceList{}, BuiltinServices{});
+    static constexpr size_t watched_count = tasks.size();
+    static char const* watched_name(size_t i) { return i < watched_count ? tasks[i].name : ""; }
+#else
+    static constexpr size_t watched_count = 0;
+    static char const* watched_name(size_t) { return ""; }
+#endif
+#ifdef FA_HEALTH
+    static constexpr bool health_enabled = true;
+    struct HealthConfig {
+        static constexpr size_t check_ms = detail::HealthCheckMs_of<AppTraits, 100>::value;
+        static constexpr uint32_t watchdog_timeout_ms = detail::WatchdogTimeoutMs_of<AppTraits, 1000>::value;
+        using Board = typename detail::watchdog_of<AppTraits>::type;
+        static constexpr auto entries = tasks;
+        static void on_fault(uint8_t task, HealthFault fault, uint32_t elapsed_ms) {
+            if constexpr (detail::has_health_hook<AppTraits>::value) {
+                AppTraits::on_health_fault(task, fault, elapsed_ms);
+            } else {
+                (void)task; (void)fault; (void)elapsed_ms;
+            }
+        }
+    };
+    // Built-in health monitor and watchdog manager: FA_HEALTH is the switch
+    using Monitor = HealthMonitor<Hw, AppContext, HealthConfig>;
+    static size_t health_report(uint8_t* out, size_t max) { return Monitor::report(out, max); }
+#else
+    static constexpr bool health_enabled = false;
+    static size_t health_report(uint8_t*, size_t) { return 0; }
+#endif
+
+#ifdef FA_DEBUG_COMMANDS
+    // pause / resume / health test from the PC (FA_DEBUG_COMMANDS). The framework's own services are refused:
+    // a paused command service could never receive the resume.
+    enum class TaskControl : uint8_t { Pause, Resume, HealthTest };
+    static CommandStatus control_task(uint8_t task, TaskControl op) {
+        if (task >= watched_count) {
+            return CommandStatus::UnknownActor;
+        }
+        TaskEntry const& e = tasks[task];
+        if (e.builtin) {
+            return CommandStatus::NotAllowed;
+        }
+        switch (op) {
+            case TaskControl::Pause:
+                e.gate->pause(PauseGate::Paused);
+                return CommandStatus::Ok;
+            case TaskControl::HealthTest:
+                if constexpr (!health_enabled) {
+                    return CommandStatus::NotSupported;
+                }
+                e.gate->pause(PauseGate::HealthTest);
+                return CommandStatus::Ok;
+            case TaskControl::Resume:
+                e.gate->resume(e.task());
+                return CommandStatus::Ok;
+        }
+        return CommandStatus::NotSupported;
+    }
 #endif
 
     // Number of registered modules that accept event type Evt (routing requires exactly one)
@@ -195,6 +369,9 @@ public:
 #endif
 #ifdef FA_TRACE_COMMANDS
         Commander::create_task();
+#endif
+#ifdef FA_HEALTH
+        Monitor::create_task();
 #endif
         (init_module<Modules<Hw,AppContext>>(), ...);
     }
