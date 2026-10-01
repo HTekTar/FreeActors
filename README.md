@@ -47,6 +47,8 @@ Nucleo-F446ZE (STM32F446, Cortex-M4F), core clock 16 MHz (internal oscillator, n
 
 ## From model to trace
 
+The example is the Time Bomb from Miro Samek's [Modern Embedded Systems Programming](https://www.state-machine.com/video-course) course: the button arms it, it blinks a countdown, and it explodes unless the button defuses it in time.
+
 The model is drawn in the editor and stored as `Timebomb.hsm.json`:
 
 ![The Timebomb model in the FreeActors HSM editor: ROOT containing ARMED (WAIT, LEDON, LEDOFF), DISARMED and BOOM, with ButtonPressed and Tick transitions and the TimeUp guard](docs/media/timebomb-editor.png)
