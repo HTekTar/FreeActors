@@ -4,6 +4,8 @@ Draw hierarchical state machines in VS Code and turn them into C++17 active obje
 
 > **Early preview (0.0.x).** The framework and the generated code are still evolving; expect changes before 1.0.
 
+![The Timebomb example in the HSM editor: nested states, transitions with events and guards, and the registry of signals, guards and actions](docs/media/timebomb-editor.png)
+
 ## What you get
 
 - **Visual editor** for `*.hsm.json` models: nested states, transitions with guards and actions, initial transitions, internal (local) events, and a registry of signals, guards and actions.

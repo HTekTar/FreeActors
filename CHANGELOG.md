@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.6
 
 ### Framework
 - The trace service is built into the application (`FA_TRACE`), like the timer service.

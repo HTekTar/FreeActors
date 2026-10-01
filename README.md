@@ -47,7 +47,11 @@ Nucleo-F446ZE (STM32F446, Cortex-M4F), core clock 16 MHz (internal oscillator, n
 
 ## From model to trace
 
-The model is drawn in the editor and stored as `Timebomb.hsm.json`. Export generates the blueprint and leaves a class for your code:
+The model is drawn in the editor and stored as `Timebomb.hsm.json`:
+
+![The Timebomb model in the FreeActors HSM editor: ROOT containing ARMED (WAIT, LEDON, LEDOFF), DISARMED and BOOM, with ButtonPressed and Tick transitions and the TimeUp guard](docs/media/timebomb-editor.png)
+
+Export generates the blueprint and leaves a class for your code:
 
 ```cpp
 template <typename HwPolicy, typename Ctx>
