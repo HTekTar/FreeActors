@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.7
+
+- Marketplace page: screenshot of the editor with the Time Bomb example, credited to Miro Samek's Modern Embedded Systems Programming course; links to the GitHub repository.
+
 ## 0.0.6
 
 ### Framework
