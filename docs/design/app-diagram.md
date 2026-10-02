@@ -65,29 +65,11 @@ Timers are not drawn (an actor's own `schedule`); the box shows a clock badge if
 
 ## 2. Events and their data
 
-**Today events cannot carry data**: signals in `*.hsm.json` are bare names, and the tool-owned `<name>_events.hpp` always writes `struct Tick {};` — fields added by hand are lost at the next export. The application diagram makes data between components visible, so this has to be fixed first.
+Event structs belong to the user, not the tool (since 0.0.8): `<name>_events.hpp` is created once with an empty struct per signal, new signals are appended, and the user adds fields with default values (`struct Temperature { int16_t celsius = 0; };`). The generated `<name>_event_list.hpp` holds the `Event` variant and the names. The diagram therefore never defines payloads: arrows name events, taken from the receiver's model.
 
-Proposal: signals in the HSM model may declare fields:
+The PC side (trace dictionary, `fa-trace post` with field values, the simulator) learns field layouts by reading the user's header on export (best effort, like the hardware requirements parser), with a `static_assert` on each parsed event's size so a struct changed without re-exporting fails the build instead of garbling commands. Events it cannot read fall back to raw bytes.
 
-```json
-"signals": [ "Tick", { "name": "Temperature", "fields": [ { "name": "celsius", "type": "int16_t" } ] } ]
-```
-
-generating
-
-```cpp
-struct Temperature {
-    int16_t celsius;
-    Temperature() = default;
-    explicit Temperature(int16_t celsius) : celsius(celsius) {}   // named parameter: shown by completion
-};
-```
-
-- Field types limited to fixed-width integers, `bool`, `float`, and fixed-size arrays of them: trivially copyable, so events stay safe to queue, to post from interrupts and to rebuild from bytes (`post_by_index`, commands from the PC).
-- The trace dictionary records each event's fields, so `fa-trace` can show payloads and `post Sensor Temperature 21` can encode them by name.
-- Plain strings remain valid in `signals` (no fields): existing models keep working.
-
-**Who owns an event**: the receiving machine, as today. Routing is by type and every event type has exactly one receiving actor, so the receiver's model is the natural home; the diagram offers the receiver's signals when an arrow is drawn. (A shared, application-owned interface header was considered; it would need a second event-ownership rule in the generator and gains little while one event type has one receiver.)
+**Who owns an event**: the receiving machine, as today. Routing is by type and every event type has exactly one receiving actor, so the receiver's model and events header are the natural home; the diagram offers the receiver's signals when an arrow is drawn.
 
 ## 3. Checks on the diagram
 
@@ -138,7 +120,7 @@ With `fa-trace` connected (the extension runs the decoder and owns the serial po
 
 ## 7. Phases
 
-1. **Event payload fields** (section 2): model, generator, trace dictionary, `fa-trace` encoding. Useful on its own, needed by everything after it.
+1. **Event payloads** (section 2): user-owned event structs (done in 0.0.8); field layouts read for the trace dictionary, `fa-trace` and the simulator.
 2. **Model and editor**: `*.app.json`, components, connections, drill-down; no generation yet.
 3. **Checks** (section 3).
 4. **Generation** (section 4), with the Timebomb project migrated to it and verified on the board; the POSIX test application generated from a model as well.
@@ -150,7 +132,7 @@ Each phase ships as a release of the extension.
 
 | What | How |
 |---|---|
-| Payload fields | generator fixtures with fields; actor tests posting events with data; `post_by_index` with payloads in the POSIX test; `fa-trace` encoding round trip |
+| Payloads | events headers with fields parsed into the dictionary; actor tests posting events with data; `post_by_index` with payloads in the POSIX test; `fa-trace` encoding round trip |
 | Checks | fixture `*.app.json` files, one per rule, run through the checker from `tests/gen.js` (like the conflicting HSM model today) |
 | Generation | the POSIX application and the target-compile application generated from fixture models instead of hand-written, so the existing runtime and size checks cover the generated wiring |
 | Editor | the webview rendered headless (as for the README screenshot) for a smoke test of loading and drawing a model |
@@ -158,7 +140,6 @@ Each phase ships as a release of the extension.
 
 ## 9. Open decisions
 
-1. **Payload field types**: the list in section 2, or also user-defined structs (harder to show and encode on the PC)?
-2. **Where `main` lives**: generated `<app>_app.cpp` plus a tiny user `main.cpp` (proposed), or a fully generated `main`?
-3. **Interrupt glue**: generated C entry points called from the board's handlers (proposed), or generated handlers by vendor name (convenient, but vendor-specific)?
-4. **One application per folder**, or several `*.app.json` (e.g. variants of a product) sharing models?
+1. **Where `main` lives**: generated `<app>_app.cpp` plus a tiny user `main.cpp` (proposed), or a fully generated `main`?
+2. **Interrupt glue**: generated C entry points called from the board's handlers (proposed), or generated handlers by vendor name (convenient, but vendor-specific)?
+3. **One application per folder**, or several `*.app.json` (e.g. variants of a product) sharing models?

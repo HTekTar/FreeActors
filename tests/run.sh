@@ -74,18 +74,21 @@ done
 # An actor written before the API block: the patcher adds it once, and the actor still compiles and
 # passes the generated actor test (tests/patcher_test.js); FA_IDE (clangd's view) must parse as well
 patched="$OUT/patched_actor"
-mkdir -p "$patched"
+rm -rf "$patched" && mkdir -p "$patched"
 if node "$ROOT/tests/patcher_test.js" "$ROOT/tests/fixtures/timebomb.hsm.json" "$patched/timebomb_actor.hpp"; then
-    project="$OUT/projects/timebomb"
-    if g++ -std=c++17 -I"$patched" -I"$project" -I"$project/freeactors" "$project/tests/timebomb_actor_test.cpp" \
+    # a copy of the exported project with the patched actor and the converted events in place
+    cp -r "$OUT/projects/timebomb" "$patched/project"
+    cp "$patched/timebomb_actor.hpp" "$patched/timebomb_events.hpp" "$patched/project/"
+    p="$patched/project"
+    if g++ -std=c++17 -I"$p" -I"$p/freeactors" "$p/tests/timebomb_actor_test.cpp" \
            -o "$patched/actor_test" 2> "$patched/build.log" && "$patched/actor_test" > "$patched/run.log" 2>&1; then
-        echo "PASS  patcher: the patched actor builds and passes the generated actor test"
+        echo "PASS  patcher: the patched actor and converted events build and pass the generated actor test"
     else
         echo "FAIL  patcher: the patched actor does not build or its test fails (logs: tests/build/patched_actor/)"
         status=1
     fi
-    if g++ -std=c++17 -fsyntax-only -DFA_IDE -I"$patched" -I"$project" -I"$project/freeactors" \
-           "$project/tests/timebomb_actor_test.cpp" 2> "$patched/ide.log"; then
+    if g++ -std=c++17 -fsyntax-only -DFA_IDE -I"$p" -I"$p/freeactors" \
+           "$p/tests/timebomb_actor_test.cpp" 2> "$patched/ide.log"; then
         echo "PASS  patcher: the IDE view (-DFA_IDE) of the actor parses"
     else
         echo "FAIL  patcher: the IDE view (-DFA_IDE) does not parse (log: tests/build/patched_actor/ide.log)"

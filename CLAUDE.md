@@ -49,7 +49,8 @@ For machine `Foo`, export writes into the `.hsm.json`'s folder:
 
 | File | Ownership |
 |---|---|
-| `foo_events.hpp`, `foo_hsm.hpp` (blueprint, incl. unified reachability metadata), `foo_hw_contract.hpp` | Tool-owned, overwritten every export |
+| `foo_event_list.hpp` (the `Event` variant + `EventDescriptor` names, includes `foo_events.hpp`), `foo_hsm.hpp` (blueprint, incl. unified reachability metadata), `foo_hw_contract.hpp` | Tool-owned, overwritten every export |
+| `foo_events.hpp` | User-owned **event structs** (fields with defaults), created once; `patchExistingEventsHeader` appends a struct for each new signal and converts a pre-0.0.8 tool-owned header (`LEGACY_EVENTS_BANNER`) once, keeping hand-added fields. The tool never defines payloads |
 | `foo_bsp_policy.hpp` | User-owned **hardware requirements** (declarations only, `struct HwRequirements`), generated only if missing; **parsed** (`parseBspPolicyHeader`) into the hw contract and `TestBsp`. The board is a separate user type selected once via `AppTraits::Platform`; the actor has no default `HwPolicy` |
 | `foo_test_bsp.hpp` | Tool-owned `TestBsp` (host test double: records calls in `Fa::test::log()`, returns `<fn>_result`), rewritten every export from the requirements |
 | `foo_actor.hpp` | User-owned; if it exists, `patchExistingActorHeader` appends newly-required handler methods and migrates legacy signatures (e.g. `Actor<HwPolicy>` → `Actor<HwPolicy, Ctx>`) without touching user code |

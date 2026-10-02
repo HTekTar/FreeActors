@@ -4,6 +4,7 @@
 
 ### Editor and export
 - Actors call `post`, `schedule` and `cancel` without `this->`, and the board as `Hw::`; existing actors get this on the next export, without changes to your code.
+- Event structs are yours: `<name>_events.hpp` is created once and never overwritten, so add the data an event carries as fields there (`struct Temperature { int16_t celsius = 0; };`). New signals are appended as empty structs; the event list moves to the generated `<name>_event_list.hpp`. An existing events header is converted on the next export, keeping fields you added.
 - Code completion with clangd: export writes a `.clangd` file and CMake writes `compile_commands.json`, so actions complete `schedule(...)` with its parameters and `Hw::` with the board functions.
 
 ## 0.0.7

@@ -44,4 +44,20 @@ const twice = ext.patchExistingActorHeader(once, jsonText).updatedContent;
 check('patching again changes nothing', twice === once);
 
 fs.writeFileSync(outPath, once);
+
+// Events: a header from before 0.0.8 (tool-owned banner) is converted once into the user-owned form,
+// keeping fields added by hand; a signal without a struct is appended; nothing else changes
+const legacyEvents = fs.readFileSync(path.join(__dirname, 'fixtures', 'legacy_timebomb_events.hpp'), 'utf8');
+const converted = ext.patchExistingEventsHeader(legacyEvents, jsonText);
+const ev = converted.updatedContent;
+check('events: a pre-0.0.8 header is converted', converted.converted && !ev.includes(ext.LEGACY_EVENTS_BANNER));
+check('events: the hand-added field is kept', ev.includes('struct ButtonPressed { uint8_t presses = 1; };   // a field added by hand'));
+check('events: each struct appears once, no variant left',
+      ev.split('struct Tick').length === 2 && ev.split('struct ButtonPressed').length === 2 && !ev.includes('std::variant'));
+check('events: converting again changes nothing', ext.patchExistingEventsHeader(ev, jsonText).updatedContent === ev);
+const withoutTick = ev.replace('struct Tick {};\n', '');
+const appended = ext.patchExistingEventsHeader(withoutTick, jsonText);
+check('events: a new signal is appended as an empty struct',
+      appended.added.join() === 'Tick' && appended.updatedContent.includes('struct Tick {};\n\n} // namespace Timebomb'));
+fs.writeFileSync(path.join(path.dirname(outPath), 'timebomb_events.hpp'), ev);
 process.exit(failures === 0 ? 0 : 1);

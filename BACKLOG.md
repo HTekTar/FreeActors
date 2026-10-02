@@ -72,6 +72,7 @@ Known limitation (documented, not a bug): a timer that expired and was queued to
 ## P4 — generator robustness
 | # | Item | Status |
 |---|---|---|
+| 50 | Simulator REPL spins at 100% CPU at end of input (EOF / Ctrl+D) instead of exiting | ⬜ |
 | 26 | Reachability tables: sibling guard negation, local-event shadowing, targetless transitions | ⬜ |
 | 27 | BSP contract parser: `T *p`, `const T`, `(void)`, multi-word return types | ⬜ |
 | 28 | Signal/state names not validated as C++ identifiers; undeclared signals (invalid JSON now rejected) | ◐ |

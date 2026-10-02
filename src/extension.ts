@@ -538,78 +538,123 @@ export function generateCpHwContractString(machineName: string, bspPolicyContent
     return out;
 }
 
-export function generateCppEventsHeaderString(jsonText: string): string {
-    let hsm = { name: "ActorMachine", signals: [] };
-    try { hsm = JSON.parse(jsonText); } catch (e) {}
+// ==========================================================================
+// EVENTS: the structs are the user's (<name>_events.hpp, created once, new signals appended on export);
+// the event list is the tool's (<name>_event_list.hpp: the Event variant and the names, every export).
+// ==========================================================================
+export const LEGACY_EVENTS_BANNER = 'AUTO-GENERATED FREEACTORS EVENT DEFINITIONS - DO NOT HAND-EDIT';
 
-    const machineName = hsm.name ? hsm.name.replace(/[^a-zA-Z0-9_]/g, "") : "ActorMachine";
-    const upperMachineName = machineName.toUpperCase();
+function machineSignals(hsm: any): string[] {
+    return ((hsm.signals || []) as unknown[])
+        .map(s => (typeof s === 'string' ? s : String((s as any)?.name ?? '')).trim())
+        .filter(s => s.length > 0);
+}
 
-    const rawSignals = (hsm.signals || []) as string[];
-    const normalizedSignals = rawSignals.map(s => s.trim()).filter(s => s.length > 0);
+function eventsHeaderTop(machineName: string): string {
+    let out = `// ==========================================================================\n`;
+    out += `// EVENTS - ${machineName}\n`;
+    out += `// Created once by FreeActors; this file is yours to edit (Export never overwrites it).\n`;
+    out += `//\n`;
+    out += `// One struct per signal of the model. Add the data an event carries as fields, with default values:\n`;
+    out += `//     struct Temperature { int16_t celsius = 0; };\n`;
+    out += `// Events are copied into queues and may be posted from interrupts: keep them small and plain\n`;
+    out += `// (numbers, bool, fixed-size arrays; no pointers to temporary data, no std::string).\n`;
+    out += `// A signal added to the model is appended here as an empty struct on the next export.\n`;
+    out += `// ==========================================================================\n\n`;
+    out += `#pragma once\n`;
+    out += `#include <cstdint>\n\n`;
+    out += `namespace ${machineName} {\n\n`;
+    return out;
+}
+
+// The user-owned events header, as first created
+export function generateCppEventsStub(jsonText: string): string {
+    const hsm = JSON.parse(jsonText);
+    const machineName = machineNameOf(hsm);
+    let out = eventsHeaderTop(machineName);
+    const signals = machineSignals(hsm);
+    if (signals.length === 0) {
+        out += `// No signals in the model yet.\n`;
+    }
+    signals.forEach(sig => { out += `struct ${sig} {};\n`; });
+    out += `\n} // namespace ${machineName}\n`;
+    return out;
+}
+
+// Brings an existing events header up to date with the model:
+//  - a header from before 0.0.8 (tool-owned, LEGACY_EVENTS_BANNER) is converted once into the user-owned form,
+//    keeping the target structs as they were (with any fields added to them);
+//  - signals of the model without a struct get an empty one, appended. Nothing is ever removed.
+export function patchExistingEventsHeader(existing: string, jsonText: string):
+        { updatedContent: string; converted: boolean; added: string[] } {
+    const hsm = JSON.parse(jsonText);
+    const machineName = machineNameOf(hsm);
+    let content = existing;
+    let converted = false;
+
+    if (content.includes(LEGACY_EVENTS_BANNER)) {
+        // The target branch (#else ... #endif // FA_SIM) holds the structs as compiled for the firmware
+        const target = /#else\s*\n([\s\S]*?)\n#endif\s*\/\/\s*FA_SIM/.exec(content);
+        const plain = /namespace\s+\w+\s*\{([\s\S]*?)\/\/ --- Actor Event Variant/.exec(content);
+        let body = (target?.[1] ?? plain?.[1] ?? '')
+            .replace(/^\s*\/\/ =+\s*$/gm, '')
+            .replace(/^\s*\/\/ (Signal & Event Payload Definitions|In FA_SIM, all events are zero-payload stubs.*|Generates empty struct default\.|If users need data payloads.*)\s*$/gm, '')
+            .replace(/^\s*\/\/ No custom signals registered\.\s*$/gm, '')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+        content = eventsHeaderTop(machineName) + (body ? body + '\n' : '') + `\n} // namespace ${machineName}\n`;
+        converted = true;
+    }
+
+    const added: string[] = [];
+    for (const sig of machineSignals(hsm)) {
+        if (!new RegExp(`\\b(struct|class)\\s+${sig}\\b`).test(content)) {
+            added.push(sig);
+        }
+    }
+    if (added.length > 0) {
+        const structs = added.map(sig => `struct ${sig} {};\n`).join('');
+        const close = content.lastIndexOf('} // namespace');
+        content = close >= 0
+            ? content.slice(0, close) + structs + '\n' + content.slice(close)
+            : content + '\n' + structs;
+    }
+    return { updatedContent: content, converted, added };
+}
+
+// The tool-owned event list: includes the user's structs, then the variant and the names for reflection
+export function generateCppEventListString(jsonText: string): string {
+    const hsm = JSON.parse(jsonText);
+    const machineName = machineNameOf(hsm);
+    const lowerMachineName = machineName.toLowerCase();
+    const signals = machineSignals(hsm);
 
     let out = `// ==========================================================================\n`;
-    out += `// AUTO-GENERATED FREEACTORS EVENT DEFINITIONS - DO NOT HAND-EDIT\n`;
-    out += `// Machine: ${machineName}\n`;
+    out += `// AUTO-GENERATED FREEACTORS EVENT LIST - DO NOT HAND-EDIT (rewritten on every export)\n`;
+    out += `// Machine: ${machineName}. The event structs are yours: ${lowerMachineName}_events.hpp\n`;
     out += `// ==========================================================================\n\n`;
-
     out += `#pragma once\n`;
-    out += `#ifndef ${upperMachineName}_EVENTS_HPP\n`;
-    out += `#define ${upperMachineName}_EVENTS_HPP\n\n`;
-
-    out += `#include <cstdint>\n`;
     out += `#include <variant>\n`;
-    out += `#include "fa_core.hpp"\n\n`;
+    out += `#include "fa_core.hpp"\n`;
+    out += `#include "${lowerMachineName}_events.hpp"\n\n`;
 
     out += `namespace ${machineName} {\n\n`;
-
-    out += `// ==========================================================================\n`;
-    out += `// Signal & Event Payload Definitions\n`;
-    out += `// In FA_SIM, all events are zero-payload stubs for CLI/REPL simulation.\n`;
-    out += `// ==========================================================================\n`;
-
-    out += `#ifdef FA_SIM\n\n`;
-    if (normalizedSignals.length === 0) {
-        out += `// No custom signals registered.\n`;
-    } else {
-        normalizedSignals.forEach(sig => {
-            out += `struct ${sig} {};\n`;
-        });
-    }
-    out += `\n#else\n\n`;
-
-    if (normalizedSignals.length === 0) {
-        out += `// No custom signals registered.\n`;
-    } else {
-        normalizedSignals.forEach(sig => {
-            // Generates empty struct default.
-            // If users need data payloads on target, they can add fields here or use payload types.
-            out += `struct ${sig} {};\n`;
-        });
-    }
-    out += `\n#endif // FA_SIM\n\n`;
-
-    out += `// --- Actor Event Variant ---\n`;
+    out += `// Every event the machine accepts: the framework's signals, then the model's, in model order\n`;
     out += `using Event = std::variant<\n`;
     out += `    Fa::Enter_sig,\n`;
     out += `    Fa::Exit_sig,\n`;
     out += `    Fa::Init_sig,\n`;
     out += `    Fa::ExitToParent_sig`;
-    normalizedSignals.forEach(sig => {
-        out += `,\n    ${sig}`;
-    });
+    signals.forEach(sig => { out += `,\n    ${sig}`; });
     out += `\n>;\n\n`;
-
     out += `} // namespace ${machineName}\n\n`;
 
-    out += `// --- Event Descriptor Specializations for Reflection ---\n`;
+    out += `// --- Event names, for the simulator and reflection ---\n`;
     out += `namespace Fa {\n`;
-    normalizedSignals.forEach(sig => {
+    signals.forEach(sig => {
         out += `    template <> struct EventDescriptor<${machineName}::${sig}> { static constexpr const char* name = "${sig}"; };\n`;
     });
-    out += `} // namespace Fa\n\n`;
-
-    out += `#endif // ${upperMachineName}_EVENTS_HPP\n`;
+    out += `} // namespace Fa\n`;
     return out;
 }
 
@@ -635,7 +680,7 @@ export function generateCppBlueprintString(jsonText: string): string {
     
     const lowerMachineName = machineName.toLowerCase();
 
-    out += `#include "${lowerMachineName}_events.hpp"\n`;
+    out += `#include "${lowerMachineName}_event_list.hpp"\n`;
     out += `#include "fa_core.hpp"\n`;
     out += `#include "fa_ops.hpp"\n`;
     out += `#include "fa_trace.hpp"\n`;
@@ -1814,9 +1859,27 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                                 await vscode.workspace.fs.writeFile(bspPolicyUri, stringToUint8Array(bspContent));
                             }
     
-                            // 2. Overwrite HSM Blueprint & HwContract (100% Tool-owned)
-                            const cppEvents = generateCppEventsHeaderString(jsonText); // <-- NEW
-                            await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(cppEvents));
+                            // 2a. Event structs (user-owned): create once; append new signals; convert a pre-0.0.8 header once
+                            const existingEvents = await readFileIfExists(eventsUri);
+                            let eventsNote = '';
+                            if (existingEvents === undefined) {
+                                await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(generateCppEventsStub(jsonText)));
+                            } else {
+                                const eventsPatch = patchExistingEventsHeader(existingEvents, jsonText);
+                                if (eventsPatch.updatedContent !== existingEvents) {
+                                    await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(eventsPatch.updatedContent));
+                                }
+                                if (eventsPatch.converted) {
+                                    eventsNote = ` '${eventsFilename}' is now yours to edit: add fields to your events there.`;
+                                } else if (eventsPatch.added.length > 0) {
+                                    eventsNote = ` Added ${eventsPatch.added.join(', ')} to '${eventsFilename}'.`;
+                                }
+                            }
+
+                            // 2b. Overwrite the event list, HSM Blueprint & HwContract (100% Tool-owned)
+                            await vscode.workspace.fs.writeFile(
+                                vscode.Uri.joinPath(folderUri, `${lowerHsmName}_event_list.hpp`),
+                                stringToUint8Array(generateCppEventListString(jsonText)));
 
                             const cppBlueprint = generateCppBlueprintString(jsonText);
                             await vscode.workspace.fs.writeFile(blueprintUri, stringToUint8Array(cppBlueprint));
@@ -1896,11 +1959,11 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                                 );
                             } else if (addedMethodsCount > 0) {
                                 vscode.window.showInformationMessage(
-                                    `✨ Preserved custom code & appended ${addedMethodsCount} newly discovered HSM method(s) to '${actorHeaderFilename}'!`
+                                    `✨ Preserved custom code & appended ${addedMethodsCount} newly discovered HSM method(s) to '${actorHeaderFilename}'!${eventsNote}`
                                 );
                             } else {
                                 vscode.window.showInformationMessage(
-                                    `🔄 Synchronized '${blueprintFilename}' and '${hwContractFilename}'. Custom code untouched.`
+                                    `🔄 Synchronized '${blueprintFilename}' and '${hwContractFilename}'. Custom code untouched.${eventsNote}`
                                 );
                             }
                         } catch (err: any) {

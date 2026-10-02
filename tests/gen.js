@@ -30,7 +30,8 @@ function generate(jsonText, modelPath) {
         ? fs.readFileSync(bspFixture, 'utf8')
         : ext.generateCppBspPolicyStarterStub(name);
     return {
-        events: ext.generateCppEventsHeaderString(jsonText),
+        events: ext.generateCppEventsStub(jsonText),
+        event_list: ext.generateCppEventListString(jsonText),
         hsm: ext.generateCppBlueprintString(jsonText),
         bsp_policy: bspPolicy,
         hw_contract: ext.generateCpHwContractString(name, bspPolicy),
