@@ -67,7 +67,7 @@ Timers are not drawn (an actor's own `schedule`); the box shows a clock badge if
 
 Event structs belong to the user, not the tool (since 0.0.8): `<name>_events.hpp` is created once with an empty struct per signal, new signals are appended, and the user adds fields with default values (`struct Temperature { int16_t celsius = 0; };`). The generated `<name>_event_list.hpp` holds the `Event` variant and the names. The diagram therefore never defines payloads: arrows name events, taken from the receiver's model.
 
-The PC side (trace dictionary, `fa-trace post` with field values, the simulator) learns field layouts by reading the user's header on export (best effort, like the hardware requirements parser), with a `static_assert` on each parsed event's size so a struct changed without re-exporting fails the build instead of garbling commands. Events it cannot read fall back to raw bytes.
+The PC side (trace dictionary, `fa-trace post` with field values) learns field layouts by reading the user's header on export (best effort, like the hardware requirements parser), with a `static_assert` on each parsed event's size so a struct changed without re-exporting fails the build instead of garbling commands. Events it cannot read fall back to raw bytes. The simulator needs no payloads: it runs the model, where guards are set by hand and actions are only recorded.
 
 **Who owns an event**: the receiving machine, as today. Routing is by type and every event type has exactly one receiving actor, so the receiver's model and events header are the natural home; the diagram offers the receiver's signals when an arrow is drawn.
 
@@ -120,7 +120,7 @@ With `fa-trace` connected (the extension runs the decoder and owns the serial po
 
 ## 7. Phases
 
-1. **Event payloads** (section 2): user-owned event structs (done in 0.0.8); field layouts read for the trace dictionary, `fa-trace` and the simulator.
+1. **Event payloads** (section 2): user-owned event structs (done in 0.0.8); field layouts read for the trace dictionary and `fa-trace` (done in 0.0.8).
 2. **Model and editor**: `*.app.json`, components, connections, drill-down; no generation yet.
 3. **Checks** (section 3).
 4. **Generation** (section 4), with the Timebomb project migrated to it and verified on the board; the POSIX test application generated from a model as well.
