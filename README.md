@@ -1,5 +1,7 @@
 # FreeActors
 
+[![CI](https://github.com/HTekTar/FreeActors/actions/workflows/ci.yml/badge.svg)](https://github.com/HTekTar/FreeActors/actions/workflows/ci.yml)
+
 **Hierarchical state machines for FreeRTOS on Arm Cortex-M4: drawn in VS Code, generated as C++17, and observable while they run on the hardware.**
 
 ![fa-trace driving a Nucleo-F446ZE: events posted from the PC, the board's timer driving the state machine, trace filtered to transitions](docs/media/fa-trace-board.gif)

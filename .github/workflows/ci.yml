@@ -1,0 +1,63 @@
+# Runs every test layer (npm test -> tests/run.sh) on each push and pull request:
+# generator and model tests, actor tests, ThreadSanitizer stress tests, exported projects (CMake/CTest),
+# the FreeRTOS POSIX runtime test with the decoded trace, and the Cortex-M4 cross-compiles.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Same toolchain as the development machine: GCC 11, arm-none-eabi-gcc 10.3
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ cmake gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+
+      - name: Fetch the FreeRTOS kernel
+        run: git clone --depth 1 --branch V11.1.0 https://github.com/FreeRTOS/FreeRTOS-Kernel.git "$RUNNER_TEMP/FreeRTOS-Kernel"
+
+      # ThreadSanitizer cannot map its shadow memory with the runners' high ASLR entropy
+      - name: Allow ThreadSanitizer
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - run: npm ci
+
+      - name: Test
+        env:
+          FREERTOS_KERNEL_PATH: ${{ runner.temp }}/FreeRTOS-Kernel
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
+          # In CI every layer must run: a SKIP means a tool or the kernel is missing
+          if grep -q '^SKIP' test.log; then
+            echo "::error::Some test layers were skipped:"; grep '^SKIP' test.log; exit 1
+          fi
+          echo "### $(grep -c '^PASS' test.log) checks passed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            test.log
+            tests/build/**/*.log
+            tests/build/posix/*.out
+            tests/build/posix/*.trace.txt
+          if-no-files-found: ignore
