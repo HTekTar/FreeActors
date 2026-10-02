@@ -53,7 +53,7 @@ Draw hierarchical state machines in VS Code and turn them into C++17 active obje
 
    FreeRTOS also needs the usual static-allocation hook (`vApplicationGetIdleTaskMemory`), with `configSUPPORT_STATIC_ALLOCATION` and `configUSE_TICK_HOOK` enabled.
 
-   Actors use `this->post(Event{})`, `this->schedule(Tick{}, 500)` (optionally periodic) and `this->cancel(Tick{})` from their actions.
+   Actors use `post(Event{})`, `schedule(Tick{}, 500)` (optionally periodic), `cancel(Tick{})` and the board's functions as `Hw::set_led(true)` from their actions. With clangd, these complete with their parameters (export writes a `.clangd` file; CMake writes `build/compile_commands.json`).
 
 ## Runtime trace
 

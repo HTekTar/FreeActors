@@ -66,15 +66,15 @@ public:
     bool TimeUp() const { return ticks == 0; }                        // guard
 
     void entry_LEDON() {                                              // entry actions
-        HwPolicy::set_blue_led(true);
+        Hw::set_blue_led(true);                                       // the board
         --ticks;
-        this->schedule(Tick{}, BlinkMs);                              // one-shot timer, owned by this actor
+        schedule(Tick{}, BlinkMs);                                    // one-shot timer, owned by this actor
     }
     void entry_LEDOFF() {
-        HwPolicy::set_blue_led(false);
-        this->schedule(Tick{}, BlinkMs);
+        Hw::set_blue_led(false);
+        schedule(Tick{}, BlinkMs);
     }
-    void entry_BOOM() { HwPolicy::set_red_led(true); }
+    void entry_BOOM() { Hw::set_red_led(true); }
     // ...
 private:
     uint8_t ticks{CountdownTicks};                                    // blinks left before BOOM

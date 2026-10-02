@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Editor and export
+- Actors call `post`, `schedule` and `cancel` without `this->`, and the board as `Hw::`; existing actors get this on the next export, without changes to your code.
+- Code completion with clangd: export writes a `.clangd` file and CMake writes `compile_commands.json`, so actions complete `schedule(...)` with its parameters and `Hw::` with the board functions.
+
 ## 0.0.7
 
 - Marketplace page: screenshot of the editor with the Time Bomb example, credited to Miro Samek's Modern Embedded Systems Programming course; links to the GitHub repository.

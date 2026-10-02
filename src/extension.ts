@@ -1013,7 +1013,7 @@ export function generateCppBlueprintString(jsonText: string): string {
     return out;
 }
 
-function patchExistingActorHeader(
+export function patchExistingActorHeader(
     existingContent: string,
     hsmJsonText: string
 ): { updatedContent: string; addedCount: number } {
@@ -1065,7 +1065,7 @@ function patchExistingActorHeader(
             aliasInjections += `    using Policy = HwPolicy;\n`;
         }
         if (!hasContext) {
-            aliasInjections += `    using Context = Ctx;     // Inspected by Fa::Hsm base for this->schedule / this->post\n`;
+            aliasInjections += `    using Context = Ctx;     // Inspected by Fa::Hsm base for schedule / post\n`;
         }
         if (!hasEventType) {
             aliasInjections += `    using EventType = Event; // Inspected by Fa::Application compile-time router\n`;
@@ -1074,6 +1074,11 @@ function patchExistingActorHeader(
         if (/\bpublic\s*:/.test(updatedContent)) {
             updatedContent = updatedContent.replace(/\bpublic\s*:/, `public:\n${aliasInjections}`);
         }
+    }
+
+    // 3b. Actor API block (post/schedule/cancel without 'this->', Hw::, IDE declarations); user code is untouched
+    if (!updatedContent.includes(ACTOR_API_MARKER) && /\bpublic\s*:/.test(updatedContent)) {
+        updatedContent = updatedContent.replace(/\bpublic\s*:[ \t]*\n/, `public:\n${generateActorApiBlock()}\n`);
     }
 
     // 4. Scan for missing guards
@@ -1175,6 +1180,36 @@ function patchExistingActorHeader(
     return { updatedContent, addedCount };
 }
 
+// The actor's API block: post/schedule/cancel without 'this->' and the board as Hw::. Under FA_IDE (set only
+// for clangd by the generated .clangd) the same names are declared concretely, so the IDE can complete them
+// with their parameters and list the board functions of HwRequirements. The compiler never sees FA_IDE.
+export const ACTOR_API_MARKER = 'using Base = Fa::Hsm<Actor<HwPolicy, Ctx>, Event>;';
+export function generateActorApiBlock(): string {
+    let out = `    // Actor API: call post(...), schedule(...), cancel(...) directly, and the board as Hw::\n`;
+    out += `    ${ACTOR_API_MARKER}\n`;
+    out += `#ifdef FA_IDE\n`;
+    out += `    // Seen only by the IDE (clangd, via .clangd): concrete declarations for completion. Never compiled.\n`;
+    out += `    template <typename E> bool schedule(E const& event, uint16_t ms, bool periodic = false);   // (re)start E's timer\n`;
+    out += `    template <typename E> void cancel(E const& event);                                         // stop E's timer\n`;
+    out += `    template <typename E> void post(E const& event);                                           // send to its actor\n`;
+    out += `    using Hw = HwRequirements;\n`;
+    out += `#else\n`;
+    out += `    using Base::post;\n`;
+    out += `    using Base::schedule;\n`;
+    out += `    using Base::cancel;\n`;
+    out += `    using Hw = HwPolicy;\n`;
+    out += `#endif\n`;
+    return out;
+}
+
+// clangd configuration for an exported project (created once): FA_IDE for completion, nothing for the compiler
+export const CLANGD_FILENAME = '.clangd';
+export function generateClangdConfigString(): string {
+    return `# clangd only (never the compiler): FA_IDE gives FreeActors actors concrete declarations for completion\n` +
+           `CompileFlags:\n` +
+           `  Add: [-DFA_IDE]\n`;
+}
+
 export function generateCppConcreteHeaderStub(jsonText: string): string {
     let hsm = { name: "ActorMachine", signals: [], guards: [], actions: [], states: [] };
     try { hsm = JSON.parse(jsonText); } catch (e) {}
@@ -1209,8 +1244,9 @@ export function generateCppConcreteHeaderStub(jsonText: string): string {
     out += `    static_assert(HwContract<HwPolicy>::verify());\n\n`;
 
     out += `public:\n`;
+    out += generateActorApiBlock() + `\n`;
     out += `    using Policy = HwPolicy;\n`;
-    out += `    using Context = Ctx;     // Inspected by Fa::Hsm base for this->schedule / this->post\n`;
+    out += `    using Context = Ctx;     // Inspected by Fa::Hsm base for schedule / post\n`;
     out += `    using EventType = Event; // Inspected by Fa::Application compile-time router\n\n`;
     out += `    static constexpr uint8_t instance_id = Fa::InstanceIdOf<HwPolicy>::value;\n`;
     out += `#ifdef FA_SIM\n`;
@@ -1247,12 +1283,12 @@ export function generateCppConcreteHeaderStub(jsonText: string): string {
         actionCatalog.forEach(item => {
             if (item.hasVoid || item.payloadEvents.size === 0) {
                 out += `    void ${item.rawMethod}() {\n`;
-                out += `        // TODO: Implement action routine using HwPolicy\n`;
+                out += `        // TODO: Implement action routine, e.g. Hw::set_led(true); schedule(Timeout{}, 500);\n`;
                 out += `    }\n\n`;
             }
             item.payloadEvents.forEach(sig => {
                 out += `    void ${item.rawMethod}(${sig} const &/*e*/) {\n`;
-                out += `        // TODO: Process payload from ${sig} using HwPolicy\n`;
+                out += `        // TODO: Process payload from ${sig}, e.g. with Hw:: board functions\n`;
                 out += `    }\n\n`;
             });
         });
@@ -1392,7 +1428,8 @@ export function generateCMakeListsString(jsonText: string): string {
 
     out += `set(CMAKE_CXX_STANDARD 17)\n`;
     out += `set(CMAKE_CXX_STANDARD_REQUIRED ON)\n`;
-    out += `set(CMAKE_CXX_EXTENSIONS OFF)\n\n`;
+    out += `set(CMAKE_CXX_EXTENSIONS OFF)\n`;
+    out += `set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # build/compile_commands.json: code completion (clangd)\n\n`;
 
     out += `include_directories(\n`;
     out += `    \${CMAKE_CURRENT_SOURCE_DIR}\n`;
@@ -1808,6 +1845,10 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             }
                             if (!(await fileExists(cmakeUri))) {
                                 await vscode.workspace.fs.writeFile(cmakeUri, stringToUint8Array(generateCMakeListsString(jsonText)));
+                            }
+                            const clangdUri = vscode.Uri.joinPath(folderUri, CLANGD_FILENAME);
+                            if (!(await fileExists(clangdUri))) {
+                                await vscode.workspace.fs.writeFile(clangdUri, stringToUint8Array(generateClangdConfigString()));
                             }
     
                             // 5. Host tests: test sources are created once (user-owned); the CMake include is tool-owned
