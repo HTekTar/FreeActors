@@ -22,6 +22,12 @@ Module._load = function (request, ...rest) {
 const ext = require('../out/extension.js');
 
 // A fixture may supply its own BSP policy (<model>.bsp_policy.hpp) in place of the starter stub.
+// The user-owned events header: a fixture's <model>.events.hpp if present (events with fields), else the stub
+function eventsOf(jsonText, modelPath) {
+    const fixture = modelPath.replace(/\.hsm\.json$/, '.events.hpp');
+    return fs.existsSync(fixture) ? fs.readFileSync(fixture, 'utf8') : ext.generateCppEventsStub(jsonText);
+}
+
 function generate(jsonText, modelPath) {
     ext.validateHsmModel(jsonText);
     const name = JSON.parse(jsonText).name.replace(/[^a-zA-Z0-9_]/g, '');
@@ -29,9 +35,10 @@ function generate(jsonText, modelPath) {
     const bspPolicy = fs.existsSync(bspFixture)
         ? fs.readFileSync(bspFixture, 'utf8')
         : ext.generateCppBspPolicyStarterStub(name);
+    const events = eventsOf(jsonText, modelPath);
     return {
-        events: ext.generateCppEventsStub(jsonText),
-        event_list: ext.generateCppEventListString(jsonText),
+        events,
+        event_list: ext.generateCppEventListString(jsonText, events),
         hsm: ext.generateCppBlueprintString(jsonText),
         bsp_policy: bspPolicy,
         hw_contract: ext.generateCpHwContractString(name, bspPolicy),
@@ -93,4 +100,4 @@ fs.mkdirSync(outDir, { recursive: true });
 for (const [suffix, content] of Object.entries(generate(jsonText, modelPath))) {
     fs.writeFileSync(path.join(outDir, `${lowerName}_${suffix}.hpp`), content);
 }
-fs.writeFileSync(path.join(outDir, `${lowerName}_trace.json`), ext.generateTraceDictionaryString(jsonText));
+fs.writeFileSync(path.join(outDir, `${lowerName}_trace.json`), ext.generateTraceDictionaryString(jsonText, eventsOf(jsonText, modelPath)));

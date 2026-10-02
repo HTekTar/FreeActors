@@ -60,4 +60,8 @@ const appended = ext.patchExistingEventsHeader(withoutTick, jsonText);
 check('events: a new signal is appended as an empty struct',
       appended.added.join() === 'Tick' && appended.updatedContent.includes('struct Tick {};\n\n} // namespace Timebomb'));
 fs.writeFileSync(path.join(path.dirname(outPath), 'timebomb_events.hpp'), ev);
+// as on export: the event list is regenerated from the converted events (its layout checks include the new field)
+const list = ext.generateCppEventListString(jsonText, ev);
+check('events: the event list pins the hand-added field', list.includes('sizeof(Timebomb::ButtonPressed) == 1'));
+fs.writeFileSync(path.join(path.dirname(outPath), 'timebomb_event_list.hpp'), list);
 process.exit(failures === 0 ? 0 : 1);

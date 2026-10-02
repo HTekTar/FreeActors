@@ -1,0 +1,25 @@
+{
+  "name": "Sensor",
+  "signals": ["Temperature", "Frame", "Reading", "Status", "Custom"],
+  "guards": [],
+  "actions": [],
+  "states": [
+    {
+      "id": "STATE_ROOT",
+      "name": "ROOT",
+      "entry": "entry_ROOT()",
+      "exit": "exit_ROOT()",
+      "transitions": [
+        { "event": "Init_sig", "target": "STATE_IDLE" }
+      ]
+    },
+    {
+      "id": "STATE_IDLE",
+      "name": "IDLE",
+      "parent": "STATE_ROOT",
+      "entry": "entry_IDLE()",
+      "exit": "exit_IDLE()",
+      "local_events": ["Temperature / store", "Frame / store", "Reading / store", "Status / store", "Custom / store"]
+    }
+  ]
+}

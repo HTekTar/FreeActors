@@ -622,8 +622,67 @@ export function patchExistingEventsHeader(existing: string, jsonText: string):
     return { updatedContent: content, converted, added };
 }
 
-// The tool-owned event list: includes the user's structs, then the variant and the names for reflection
-export function generateCppEventListString(jsonText: string): string {
+// ==========================================================================
+// EVENT LAYOUTS: read from the user's events header (best effort), for the trace dictionary (fa-trace can post
+// events with field values) and for static_asserts that catch a struct changed since the last export.
+// Recognised fields: bool, (u)int8/16/32_t, int, unsigned, float, and fixed-size arrays of them, with an optional
+// initialiser. Anything else in a struct (other types, methods, nested types) makes its layout unknown.
+// Layout: natural alignment (Arm AAPCS; the same for these types on x86-64 hosts).
+// ==========================================================================
+export interface EventField { name: string; type: string; count: number; offset: number; }
+export interface EventLayout { size: number; fields: EventField[]; }
+
+const FIELD_TYPES: { [t: string]: { size: number; canonical: string } } = {
+    'bool': { size: 1, canonical: 'bool' }, 'float': { size: 4, canonical: 'float' },
+    'int8_t': { size: 1, canonical: 'int8_t' }, 'uint8_t': { size: 1, canonical: 'uint8_t' },
+    'int16_t': { size: 2, canonical: 'int16_t' }, 'uint16_t': { size: 2, canonical: 'uint16_t' },
+    'int32_t': { size: 4, canonical: 'int32_t' }, 'uint32_t': { size: 4, canonical: 'uint32_t' },
+    'int': { size: 4, canonical: 'int32_t' }, 'unsigned': { size: 4, canonical: 'uint32_t' },
+    'unsigned int': { size: 4, canonical: 'uint32_t' },
+};
+
+// The body of 'struct Name { ... };' (braces matched), or undefined
+function structBody(header: string, name: string): string | undefined {
+    const m = new RegExp(`\\bstruct\\s+${name}\\s*\\{`).exec(header);
+    if (!m) return undefined;
+    let depth = 1, i = m.index + m[0].length;
+    const start = i;
+    for (; i < header.length && depth > 0; i++) {
+        if (header[i] === '{') depth++;
+        else if (header[i] === '}') depth--;
+    }
+    return depth === 0 ? header.slice(start, i - 1) : undefined;
+}
+
+// Layout of each signal's struct: an EventLayout, or null if the struct is missing or not understood
+export function parseEventLayouts(eventsHeader: string, signals: string[]): Map<string, EventLayout | null> {
+    const code = eventsHeader.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const layouts = new Map<string, EventLayout | null>();
+    for (const sig of signals) {
+        const body = structBody(code, sig);
+        if (body === undefined) { layouts.set(sig, null); continue; }
+        const fields: EventField[] = [];
+        let offset = 0, align = 1, ok = true;
+        // Statements end with ';' (array initialisers like data[4]{} contain no ';')
+        for (const raw of body.split(';').map(s => s.trim()).filter(s => s.length > 0)) {
+            const f = /^(?:std::)?(bool|float|u?int(?:8|16|32)_t|unsigned int|unsigned|int)\s+([A-Za-z_]\w*)\s*(?:\[\s*(\d+)\s*\])?\s*(?:=\s*[^{}]+|\{[^{}]*\})?$/.exec(raw);
+            const type = f ? FIELD_TYPES[f[1]!] : undefined;
+            if (!f || !type) { ok = false; break; }
+            const count = f[3] ? Number(f[3]) : 1;
+            if (count < 1) { ok = false; break; }
+            offset = Math.ceil(offset / type.size) * type.size;
+            fields.push({ name: f[2]!, type: type.canonical, count, offset });
+            offset += type.size * count;
+            align = Math.max(align, type.size);
+        }
+        layouts.set(sig, ok ? { size: fields.length === 0 ? 0 : Math.ceil(offset / align) * align, fields } : null);
+    }
+    return layouts;
+}
+
+// The tool-owned event list: includes the user's structs, then the variant and the names for reflection.
+// With the events header, it also pins the layouts it could read (fa-trace encodes fields with them).
+export function generateCppEventListString(jsonText: string, eventsHeader?: string): string {
     const hsm = JSON.parse(jsonText);
     const machineName = machineNameOf(hsm);
     const lowerMachineName = machineName.toLowerCase();
@@ -655,6 +714,28 @@ export function generateCppEventListString(jsonText: string): string {
         out += `    template <> struct EventDescriptor<${machineName}::${sig}> { static constexpr const char* name = "${sig}"; };\n`;
     });
     out += `} // namespace Fa\n`;
+
+    if (eventsHeader !== undefined) {
+        const layouts = parseEventLayouts(eventsHeader, signals);
+        let checks = '';
+        for (const [sig, layout] of layouts) {
+            if (!layout) continue;
+            const t = `${machineName}::${sig}`;
+            const msg = `"${sig} changed since the last export: export again (fa-trace uses its field layout)"`;
+            if (layout.fields.length === 0) {
+                checks += `static_assert(std::is_empty_v<${t}>, ${msg});\n`;
+                continue;
+            }
+            checks += `static_assert(sizeof(${t}) == ${layout.size}`;
+            layout.fields.forEach(f => { checks += ` && offsetof(${t}, ${f.name}) == ${f.offset}`; });
+            checks += `, ${msg});\n`;
+        }
+        if (checks) {
+            out += `\n// --- Event layouts read at export (the trace dictionary has the same): a struct changed since then fails here ---\n`;
+            out += `#include <cstddef>\n#include <type_traits>\n`;
+            out += checks;
+        }
+    }
     return out;
 }
 
@@ -1498,11 +1579,11 @@ export function generateCMakeListsString(jsonText: string): string {
 // ==========================================================================
 // TRACE DICTIONARY (tool-owned <name>_trace.json): turns the numbers in trace records back into names
 // ==========================================================================
-export function generateTraceDictionaryString(jsonText: string): string {
+export function generateTraceDictionaryString(jsonText: string, eventsHeader?: string): string {
     const hsm = JSON.parse(jsonText);
     const machineName = machineNameOf(hsm);
     const { states, guardCatalog, actionCatalog } = extractCatalogs(hsm, machineName);
-    const signals = ((hsm.signals || []) as string[]).map(s => s.trim()).filter(s => s.length > 0);
+    const signals = machineSignals(hsm);
 
     // Descriptor ids are numbered exactly as in generateCppBlueprintString: guards first, then actions, from 1
     let nextId = 1;
@@ -1519,7 +1600,9 @@ export function generateTraceDictionaryString(jsonText: string): string {
         events: ["Enter_sig", "Exit_sig", "Init_sig", "ExitToParent_sig", ...signals],   // Event variant order
         states: states.map((s: any) => s.name).filter(Boolean),                          // StateCatalog order
         guards,
-        actions
+        actions,
+        // Field layouts of the model's events (null: not understood, fa-trace takes raw bytes for it)
+        ...(eventsHeader !== undefined ? { payloads: Object.fromEntries(parseEventLayouts(eventsHeader, signals)) } : {})
     };
     return JSON.stringify(dictionary, null, 2) + "\n";
 }
@@ -1862,10 +1945,13 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             // 2a. Event structs (user-owned): create once; append new signals; convert a pre-0.0.8 header once
                             const existingEvents = await readFileIfExists(eventsUri);
                             let eventsNote = '';
+                            let eventsContent: string;
                             if (existingEvents === undefined) {
-                                await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(generateCppEventsStub(jsonText)));
+                                eventsContent = generateCppEventsStub(jsonText);
+                                await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(eventsContent));
                             } else {
                                 const eventsPatch = patchExistingEventsHeader(existingEvents, jsonText);
+                                eventsContent = eventsPatch.updatedContent;
                                 if (eventsPatch.updatedContent !== existingEvents) {
                                     await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(eventsPatch.updatedContent));
                                 }
@@ -1879,7 +1965,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             // 2b. Overwrite the event list, HSM Blueprint & HwContract (100% Tool-owned)
                             await vscode.workspace.fs.writeFile(
                                 vscode.Uri.joinPath(folderUri, `${lowerHsmName}_event_list.hpp`),
-                                stringToUint8Array(generateCppEventListString(jsonText)));
+                                stringToUint8Array(generateCppEventListString(jsonText, eventsContent)));
 
                             const cppBlueprint = generateCppBlueprintString(jsonText);
                             await vscode.workspace.fs.writeFile(blueprintUri, stringToUint8Array(cppBlueprint));
@@ -1939,7 +2025,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                                 stringToUint8Array(generateCppTestBspString(hsmName, bspContent)));
                             await vscode.workspace.fs.writeFile(
                                 vscode.Uri.joinPath(folderUri, `${lowerHsmName}_trace.json`),
-                                stringToUint8Array(generateTraceDictionaryString(jsonText)));
+                                stringToUint8Array(generateTraceDictionaryString(jsonText, eventsContent)));
 
                             await copyFrameworkFilesToWorkspace(this.context, folderUri);
 

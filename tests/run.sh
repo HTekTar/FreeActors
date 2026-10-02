@@ -46,6 +46,45 @@ build_and_run spsc_test_tsan "$ROOT/tests/spsc_test.cpp" -O1 -g -pthread -fsanit
 build_and_run dma_test "$ROOT/tests/dma_test.cpp" -O2 -pthread
 build_and_run dma_test_tsan "$ROOT/tests/dma_test.cpp" -O1 -g -pthread -fsanitize=thread
 build_and_run health_test "$ROOT/tests/health_test.cpp"
+# Event payloads: fa-trace encodes field values from the dictionary; the C++ side rebuilds the events from them
+node "$ROOT/tests/gen.js" "$ROOT/tests/fixtures/sensor.hsm.json" "$OUT" || status=1
+node "$ROOT/tools/fa-trace.js" --dict "$OUT/sensor_trace.json" --actors Sensor \
+    --encode "post Sensor Temperature celsius=-5" \
+    --encode "post Sensor Reading 7 -100000 0.5" \
+    --encode "post Sensor Frame length=3 data=1,2,3 last=true" \
+    --encode "post Sensor Status" \
+    --encode "post Sensor Custom 34 12" > "$OUT/payload_frames.bin" || { echo "FAIL  fa-trace: payload encoding"; status=1; }
+FA_PAYLOAD_FRAMES="$OUT/payload_frames.bin" build_and_run payload_test "$ROOT/tests/payload_test.cpp"
+# values fa-trace must refuse, with a message naming the problem
+expect_refused() {
+    local message
+    message=$(node "$ROOT/tools/fa-trace.js" --dict "$OUT/sensor_trace.json" --actors Sensor --encode "$1" 2>&1 >/dev/null)
+    if [ $? -ne 0 ] && echo "$message" | grep -q "$2"; then
+        echo "PASS  fa-trace refuses '$1' ($2)"
+    else
+        echo "FAIL  fa-trace accepted '$1' or gave '$message', expected '$2'"; status=1
+    fi
+}
+expect_refused "post Sensor Temperature celsius=40000" "out of range for int16_t"
+expect_refused "post Sensor Temperature hot=1" "no field 'hot'"
+expect_refused "post Sensor Frame data=1,2,3,4,5,6" "data holds 5 value"
+expect_refused "post Sensor Frame last=maybe" "not a bool"
+expect_refused "post Sensor Status 1" "too many values"
+# a struct changed after the export (a field added) must fail the build with the "export again" message
+stale="$OUT/stale_events"
+mkdir -p "$stale"
+sed 's/struct Temperature { int16_t celsius = 0; };/struct Temperature { int16_t celsius = 0; int16_t offset = 0; };/' \
+    "$ROOT/tests/fixtures/sensor.events.hpp" > "$stale/sensor_events.hpp"
+printf '#include "sensor_event_list.hpp"\nint main() {}\n' > "$stale/main.cpp"
+cp "$OUT/sensor_event_list.hpp" "$stale/"
+if g++ -std=c++17 -fsyntax-only -I"$stale" -I"$ROOT/freeactors_lib" "$stale/main.cpp" 2> "$stale/build.log"; then
+    echo "FAIL  a struct changed after the export compiled without the layout check firing"; status=1
+elif grep -q "Temperature changed since the last export: export again" "$stale/build.log"; then
+    echo "PASS  a struct changed after the export fails the build: 'Temperature changed since the last export: export again'"
+else
+    echo "FAIL  a struct changed after the export failed for another reason (log: tests/build/stale_events/build.log)"; status=1
+fi
+
 build_and_run engine_test "$ROOT/tests/engine_test.cpp"
 build_and_run actor_test "$ROOT/tests/actor_test.cpp"
 build_and_run actor_test_fa_trace "$ROOT/tests/actor_test.cpp" -DFA_TRACE
@@ -78,7 +117,7 @@ rm -rf "$patched" && mkdir -p "$patched"
 if node "$ROOT/tests/patcher_test.js" "$ROOT/tests/fixtures/timebomb.hsm.json" "$patched/timebomb_actor.hpp"; then
     # a copy of the exported project with the patched actor and the converted events in place
     cp -r "$OUT/projects/timebomb" "$patched/project"
-    cp "$patched/timebomb_actor.hpp" "$patched/timebomb_events.hpp" "$patched/project/"
+    cp "$patched/timebomb_actor.hpp" "$patched/timebomb_events.hpp" "$patched/timebomb_event_list.hpp" "$patched/project/"
     p="$patched/project"
     if g++ -std=c++17 -I"$p" -I"$p/freeactors" "$p/tests/timebomb_actor_test.cpp" \
            -o "$patched/actor_test" 2> "$patched/build.log" && "$patched/actor_test" > "$patched/run.log" 2>&1; then

@@ -253,7 +253,7 @@ The blueprint also gets `constexpr uint32_t model_hash` (a hash of the model), w
   - **file or pipe**, for recorded traces and the POSIX test.
   `serialport` is the extension's first native dependency: the `.vsix` must ship its prebuilt binaries for every platform, or be published per platform (`vsce --target`). Development and CI testing happen on Linux; Windows needs a check on a Windows machine or CI runner.
 - **Phase 2 — commands from `fa-trace`**: with `--serial` or `--tcp` (and a terminal), commands typed while the trace runs are sent as command frames; replies appear in the trace, each `ACK` labelled with its command:
-  - `post <actor> <event> [payload bytes in hex]` — actor and event by name (from `HELLO` and the dictionary) or number; payloads are the event's raw bytes (little-endian);
+  - `post <actor> <event> [field=value ...]` — actor and event by name (from `HELLO` and the dictionary) or number; field values by name or position (arrays `1,2,3`), encoded with the layouts the export read from the user's events header (dictionary `payloads`); events whose struct it could not read take raw bytes in hex;
   - `states`, `reset`, `hello`;
   - `pause <task>`, `resume <task>`, `health test <task>` (`FA_DEBUG_COMMANDS`, [health.md](health.md) section 7);
   - `health` — every monitored task's status, longest step and free stack (`FA_HEALTH`, [health.md](health.md));

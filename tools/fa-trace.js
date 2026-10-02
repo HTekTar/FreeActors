@@ -373,7 +373,9 @@ const Command = { Post: 0x81, QueryStates: 0x82, Reset: 0x83, HelloRequest: 0x84
 const KindNames = { event: 0, guard: [1, 2], action: 3, transition: 4, dropped: 5, post: 6, timer: [7, 8], health: [9, 10] };
 
 const COMMAND_HELP = [
-    'post <actor> <event> [payload bytes in hex, e.g. 01 ff]   queue an event (actor/event by name or number)',
+    'post <actor> <event> [field=value ...]                    queue an event, e.g. post Sensor Temperature celsius=21',
+    '                                                          (values by position work too; arrays 1,2,3; events fa-trace',
+    '                                                          cannot read take payload bytes in hex)',
     'states                                                    every actor\'s current state',
     'filter all | filter <kinds> [actors]                      trace only these, e.g. filter transition,event Timebomb',
     '       kinds: event guard action transition dropped post timer health (or a number mask); actors: names or a mask',
@@ -384,6 +386,72 @@ const COMMAND_HELP = [
     'hello                                                     ask for HELLO (actor names, clock)',
     'reset                                                     reset the target (if its board supports it)',
 ].join('\n');
+
+// ---- Event payloads: encoded from the field layouts in the dictionary (generator: parseEventLayouts) ----
+
+const FieldTypes = {
+    bool: { size: 1, put: (v, o, x) => v.setUint8(o, x ? 1 : 0) },
+    int8_t: { size: 1, min: -128, max: 127, put: (v, o, x) => v.setInt8(o, x) },
+    uint8_t: { size: 1, min: 0, max: 255, put: (v, o, x) => v.setUint8(o, x) },
+    int16_t: { size: 2, min: -32768, max: 32767, put: (v, o, x) => v.setInt16(o, x, true) },
+    uint16_t: { size: 2, min: 0, max: 65535, put: (v, o, x) => v.setUint16(o, x, true) },
+    int32_t: { size: 4, min: -2147483648, max: 2147483647, put: (v, o, x) => v.setInt32(o, x, true) },
+    uint32_t: { size: 4, min: 0, max: 4294967295, put: (v, o, x) => v.setUint32(o, x, true) },
+    float: { size: 4, put: (v, o, x) => v.setFloat32(o, x, true) },
+};
+
+// The layout of an event of an actor's dictionary: { size, fields } if known, null if not understood,
+// undefined for dictionaries from before payload layouts
+function payloadLayout(actor, eventIndex) {
+    const dict = actor && actor.dict;
+    if (!dict || dict.payloads === undefined) return undefined;
+    const layout = dict.payloads[dict.events[eventIndex]];
+    return layout === undefined ? undefined : layout;
+}
+
+function parseScalar(type, text) {
+    const t = FieldTypes[type];
+    if (type === 'bool') {
+        if (/^(true|1)$/i.test(text)) return { value: true };
+        if (/^(false|0)$/i.test(text)) return { value: false };
+        return { error: `'${text}' is not a bool (true/false)` };
+    }
+    const value = type === 'float' ? Number(text) : (/^-?(0x[0-9a-f]+|\d+)$/i.test(text) ? Number(text) : NaN);
+    if (!Number.isFinite(value)) return { error: `'${text}' is not a ${type}` };
+    if (t.min !== undefined && (value < t.min || value > t.max)) return { error: `${text} is out of range for ${type} (${t.min}..${t.max})` };
+    return { value };
+}
+
+// Field values from 'name=value' or positional arguments (arrays: 1,2,3; missing elements and fields stay 0)
+function encodePayload(layout, args) {
+    const bytes = new Uint8Array(layout.size);
+    const view = new DataView(bytes.buffer);
+    const given = new Map();
+    let position = 0;
+    for (const arg of args) {
+        const named = /^([A-Za-z_]\w*)=(.*)$/.exec(arg);
+        const field = named ? layout.fields.find(f => f.name === named[1]) : layout.fields[position++];
+        if (!field) {
+            return { error: named ? `no field '${named[1]}' (fields: ${layout.fields.map(f => f.name).join(', ') || 'none'})`
+                                  : `too many values (fields: ${layout.fields.map(f => f.name).join(', ') || 'none'})` };
+        }
+        given.set(field.name, named ? named[2] : arg);
+    }
+    for (const field of layout.fields) {
+        if (!given.has(field.name)) continue;
+        const items = given.get(field.name).split(',').filter(s => s.length > 0);
+        if (items.length > field.count) return { error: `${field.name} holds ${field.count} value(s), got ${items.length}` };
+        const size = FieldTypes[field.type].size;
+        for (let i = 0; i < items.length; i++) {
+            const parsed = parseScalar(field.type, items[i]);
+            if (parsed.error) return { error: `${field.name}: ${parsed.error}` };
+            FieldTypes[field.type].put(view, field.offset + i * size, parsed.value);
+        }
+    }
+    return { bytes: [...bytes] };
+}
+
+const describeFields = layout => layout.fields.map(f => `${f.name}:${f.type}${f.count > 1 ? `[${f.count}]` : ''}`).join(' ');
 
 // Builds a command frame from a line of text. actors(): [{ name, dict }] from HELLO or --actors;
 // tasks(): task names from MODULES (health monitor / pause commands), if any.
@@ -433,13 +501,23 @@ function createCommander(actors, tasks = () => actors().map(a => a.name)) {
         const text = words.join(' ');
         switch (words[0]) {
             case 'post': {
-                if (words.length < 3) return { error: 'usage: post <actor> <event> [payload bytes in hex]' };
+                if (words.length < 3) return { error: 'usage: post <actor> <event> [field=value ...]' };
                 const actor = findActor(words[1]);
                 if (typeof actor !== 'number') return actor;
                 const event = findEvent(actor, words[2]);
                 if (typeof event !== 'number') return event;
-                const payload = words.slice(3).map(b => parseInt(b, 16));
-                if (payload.some(b => !(b >= 0 && b <= 0xFF))) return { error: 'payload: bytes in hex, e.g. 01 ff' };
+                const layout = payloadLayout(actors()[actor], event);
+                let payload;
+                if (layout) {                                   // fields known: values by name or position
+                    const encoded = encodePayload(layout, words.slice(3));
+                    if (encoded.error) return { error: `${words[2]}: ${encoded.error}` };
+                    payload = encoded.bytes;
+                } else {                                        // layout not understood: raw bytes in hex
+                    payload = words.slice(3).map(b => parseInt(b, 16));
+                    if (payload.some(b => !(b >= 0 && b <= 0xFF))) {
+                        return { error: `${words[2]}: its fields are not known to fa-trace; give the payload as bytes in hex, e.g. 01 ff` };
+                    }
+                }
                 const seq = next();
                 return { frame: encodeFrame(Command.Post, [seq, actor, event, ...payload]), sequence: seq, text };
             }
@@ -620,7 +698,11 @@ function listEvents(actors, which) {
     const chosen = actors.filter((a, i) => which === undefined || a.name === which || String(i) === which ||
                                            (a.dict && a.dict.machine === which));
     if (chosen.length === 0) return `no actor '${which}' (actors: ${actors.map(a => a.name).join(', ')})`;
-    return chosen.map(a => `${a.name}: ${a.dict ? postable(a).join(', ') : '(no dictionary: pass its folder to --dict)'}`).join('\n');
+    const withFields = (a, e) => {
+        const layout = payloadLayout(a, a.dict.events.indexOf(e));
+        return layout && layout.fields.length > 0 ? `${e}(${describeFields(layout)})` : layout === null ? `${e}(bytes)` : e;
+    };
+    return chosen.map(a => `${a.name}: ${a.dict ? postable(a).map(e => withFields(a, e)).join(', ') : '(no dictionary: pass its folder to --dict)'}`).join('\n');
 }
 
 // Tab completion: command, then actor, then event (filter: kinds, then actors)
@@ -636,13 +718,18 @@ function completer(actors, tasks) {
         else if (words[0] === 'post' && words.length === 3) {
             const actor = actors().find((a, i) => a.name === words[1] || String(i) === words[1]);
             options = actor ? postable(actor) : [];
+        } else if (words[0] === 'post' && words.length > 3) {             // field names of the event
+            const actor = actors().find((a, i) => a.name === words[1] || String(i) === words[1]);
+            const index = actor && actor.dict ? actor.dict.events.indexOf(words[2]) : -1;
+            const layout = index >= 0 ? payloadLayout(actor, index) : undefined;
+            options = layout ? layout.fields.map(f => `${f.name}=`) : [];
         } else if (words[0] === 'filter' && words.length === 2) options = ['all', ...Object.keys(KindNames)];
         else if (words[0] === 'filter' && words.length === 3) options = actors().map(a => a.name);
         else if ((words[0] === 'pause' || words[0] === 'resume') && words.length === 2) options = tasks();
         else if (words[0] === 'health' && words.length === 2) options = ['test'];
         else if (words[0] === 'health' && words[1] === 'test' && words.length === 3) options = tasks();
         const hits = options.filter(o => o.startsWith(last));
-        return [(hits.length > 0 ? hits : options).map(o => o + ' '), last];
+        return [(hits.length > 0 ? hits : options).map(o => (o.endsWith('=') ? o : o + ' ')), last];
     };
 }
 
