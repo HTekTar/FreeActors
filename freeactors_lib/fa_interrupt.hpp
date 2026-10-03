@@ -71,6 +71,14 @@ struct InterruptInterface {
         I::handler();
     }
 
+    // Called once by Fa::Application::init, after every module exists: sets the priority (PRI), drops a
+    // request that came before the handler was installed, and enables the interrupt
+    static void init();
+
+    // At run time, e.g. to mask the interrupt in some state or while reconfiguring its peripheral
+    static void enable();
+    static void disable();
+
     // Compile-time checks, evaluated when the application installs the module
     static constexpr bool check() {
         static_assert(static_cast<int>(I::IRQNum) >= 0,
@@ -191,7 +199,7 @@ namespace detail {
         const int32_t irq = static_cast<int32_t>(ipsr & 0x1FFu) - 16;
         unexpected_irq = irq;
         if (irq >= 0) {
-            reinterpret_cast<volatile uint32_t*>(0xE000E180u)[irq >> 5] = 1u << (irq & 31);   // NVIC_ICER
+            reinterpret_cast<volatile uint32_t*>(0xE000E180u)[irq >> 5] = 1u << (irq & 31);   // NVIC_ICER: disable it
         }
         FA_ASSERT(false /* an interrupt fired that is not in the application's vector table: see Fa::detail::unexpected_irq */);
     }
@@ -243,14 +251,36 @@ namespace detail {
         __asm volatile("dsb\n isb" ::: "memory");
     }
 
-    template <typename I>
-    void enable_interrupt() {
-        constexpr unsigned irq = static_cast<unsigned>(I::IRQNum);
-        nvic_ipr()[irq] = static_cast<uint8_t>(I::PRI << (8 - nvic_priority_bits));
-        nvic_icpr()[irq >> 5] = 1u << (irq & 31);   // drop a request that came before the handler was installed
-        nvic_iser()[irq >> 5] = 1u << (irq & 31);
-    }
+    inline volatile uint32_t* nvic_icer() { return reinterpret_cast<volatile uint32_t*>(0xE000E180u); }
 }
+
+template <typename I>
+void InterruptInterface<I>::init() {
+    constexpr unsigned irq = static_cast<unsigned>(I::IRQNum);
+    detail::nvic_ipr()[irq] = static_cast<uint8_t>(I::PRI << (8 - detail::nvic_priority_bits));
+    detail::nvic_icpr()[irq >> 5] = 1u << (irq & 31);
+    enable();
+}
+
+template <typename I>
+void InterruptInterface<I>::enable() {
+    constexpr unsigned irq = static_cast<unsigned>(I::IRQNum);
+    detail::nvic_iser()[irq >> 5] = 1u << (irq & 31);
+}
+
+template <typename I>
+void InterruptInterface<I>::disable() {
+    constexpr unsigned irq = static_cast<unsigned>(I::IRQNum);
+    detail::nvic_icer()[irq >> 5] = 1u << (irq & 31);
+    __asm volatile("dsb\n isb" ::: "memory");   // the interrupt cannot fire once this returns
+}
+
+#else // host: no NVIC; tests fire interrupts by calling handle()
+
+template <typename I> void InterruptInterface<I>::init() {}
+template <typename I> void InterruptInterface<I>::enable() {}
+template <typename I> void InterruptInterface<I>::disable() {}
+
 #endif // FA_VECTOR_TABLE
 
 } // namespace Fa

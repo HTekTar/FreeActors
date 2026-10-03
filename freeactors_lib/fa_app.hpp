@@ -727,9 +727,7 @@ private:
 
     template <typename... Is>
     static void enable_interrupts(TypeList<Is...>) {
-#ifdef FA_VECTOR_TABLE
-        (detail::enable_interrupt<Is>(), ...);
-#endif
+        (Is::init(), ...);
     }
 
     template <typename M>
