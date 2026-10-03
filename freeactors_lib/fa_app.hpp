@@ -717,7 +717,10 @@ private:
                 "it sizes the vector table");
             static_assert(((static_cast<size_t>(Is::IRQNum) < Hw::irq_count) && ...),
                 "An interrupt module's IRQNum is not below the board's irq_count");
-            detail::install_vector_table(detail::VectorTable<16 + Hw::irq_count, Is...>::table.data());
+            static_assert(detail::has_initial_stack<Hw>::value,
+                "The board must define static constexpr void const* initial_stack: the initial stack pointer from "
+                "the linker script (e.g. &_estack), which FreeRTOS reads through the vector table at start-up");
+            detail::install_vector_table(detail::VectorTable<Hw, 16 + Hw::irq_count, Is...>::table.data());
 #endif
         }
     }

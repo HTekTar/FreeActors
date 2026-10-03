@@ -135,7 +135,7 @@ struct ButtonIsr : Fa::InterruptInterface<ButtonIsr<Hw, IsrCtx>> {
 - **Compile-time checks**: routing (one receiver per event, one owner per item type, a registered DMA ring); **one producer per SPSC service** (the application sees every interrupt module's pushes); `PRI` allowed for FreeRTOS (`>= configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`); no two modules on one `IRQNum`.
 - **The vector table is built by `Fa::Application`** from the interrupt modules: a `constexpr` table in flash (core entries by their CMSIS names and FreeRTOS's port handlers, `vPortSVCHandler`, `xPortPendSVHandler`, `xPortSysTickHandler`; each module's `handle()`; every other slot a default handler that reports *"interrupt N fired but is not in the application's vector table"*). `Application::init` points VTOR at it, sets each priority and enables each interrupt. No vector names, no `extern "C"`, no RAM copy; the startup file and linker script stay as they are. Needs VTOR (Cortex-M3/M4/M7/M33, most M0+). Systems whose vector table is owned by something else (a bootloader forwarding interrupts, Nordic's SoftDevice) keep the vendor table and bind by hand (`FA_BIND_ISR`, fallback).
 - **`handle()`** (the address in the table) wraps `handler()` with the health probe, an interrupt-storm counter (a flag never cleared is reported as a health fault, not a silent watchdog reset) and the trace source id (`[POST] from Button` instead of `ISR`).
-- **The board** provides the interrupt numbers in one section, a nested `struct Irq`, and the acknowledge functions (`button_ack()`) with its other drivers, checked by the existing hardware contract; the device's interrupt count (`irq_count`) sizes the table:
+- **The board** provides the interrupt numbers in one section, a nested `struct Irq`, and the acknowledge functions (`button_ack()`) with its other drivers, checked by the existing hardware contract; the device's interrupt count (`irq_count`) sizes the table, and `initial_stack` (the linker script's top of stack, e.g. `&_estack`) fills entry 0, which FreeRTOS reads through VTOR to reset the main stack when the scheduler starts:
 
   ```cpp
   struct NucleoF446ZE {
@@ -148,6 +148,7 @@ struct ButtonIsr : Fa::InterruptInterface<ButtonIsr<Hw, IsrCtx>> {
           static constexpr IRQn_Type command_rx_uart = USART3_IRQn;
       };
       static constexpr size_t irq_count = 97;
+      static constexpr void const* initial_stack = &_estack;
       // ...
   };
   ```

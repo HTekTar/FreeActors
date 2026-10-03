@@ -189,8 +189,9 @@ vector_table_checks() {
     if [ -n "$sec" ] && echo "$info" | grep -q "READONLY" && echo "$info" | grep -q "000001c4.*2\*\*9" &&
        echo "$relocs" | grep -q "^00000088 .*AdcIsr.*::handle()" && echo "$relocs" | grep -q "^000000dc .*CommandRxIsr.*::handle()" &&
        echo "$relocs" | grep -q "^0000002c .*vPortSVCHandler" && echo "$relocs" | grep -q "^00000038 .*xPortPendSVHandler" &&
+       echo "$relocs" | grep -q "^00000000 .*_estack" &&
        [ "$(echo "$relocs" | grep -c unexpected_interrupt)" -eq 95 ]; then
-        echo "PASS  vector table: in flash (read-only), 113 entries aligned to 512 for VTOR, ADC and USART3 slots hold their modules' handlers"
+        echo "PASS  vector table: in flash (read-only), 113 entries aligned to 512 for VTOR, entry 0 the initial stack (FreeRTOS reads it), ADC and USART3 slots hold their modules' handlers"
     else
         echo "FAIL  vector table: section, alignment or slots not as expected (object: tests/build/target_m4-fpu-trace-commands-health.o)"
         status=1

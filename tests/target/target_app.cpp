@@ -14,6 +14,8 @@
 #include "fa_cortexm.hpp"
 #include "fa_app.hpp"
 
+extern "C" uint32_t _estack;   // defined by the linker script
+
 // Interrupt numbers as a CMSIS device header would declare them
 enum IRQn_Type : int { ADC_IRQn = 18, USART3_IRQn = 39, DMA1_Stream1_IRQn = 12 };
 
@@ -25,6 +27,7 @@ struct TargetBoard {
         static constexpr IRQn_Type samples    = ADC_IRQn;
     };
     static constexpr size_t irq_count = 97;
+    static constexpr void const* initial_stack = &_estack;   // the linker script's top of stack
     static size_t command_rx_ack_position() noexcept { return *reinterpret_cast<volatile uint32_t *>(0x40026028u) & 0xFFu; }
     static uint16_t adc_ack_read() noexcept { return static_cast<uint16_t>(*reinterpret_cast<volatile uint32_t *>(0x4001204Cu)); }
 

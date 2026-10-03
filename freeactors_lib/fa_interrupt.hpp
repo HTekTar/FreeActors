@@ -156,6 +156,16 @@ namespace detail {
 
 using Vector = void (*)();
 
+// One entry of the table: entry 0 is the initial stack pointer (an address), every other entry a handler
+union VectorEntry {
+    void const* stack;
+    Vector handler;
+    constexpr VectorEntry() : handler(nullptr) {}
+    constexpr VectorEntry(void const* sp) : stack(sp) {}
+    constexpr VectorEntry(Vector h) : handler(h) {}
+};
+static_assert(sizeof(VectorEntry) == 4, "a vector table entry is one 32-bit word");
+
 extern "C" {
     // Core exceptions: CMSIS names, defined (often weakly) by the vendor's startup file
     void NMI_Handler(void);
@@ -189,28 +199,37 @@ namespace detail {
     // VTOR needs the table aligned to a power of two at least its size (and at least 128 bytes)
     constexpr size_t vector_alignment(size_t entries) {
         size_t a = 128;
-        while (a < entries * sizeof(Vector)) a *= 2;
+        while (a < entries * sizeof(VectorEntry)) a *= 2;
         return a;
     }
 
+    // [0] the initial stack pointer: FreeRTOS reads it through VTOR to reset the main stack when the scheduler
+    //     starts (prvPortStartFirstTask), so it must be the real one (the board's Hw::initial_stack)
+    // [1] reset: read from the boot table only
     template <size_t Count, typename... Is>
-    constexpr std::array<Vector, Count> build_vector_table() {
-        std::array<Vector, Count> v{};
-        // [0] initial stack pointer and [1] reset: read by the hardware from the boot table only, never from VTOR
-        v[2] = &NMI_Handler;        v[3] = &HardFault_Handler;  v[4] = &MemManage_Handler;
-        v[5] = &BusFault_Handler;   v[6] = &UsageFault_Handler;
-        v[11] = &vPortSVCHandler;   v[12] = &DebugMon_Handler;
-        v[14] = &xPortPendSVHandler; v[15] = &xPortSysTickHandler;
-        for (size_t i = 16; i < Count; ++i) v[i] = &unexpected_interrupt;
-        ((v[16 + static_cast<size_t>(Is::IRQNum)] = &Is::handle), ...);
+    constexpr std::array<VectorEntry, Count> build_vector_table(void const* initial_stack) {
+        std::array<VectorEntry, Count> v{};
+        v[0] = VectorEntry(initial_stack);
+        v[2] = VectorEntry(&NMI_Handler);        v[3] = VectorEntry(&HardFault_Handler);
+        v[4] = VectorEntry(&MemManage_Handler);  v[5] = VectorEntry(&BusFault_Handler);
+        v[6] = VectorEntry(&UsageFault_Handler);
+        v[11] = VectorEntry(&vPortSVCHandler);   v[12] = VectorEntry(&DebugMon_Handler);
+        v[14] = VectorEntry(&xPortPendSVHandler); v[15] = VectorEntry(&xPortSysTickHandler);
+        for (size_t i = 16; i < Count; ++i) v[i] = VectorEntry(&unexpected_interrupt);
+        ((v[16 + static_cast<size_t>(Is::IRQNum)] = VectorEntry(&Is::handle)), ...);
         return v;
     }
 
-    template <size_t Count, typename... Is>
+    template <typename Hw, size_t Count, typename... Is>
     struct VectorTable {
-        alignas(vector_alignment(Count)) static constexpr std::array<Vector, Count> table =
-            build_vector_table<Count, Is...>();
+        alignas(vector_alignment(Count)) static constexpr std::array<VectorEntry, Count> table =
+            build_vector_table<Count, Is...>(Hw::initial_stack);
     };
+
+    template <typename Hw, typename = void>
+    struct has_initial_stack : std::false_type {};
+    template <typename Hw>
+    struct has_initial_stack<Hw, std::void_t<decltype(Hw::initial_stack)>> : std::true_type {};
 
     inline volatile uint32_t& vtor() { return *reinterpret_cast<volatile uint32_t*>(0xE000ED08u); }
     inline volatile uint8_t* nvic_ipr() { return reinterpret_cast<volatile uint8_t*>(0xE000E400u); }
@@ -218,7 +237,7 @@ namespace detail {
     inline volatile uint32_t* nvic_icpr() { return reinterpret_cast<volatile uint32_t*>(0xE000E280u); }
 
     // Points VTOR at the table (interrupts must not fire meanwhile: called before any is enabled)
-    inline void install_vector_table(Vector const* table) {
+    inline void install_vector_table(VectorEntry const* table) {
         __asm volatile("dsb" ::: "memory");
         vtor() = reinterpret_cast<uint32_t>(table);
         __asm volatile("dsb\n isb" ::: "memory");
