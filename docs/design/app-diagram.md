@@ -1,6 +1,6 @@
 # Application diagram — design
 
-Status: **proposal for review**. Nothing here is implemented yet.
+Status: **agreed in discussion (2026-10-03), not implemented**: decisions in section 9; event payloads (phase 1) done in 0.0.8.
 Scope: FreeActors v1.x — a component-level model of the whole application, drawn in VS Code, from which the framework wiring is generated and checked; later the place where the running system is shown live.
 
 ## Goals
@@ -48,17 +48,28 @@ Actors keep their own `*.hsm.json` (reusable, editable on their own); the applic
 | `mpsc` | `MpscServiceInterface` | item type, buffer size, priority, stack | its `consume`/`consume_batch` |
 | `spsc` | `SpscServiceInterface` | item type, buffer size, priority, stack | as above |
 | `dma` | `DmaRingInterface` | element type, buffer size, priority, stack | as above, plus the board's `rx_stream_start` |
-| `source` | an interrupt, a DMA stream, a pin, or existing C code | what it is (`isr`, `dma`, `pin`, `external`) | the generated C entry point it calls |
+| `interrupt` | an interrupt module (`InterruptInterface`, section 4.1) | priority, expected rate; its `IRQNum` comes from the board | its `handler()` in the module file |
+| `subsystem` | none at run time: groups components | default priority band, stack, queue and health budgets for its components | its contents |
+| `source` | existing C code or an SDK callback delivering events (task context) | what it delivers | the generated C entry point it calls |
 
 The board is the frame around the diagram; its required functions are the union of the components' hardware requirements.
+
+### 1.3 Hierarchy: the application is the root component
+
+As states nest in the HSM editor, components nest: the **application** is the root (its border is the board), **subsystems** contain components and other subsystems (e.g. `Comms`: the UART DMA ring and the command actor), leaves are actors, modules, services and interrupt modules. The model uses the same `parent` field as `*.hsm.json`, and the editor shares the HSM canvas code (nested boxes, reparenting by dragging, arrows across levels).
+
+- An arrow crossing a subsystem's border is part of its interface; the editor shows it as a **port** on the border, labelled with what passes through. Arrows that stay inside are internal.
+- In v1 a subsystem is **structure, not machinery**: generation flattens the hierarchy into the same `Fa::Application` module list as today. It carries defaults for its components and names (`Comms/CmdParser` in trace and health output, `filter Comms` in `fa-trace`).
+- Ports are not enforced at run time in v1 (routing stays by type); that belongs with multi-instance in v2, where subsystems become reusable, instantiable units.
+- One application per `*.app.json` (one root).
 
 ### 1.2 Connections (arrows)
 
 | Kind | Means | Generated or checked against |
 |---|---|---|
-| `event` | posts these events to an actor | the receiver's signals; `post` / `post_from_isr` |
-| `item` | pushes items into a service | the service's item type; `mpsc_push` / `spsc_push(_from_isr)` |
-| `stream` | DMA hardware fills a ring | `dma_progress_from_isr` |
+| `event` | posts these events to an actor | the receiver's signals; `post` (from interrupt modules `IsrCtx::post`) |
+| `item` | pushes items into a service | the service's item type; `mpsc_push` / `spsc_push` (`IsrCtx::push`) |
+| `stream` | an interrupt module reports DMA progress to a ring | `IsrCtx::stream<Ring>` |
 | `signal` | a component reads hardware (documentation only) | — |
 
 Timers are not drawn (an actor's own `schedule`); the box shows a clock badge if its model schedules events.
@@ -81,7 +92,7 @@ Shown on the box or arrow concerned, as errors (export refused) or warnings:
 | An event type accepted by two actors (single-receiver rule) | error |
 | An SPSC service with more than one producer, or with producers of both kinds (task and ISR) | error (today it corrupts silently) |
 | An item type owned by two services of the same kind | error |
-| A source of kind `isr`/`dma` posting to an actor: must use the ISR path | generated correctly; error if drawn from a task-only component |
+| An interrupt module's priority not allowed for FreeRTOS, or two interrupt modules on one interrupt | error (also a `static_assert`) |
 | A model file missing or invalid | error |
 | An actor that nothing posts to and that schedules nothing | warning |
 | An event an actor accepts that no arrow delivers (other than timers) | warning (often posted by the PC in tests) |
@@ -94,13 +105,38 @@ Shown on the box or arrow concerned, as errors (export refused) or warnings:
 |---|---|---|
 | `<app>_app.hpp` | tool | includes; `AppTraits` from features and settings; `ActorTraits` / `TimeServiceTraits` specialisations from the box properties; `using Application = Fa::Application<AppTraits, ...>` in diagram order |
 | `<app>_app.cpp` | tool | `vApplicationTickHook`, `vApplicationGetIdleTaskMemory`, `vApplicationStackOverflowHook` (calls an optional board hook), `app_start()` |
-| `app_api.h` | tool | **C API** for every source arrow: `void app_post_button_pressed(void);`, `void app_post_temperature_from_isr(int16_t celsius, BaseType_t *woken);`, `void app_uart_rx_progress_from_isr(size_t position, BaseType_t *woken);` — callable from C files, vendor callbacks and existing firmware |
-| `<module>_module.hpp` | user, created once | a periodic module or service: the generated shell (template header, `post`, `Hw`, `FA_IDE` block as for actors) with an empty `task()` / `consume_batch()` to fill in |
-| `main.cpp` (firmware) | user, created once | `int main() { board_early_init(); app_start(); }` |
+| `app_api.h` | tool | **C API** for code outside FreeActors running in tasks (existing C code, SDK callbacks): `void app_post_button_pressed(void);`, `void app_post_temperature(int16_t celsius);` |
+| `<module>_module.hpp` | user, created once | a periodic module, service or interrupt module: the generated shell (template header, `post`/`IsrCtx`, `Hw`, `FA_IDE` block as for actors) with an empty `task()` / `consume_batch()` / `handler()` to fill in |
+| `<app>_on_init.cpp` | user, created once (optional) | `void app_on_init()`: code outside FreeActors started before the scheduler (legacy C tasks, an SDK's stack) |
+| `main.cpp` (firmware) | tool | `int main() { app_start(); }` |
+
+**Vendor start-up is the board's**: `Hw::init()` (already called first by `Application::init`) does the vendor's HAL/SDK initialisation and the clock tree; vendor glue such as `HAL_InitTick`/`HAL_GetTick` lives in the board's source. `app_start()` runs `Hw::init()`, the optional `app_on_init()`, installs the vector table, creates the tasks and starts the scheduler.
 
 **Traits move out of the actor header.** Today `ActorTraits` sits at the end of the user-owned actor header. With an application model it is generated in `<app>_app.hpp`; the actor header's block is wrapped in `#ifndef FA_APP_MANAGED` (the patcher does this once), and `<app>_app.hpp` defines `FA_APP_MANAGED` before including the actors. Actors used without an application model keep their defaults.
 
-Interrupt handlers stay in board code (their names are vendor-specific: `USART3_IRQHandler`, `UARTE0_UART0_IRQHandler`, ...); they call the generated C entry points. The diagram lists which entry points each source needs.
+### 4.1 Interrupts
+
+Whether a source is an interrupt is **architecture** (the designer's: rates, latency, queue sizes, priorities); how it is wired on a chip is **vendor detail** (the board engineer's: vector, flags, registers). Interrupts are therefore a module kind of their own, written by the designer, vendor-neutral, with the vendor parts taken from the board:
+
+```cpp
+template <typename Hw, typename IsrCtx>
+struct ButtonIsr : Fa::InterruptInterface<ButtonIsr<Hw, IsrCtx>> {
+    static constexpr IRQn_Type IRQNum = Hw::button_irq;   // which interrupt: the board's (CMSIS number)
+    static constexpr uint32_t PRI = 10;                   // the designer's priority
+    static void handler() {
+        if (Hw::button_ack()) {                            // acknowledge: the board's
+            IsrCtx::post(Timebomb::ButtonPressed{});       // what it means: the application's
+        }
+    }
+};
+```
+
+- **`IsrCtx`** replaces `Ctx` for interrupt modules and offers only what is allowed in an interrupt: `post(evt)`, `push(item)`, `stream<DmaRing>(position)`, `trace(...)`. No blocking calls, no timers, no task context: the post/postFromISR mix-up cannot be written. Each call yields itself when a task was woken (`portYIELD_FROM_ISR` only pends PendSV on Cortex-M, so several calls in one handler are harmless); no `woken` plumbing.
+- **Compile-time checks**: routing (one receiver per event, one owner per item type, a registered DMA ring); **one producer per SPSC service** (the application sees every interrupt module's pushes); `PRI` allowed for FreeRTOS (`>= configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`); no two modules on one `IRQNum`.
+- **The vector table is built by `Fa::Application`** from the interrupt modules: a `constexpr` table in flash (core entries by their CMSIS names and FreeRTOS's port handlers, `vPortSVCHandler`, `xPortPendSVHandler`, `xPortSysTickHandler`; each module's `handle()`; every other slot a default handler that reports *"interrupt N fired but is not in the application's vector table"*). `Application::init` points VTOR at it, sets each priority and enables each interrupt. No vector names, no `extern "C"`, no RAM copy; the startup file and linker script stay as they are. Needs VTOR (Cortex-M3/M4/M7/M33, most M0+). Systems whose vector table is owned by something else (a bootloader forwarding interrupts, Nordic's SoftDevice) keep the vendor table and bind by hand (`FA_BIND_ISR`, fallback).
+- **`handle()`** (the address in the table) wraps `handler()` with the health probe, an interrupt-storm counter (a flag never cleared is reported as a health fault, not a silent watchdog reset) and the trace source id (`[POST] from Button` instead of `ISR`).
+- **The board** provides `button_irq` and `button_ack()` like any requirement, checked by the existing hardware contract; the device's interrupt count (`irq_count`) sizes the table.
+- **Tests**: `ButtonIsr<TestBsp, TestIsrCtx>::handler()` called from an actor test fires the interrupt through the real code; `TestIsrCtx` records posts and pushes.
 
 ## 5. The editor
 
@@ -138,8 +174,8 @@ Each phase ships as a release of the extension.
 | Editor | the webview rendered headless (as for the README screenshot) for a smoke test of loading and drawing a model |
 | Board | Timebomb from its application model: trace, commands, health, as verified today |
 
-## 9. Open decisions
+## 9. Decisions
 
-1. **Where `main` lives**: generated `<app>_app.cpp` plus a tiny user `main.cpp` (proposed), or a fully generated `main`?
-2. **Interrupt glue**: generated C entry points called from the board's handlers (proposed), or generated handlers by vendor name (convenient, but vendor-specific)?
-3. **One application per folder**, or several `*.app.json` (e.g. variants of a product) sharing models?
+1. **`main` is generated**; vendor start-up belongs to the board (`Hw::init()`); an optional user hook `app_on_init()` starts code outside FreeActors.
+2. **Interrupts are C++ template modules** (`InterruptInterface<I>`, `template <typename Hw, typename IsrCtx>`) with an interrupt-only context; the interrupt number comes from the board inside the module, so the `Fa::Application` list only names modules; the vector table is built at compile time and installed through VTOR (section 4.1). Plain-C interrupt functions with a generated `app_isr.h` were considered and set aside for now (they would need interrupt numbers in the application's definition).
+3. **One application per `*.app.json`**, the root of a component hierarchy; subsystems are structural in v1 (section 1.3).
