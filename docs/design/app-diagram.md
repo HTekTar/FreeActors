@@ -121,7 +121,7 @@ Whether a source is an interrupt is **architecture** (the designer's: rates, lat
 ```cpp
 template <typename Hw, typename IsrCtx>
 struct ButtonIsr : Fa::InterruptInterface<ButtonIsr<Hw, IsrCtx>> {
-    static constexpr IRQn_Type IRQNum = Hw::button_irq;   // which interrupt: the board's (CMSIS number)
+    static constexpr IRQn_Type IRQNum = Hw::Irq::button;  // which interrupt: the board's (CMSIS number)
     static constexpr uint32_t PRI = 10;                   // the designer's priority
     static void handler() {
         if (Hw::button_ack()) {                            // acknowledge: the board's
@@ -135,8 +135,33 @@ struct ButtonIsr : Fa::InterruptInterface<ButtonIsr<Hw, IsrCtx>> {
 - **Compile-time checks**: routing (one receiver per event, one owner per item type, a registered DMA ring); **one producer per SPSC service** (the application sees every interrupt module's pushes); `PRI` allowed for FreeRTOS (`>= configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`); no two modules on one `IRQNum`.
 - **The vector table is built by `Fa::Application`** from the interrupt modules: a `constexpr` table in flash (core entries by their CMSIS names and FreeRTOS's port handlers, `vPortSVCHandler`, `xPortPendSVHandler`, `xPortSysTickHandler`; each module's `handle()`; every other slot a default handler that reports *"interrupt N fired but is not in the application's vector table"*). `Application::init` points VTOR at it, sets each priority and enables each interrupt. No vector names, no `extern "C"`, no RAM copy; the startup file and linker script stay as they are. Needs VTOR (Cortex-M3/M4/M7/M33, most M0+). Systems whose vector table is owned by something else (a bootloader forwarding interrupts, Nordic's SoftDevice) keep the vendor table and bind by hand (`FA_BIND_ISR`, fallback).
 - **`handle()`** (the address in the table) wraps `handler()` with the health probe, an interrupt-storm counter (a flag never cleared is reported as a health fault, not a silent watchdog reset) and the trace source id (`[POST] from Button` instead of `ISR`).
-- **The board** provides `button_irq` and `button_ack()` like any requirement, checked by the existing hardware contract; the device's interrupt count (`irq_count`) sizes the table.
+- **The board** provides the interrupt numbers in one section, a nested `struct Irq`, and the acknowledge functions (`button_ack()`) with its other drivers, checked by the existing hardware contract; the device's interrupt count (`irq_count`) sizes the table:
+
+  ```cpp
+  struct NucleoF446ZE {
+      // INTERRUPTS: which interrupt delivers each source the application needs (CMSIS IRQn_Type from the
+      // device header). Only the number: FreeActors installs the handler, sets the priority (chosen by the
+      // interrupt module) and enables it. Configure the peripheral in init(); acknowledge in the *_ack functions.
+      struct Irq {
+          static constexpr IRQn_Type button          = EXTI15_10_IRQn;
+          static constexpr IRQn_Type command_rx_dma  = DMA1_Stream1_IRQn;
+          static constexpr IRQn_Type command_rx_uart = USART3_IRQn;
+      };
+      static constexpr size_t irq_count = 97;
+      // ...
+  };
+  ```
 - **Tests**: `ButtonIsr<TestBsp, TestIsrCtx>::handler()` called from an actor test fires the interrupt through the real code; `TestIsrCtx` records posts and pushes.
+
+### 4.2 Board blueprint
+
+Everything a board must provide is known to the tools: the modules' requirements (driver functions), the interrupt modules (`Irq` entries, acknowledge functions), the enabled features (trace output, command input, watchdog, reset) and the framework's fixed parts (`init`, `irq_count`). **Generate Board…** in the application editor asks for a board name and writes `bsp_<board>.hpp`:
+
+- every member stubbed so the file **compiles at once** (safe return values, `IRQn_Type(0)` placeholders marked `TODO`); bring-up proceeds one function at a time with the hardware contract as the checklist;
+- **sections in a fixed order** with guidance comments: start-up, interrupts, drivers (with the comments from the requirements files, grouped by the module requiring them), trace, command input, watchdog and reset; a section only for features that are enabled;
+- **user-owned, created once**; when the application needs more later (a new driver function, a new interrupt, a feature switched on), export **appends** the missing members to their section, marked `// TODO (added by export)`, as the actor patcher does; existing code is never changed;
+- one file per board; the diagram's board setting selects the board of a build;
+- **vendor flavours** (later, optional): templates adding a vendor's includes, start-up calls and glue (e.g. *STM32 HAL*: `HAL_Init()`, `HAL_InitTick`/`HAL_GetTick` in a small `.cpp`). The generator itself stays vendor-neutral.
 
 ## 5. The editor
 
@@ -144,6 +169,7 @@ struct ButtonIsr : Fa::InterruptInterface<ButtonIsr<Hw, IsrCtx>> {
 - Properties panel per box and arrow; event pickers filled from the receiver's model.
 - Double-click: an actor opens its `*.hsm.json`; a module or service opens its source file at `task()` / `consume_batch()`.
 - Errors and warnings from section 3 shown on the diagram and in VS Code's Problems panel.
+- **Generate Board…**: the board blueprint (section 4.2).
 - **Export Application**: regenerates the tool-owned files and creates the missing user-owned ones; it also exports every referenced HSM model, so one click updates the whole project.
 
 ## 6. Live view (trace phase 3)
@@ -159,7 +185,7 @@ With `fa-trace` connected (the extension runs the decoder and owns the serial po
 1. **Event payloads** (section 2): user-owned event structs (done in 0.0.8); field layouts read for the trace dictionary and `fa-trace` (done in 0.0.8).
 2. **Model and editor**: `*.app.json`, components, connections, drill-down; no generation yet.
 3. **Checks** (section 3).
-4. **Generation** (section 4), with the Timebomb project migrated to it and verified on the board; the POSIX test application generated from a model as well.
+4. **Generation** (section 4), with the Timebomb project migrated to it and verified on the board; the POSIX test application generated from a model as well. Includes the board blueprint (4.2); vendor flavours after it, STM32 HAL first.
 5. **Live view** (section 6).
 
 Each phase ships as a release of the extension.
@@ -172,6 +198,7 @@ Each phase ships as a release of the extension.
 | Checks | fixture `*.app.json` files, one per rule, run through the checker from `tests/gen.js` (like the conflicting HSM model today) |
 | Generation | the POSIX application and the target-compile application generated from fixture models instead of hand-written, so the existing runtime and size checks cover the generated wiring |
 | Editor | the webview rendered headless (as for the README screenshot) for a smoke test of loading and drawing a model |
+| Board blueprint | a blueprint generated for each fixture application compiles as is, and passes the hardware contract; appending after a change keeps hand-written members |
 | Board | Timebomb from its application model: trace, commands, health, as verified today |
 
 ## 9. Decisions
