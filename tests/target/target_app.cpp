@@ -14,8 +14,20 @@
 #include "fa_cortexm.hpp"
 #include "fa_app.hpp"
 
+// Interrupt numbers as a CMSIS device header would declare them
+enum IRQn_Type : int { ADC_IRQn = 18, USART3_IRQn = 39, DMA1_Stream1_IRQn = 12 };
+
 // Stand-in board providing Timebomb's hardware requirements (tests/fixtures/timebomb.bsp_policy.hpp).
 struct TargetBoard {
+    // Interrupts: which interrupt delivers each source (FreeActors installs the handlers)
+    struct Irq {
+        static constexpr IRQn_Type command_rx = USART3_IRQn;
+        static constexpr IRQn_Type samples    = ADC_IRQn;
+    };
+    static constexpr size_t irq_count = 97;
+    static size_t command_rx_ack_position() noexcept { return *reinterpret_cast<volatile uint32_t *>(0x40026028u) & 0xFFu; }
+    static uint16_t adc_ack_read() noexcept { return static_cast<uint16_t>(*reinterpret_cast<volatile uint32_t *>(0x4001204Cu)); }
+
     static void init() {}
     static void set_led(bool) {}
     static uint16_t read_adc(uint8_t) { return 0; }
@@ -73,17 +85,35 @@ struct CommandRx : Fa::DmaRingInterface<CommandRx<Hw, Ctx>, uint8_t, 256> {
     static void consume_batch(uint8_t const *, size_t n) noexcept { bytes += n; }
 };
 
+// Interrupt modules: the DMA reception's progress, and ADC samples into SampleSink (its only producer)
+template <typename Hw, typename IsrCtx>
+struct CommandRxIsr : Fa::InterruptInterface<CommandRxIsr<Hw, IsrCtx>> {
+    static constexpr IRQn_Type IRQNum = Hw::Irq::command_rx;
+    static constexpr uint32_t PRI = 6;
+    static void handler() { IsrCtx::template stream<CommandRx>(Hw::command_rx_ack_position()); }
+};
+
+template <typename Hw, typename IsrCtx>
+struct AdcIsr : Fa::InterruptInterface<AdcIsr<Hw, IsrCtx>> {
+#ifdef FA_TEST_DUPLICATE_IRQ
+    static constexpr IRQn_Type IRQNum = Hw::Irq::command_rx;      // deliberately the same interrupt
+#else
+    static constexpr IRQn_Type IRQNum = Hw::Irq::samples;
+#endif
+#ifdef FA_TEST_BAD_PRIORITY
+    static constexpr uint32_t PRI = 2;                             // deliberately above configMAX_SYSCALL (5)
+#else
+    static constexpr uint32_t PRI = 8;
+#endif
+    static void handler() { IsrCtx::push(Hw::adc_ack_read()); }
+};
+
 struct AppTraits : Fa::DefaultAppTraits {
     using Platform = TargetBoard;
 };
 
-using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx>;   // + trace with FA_TRACE, + commands with FA_TRACE_COMMANDS, + health with FA_HEALTH
+using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx, CommandRxIsr, AdcIsr>;   // + trace with FA_TRACE, + commands with FA_TRACE_COMMANDS, + health with FA_HEALTH
 
-extern "C" void USART3_IRQHandler(void) {
-    BaseType_t woken = pdFALSE;
-    App::dma_progress_from_isr<CommandRx>(17, &woken);   // a board reads the DMA's position here
-    portYIELD_FROM_ISR(woken);
-}
 
 #ifdef FA_TRACE_COMMANDS
 extern "C" void UART4_IRQHandler(void) {
@@ -93,11 +123,6 @@ extern "C" void UART4_IRQHandler(void) {
 }
 #endif
 
-extern "C" void ADC_IRQHandler(void) {
-    BaseType_t woken = pdFALSE;
-    App::spsc_push_from_isr(static_cast<uint16_t>(42), &woken);
-    portYIELD_FROM_ISR(woken);
-}
 
 extern "C" void vApplicationTickHook(void) {
     App::on_tick_isr();

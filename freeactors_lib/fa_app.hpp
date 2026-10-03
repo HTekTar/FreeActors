@@ -10,6 +10,7 @@
 #include "fa_util.hpp"
 #include "fa_freertos.hpp"
 #include "fa_timeEvent.hpp"
+#include "fa_interrupt.hpp"
 #ifdef FA_TRACE
 #include "fa_trace_service.hpp"
 #endif
@@ -247,9 +248,18 @@ class Application {
 public:
     struct AppContext: Context<Application>{};
 
+    // Interrupt modules get this context instead of AppContext: only interrupt-safe operations
+    struct IsrCtx : IsrContext<Application> {};
+
     // The board, passed to every module as its HwPolicy
     using Hw = typename AppTraits::Platform;
-    using AllModules = TypeList<Modules<Hw, AppContext>...>;
+
+    // A module as the application instantiates it: interrupt modules with IsrCtx, all others with AppContext
+    template <template <typename, typename> class M>
+    using module_t = std::conditional_t<is_interrupt_module<M<Hw, AppContext>>::value, M<Hw, IsrCtx>, M<Hw, AppContext>>;
+
+    using AllModules = TypeList<module_t<Modules>...>;
+    using InterruptList = typename filter_types<is_interrupt_module, AllModules>::type;
     using ActorList = typename filter_types<is_hsm_actor, AllModules>::type;
     using TimerService = TimeEventService<ActorList, AppTraits::MaxTimerPayloadSize, AppTraits::MaxTimers, Application>;
 #ifdef FA_TRACE
@@ -337,7 +347,7 @@ public:
 
     // Number of registered modules that accept event type Evt (routing requires exactly one)
     template <typename Evt>
-    static constexpr size_t receivers_of = (static_cast<size_t>(actor_accepts_event_v<Modules<Hw, AppContext>, Evt>) + ... + 0);
+    static constexpr size_t receivers_of = (static_cast<size_t>(actor_accepts_event_v<module_t<Modules>, Evt>) + ... + 0);
 
     // Registered MPSC / SPSC services owning items of type T (routing requires exactly one)
     template <typename T>
@@ -364,6 +374,7 @@ public:
 
     static void init() {
         AppTraits::Platform::init();
+        install_vector_table(InterruptList{});   // before anything can enable an interrupt
 #ifdef FA_TRACE
         Tracer::create_task();
 #endif
@@ -373,7 +384,8 @@ public:
 #ifdef FA_HEALTH
         Monitor::create_task();
 #endif
-        (init_module<Modules<Hw,AppContext>>(), ...);
+        (init_module<module_t<Modules>>(), ...);
+        enable_interrupts(InterruptList{});   // last: their handlers post to queues that now exist
     }
 
     static void start() {
@@ -384,7 +396,7 @@ public:
     // Call from vApplicationTickHook (configUSE_TICK_HOOK = 1): counts timers down and delivers expired ones.
     static void on_tick_isr() {
         TimerService::on_tick_isr();
-        (notify_tick<Modules<Hw, AppContext>>(), ...);
+        (notify_tick<module_t<Modules>>(), ...);
     }
 
     // ---- Events ------------------------------------------------------------------------------------------
@@ -515,6 +527,20 @@ public:
         return spsc_services_for<T>::FirstType::push(item);
     }
 
+    // From an interrupt: to the SPSC or MPSC service owning T (exactly one of either kind)
+    template <typename T>
+    static bool push_from_isr(T const& item, BaseType_t* pxHigherPriorityTaskWoken) {
+        constexpr size_t spsc = type_list_size_v<spsc_services_for<T>>;
+        constexpr size_t mpsc = type_list_size_v<services_for<T>>;
+        static_assert(spsc + mpsc > 0, "No registered SPSC or MPSC service owns this item type");
+        static_assert(spsc + mpsc == 1, "Ambiguous: several services own this item type");
+        if constexpr (spsc == 1) {
+            return spsc_services_for<T>::FirstType::push_from_isr(item, pxHigherPriorityTaskWoken);
+        } else {
+            return services_for<T>::FirstType::push_from_isr(item, pxHigherPriorityTaskWoken);
+        }
+    }
+
     // ---- DMA ring services (the DMA hardware is the producer) ------------------------------------------
 
     // From the board's DMA / UART interrupt: the DMA of Service has written up to position.
@@ -567,7 +593,7 @@ public:
 
 private:
     template <typename Evt>
-    using target_of = find_actor_for_event_t<Evt, Modules<Hw, AppContext>...>;
+    using target_of = find_actor_for_event_t<Evt, module_t<Modules>...>;
 
     // Queues evt for actor Target: POST record, send (never blocking), DROPPED record if the queue was full.
     template <typename Target, typename Sender, typename Evt>
@@ -676,6 +702,31 @@ private:
         } else if constexpr (is_time_service_v<M>) {
             M::create_task();   // periodic process module (TimeServiceInterface) or MPSC service
         }
+    }
+
+    // ---- Interrupt modules ----------------------------------------------------------------------------------
+
+    template <typename... Is>
+    static void install_vector_table(TypeList<Is...>) {
+        if constexpr (sizeof...(Is) > 0) {
+            static_assert((Is::check() && ...));
+            static_assert(detail::unique_irqs<Is...>(), "Two interrupt modules use the same IRQNum");
+#ifdef FA_VECTOR_TABLE
+            static_assert(detail::has_irq_count<Hw>::value,
+                "The board must define static constexpr size_t irq_count (number of device interrupts): "
+                "it sizes the vector table");
+            static_assert(((static_cast<size_t>(Is::IRQNum) < Hw::irq_count) && ...),
+                "An interrupt module's IRQNum is not below the board's irq_count");
+            detail::install_vector_table(detail::VectorTable<16 + Hw::irq_count, Is...>::table.data());
+#endif
+        }
+    }
+
+    template <typename... Is>
+    static void enable_interrupts(TypeList<Is...>) {
+#ifdef FA_VECTOR_TABLE
+        (detail::enable_interrupt<Is>(), ...);
+#endif
     }
 
     template <typename M>

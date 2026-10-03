@@ -178,6 +178,39 @@ target_compile() {
     fi
 }
 
+# The vector table built from the interrupt modules (fa_interrupt.hpp): read-only, aligned for VTOR, each
+# module's handle() in its slot; invalid modules rejected at compile time with a clear message
+vector_table_checks() {
+    local obj="$OUT/target_m4-fpu-trace-commands-health.o" sec
+    sec=$(arm-none-eabi-objdump -h "$obj" | grep -o '\.rodata\._ZN2Fa6detail11VectorTable[^ ]*' | head -1)
+    local info relocs
+    info=$(arm-none-eabi-objdump -h "$obj" | grep -A1 -F "$sec ")
+    relocs=$(arm-none-eabi-objdump -r -j "$sec" "$obj" | c++filt)
+    if [ -n "$sec" ] && echo "$info" | grep -q "READONLY" && echo "$info" | grep -q "000001c4.*2\*\*9" &&
+       echo "$relocs" | grep -q "^00000088 .*AdcIsr.*::handle()" && echo "$relocs" | grep -q "^000000dc .*CommandRxIsr.*::handle()" &&
+       echo "$relocs" | grep -q "^0000002c .*vPortSVCHandler" && echo "$relocs" | grep -q "^00000038 .*xPortPendSVHandler" &&
+       [ "$(echo "$relocs" | grep -c unexpected_interrupt)" -eq 95 ]; then
+        echo "PASS  vector table: in flash (read-only), 113 entries aligned to 512 for VTOR, ADC and USART3 slots hold their modules' handlers"
+    else
+        echo "FAIL  vector table: section, alignment or slots not as expected (object: tests/build/target_m4-fpu-trace-commands-health.o)"
+        status=1
+    fi
+    local flag expected
+    for case in "FA_TEST_BAD_PRIORITY|PRI is more urgent than configMAX_SYSCALL_INTERRUPT_PRIORITY" \
+                "FA_TEST_DUPLICATE_IRQ|Two interrupt modules use the same IRQNum"; do
+        flag="${case%%|*}"; expected="${case#*|}"
+        if arm-none-eabi-g++ -std=c++17 -mcpu=cortex-m4 -mthumb -fno-exceptions -fno-rtti -fsyntax-only -D"$flag" \
+               -I"$ROOT/tests/target" -I"$FREERTOS_KERNEL_PATH/include" -I"$FREERTOS_KERNEL_PATH/portable/GCC/ARM_CM4F" \
+               -I"$OUT" -I"$ROOT/tests/fixtures" -I"$ROOT/freeactors_lib" "$ROOT/tests/target/target_app.cpp" 2> "$OUT/$flag.log"; then
+            echo "FAIL  interrupt modules: $flag compiled"; status=1
+        elif grep -q "$expected" "$OUT/$flag.log"; then
+            echo "PASS  interrupt modules: $flag rejected: '$expected'"
+        else
+            echo "FAIL  interrupt modules: $flag failed without '$expected' (log: tests/build/$flag.log)"; status=1
+        fi
+    done
+}
+
 if ! command -v arm-none-eabi-g++ > /dev/null; then
     echo "SKIP  target compile: arm-none-eabi-g++ not found"
 elif [ -z "${FREERTOS_KERNEL_PATH:-}" ] || [ ! -f "$FREERTOS_KERNEL_PATH/include/FreeRTOS.h" ]; then
@@ -188,6 +221,7 @@ else
     target_compile m4-fpu-trace ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE
     target_compile m4-fpu-trace-commands ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS
     target_compile m4-fpu-trace-commands-health ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS -DFA_HEALTH -DFA_DEBUG_COMMANDS
+    vector_table_checks
 fi
 
 # Runtime integration: a real Fa::Application on the FreeRTOS POSIX port (tasks = Linux threads, real tick).

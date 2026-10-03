@@ -178,10 +178,34 @@ struct Worker : Fa::TimeServiceInterface<Worker<Hw, Ctx>, 10> {
     }
 };
 
+// Interrupt modules (fa_interrupt.hpp). On the host the tick hook plays the hardware and calls handle(),
+// as the vector table would on the target: the DMA "interrupt" reports the simulated write position, the
+// sequence "interrupt" pushes the next number to SeqSink (its only producer).
+static std::atomic<size_t> sim_dma_position{0};
+static uint32_t sim_sequence = 0;
+
+template <typename Hw, typename IsrCtx>
+struct UartRxIsr : Fa::InterruptInterface<UartRxIsr<Hw, IsrCtx>> {
+    static constexpr int IRQNum = Hw::Irq::uart_rx;
+    static constexpr uint32_t PRI = 6;
+    static void handler() { IsrCtx::template stream<UartRx>(sim_dma_position); }
+};
+
+template <typename Hw, typename IsrCtx>
+struct SequenceIsr : Fa::InterruptInterface<SequenceIsr<Hw, IsrCtx>> {
+    static constexpr int IRQNum = Hw::Irq::sequence;
+    static constexpr uint32_t PRI = 7;
+    static void handler() { IsrCtx::push(sim_sequence++); }
+};
+
 // Host board for all modules. Like NucleoBsp it declares instance_id = 1, which must not affect routing.
 // The button level is set by the test task.
 struct HostBoard {
     static constexpr uint8_t instance_id = 1;
+    struct Irq {                                 // interrupt numbers of the simulated hardware
+        static constexpr int uart_rx  = 3;
+        static constexpr int sequence = 4;
+    };
     static inline std::atomic<bool> button{false};
     static void init() {}
     static void set_led(bool) {}
@@ -227,7 +251,8 @@ struct AppTraits : Fa::DefaultAppTraits {
 #endif
 };
 
-using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx, Worker>;
+using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx, Worker,
+                           UartRxIsr, SequenceIsr>;
 using Work = Worker<HostBoard, App::AppContext>;
 using Rx = UartRx<HostBoard, App::AppContext>;
 using Sink = SeqSink<HostBoard, App::AppContext>;
@@ -251,21 +276,21 @@ M &instance() {
 // --------------------------------------------------------------------------
 extern "C" void vApplicationTickHook(void) {
     App::on_tick_isr();
-    static uint32_t sequence = 0;
     if (feed_sink) {
-        App::spsc_push_from_isr(sequence++, nullptr);   // the SPSC service's only producer
+        App::module_t<SequenceIsr>::handle();          // the "sequence interrupt": SeqSink's only producer
     }
 
     // Simulated UART + circular DMA: the "hardware" writes a burst, then the idle-line interrupt reports it
     static size_t dma_position = 0;
     static uint8_t next_byte = 0;
     if (Rx::streaming) {
-        const size_t burst = 1 + sequence % 5;
+        const size_t burst = 1 + sim_sequence % 5;
         for (size_t i = 0; i < burst; ++i) {
             Rx::buffer()[dma_position] = next_byte++;
             dma_position = (dma_position + 1) % Rx::size;
         }
-        App::dma_progress_from_isr<UartRx>(dma_position, nullptr);
+        sim_dma_position = dma_position;
+        App::module_t<UartRxIsr>::handle();            // the "DMA interrupt": reports the write position
     }
 
 #ifdef FA_TRACE_COMMANDS
