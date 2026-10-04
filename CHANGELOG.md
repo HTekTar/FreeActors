@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.8
 
 ### Framework
 - Interrupt modules: an interrupt is a module of its own (`Fa::InterruptInterface`), with an interrupt-only context (`IsrCtx::post`, `push`, `stream`): no vector names, no `extern "C"`, no `woken`/`portYIELD_FROM_ISR`, no NVIC calls. The application builds the vector table at compile time (in flash) and installs it through VTOR; priorities are checked against FreeRTOS at compile time. `FA_NO_VECTOR_TABLE` + `FA_BIND_ISR` for systems that own their vector table.

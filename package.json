@@ -1,7 +1,7 @@
 {
   "name": "freeactors-hsm-editor",
   "publisher": "HTekTar",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "displayName": "FreeActors HSM Editor",
   "description": "Visual hierarchical state machine editor that generates C++17 active objects for FreeRTOS on Arm Cortex-M, with a simulator, generated tests and runtime trace.",
   "license": "MIT",
