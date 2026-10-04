@@ -314,6 +314,138 @@ export function generateAppMainString(app: any): string {
            `int main() {\n    app_start();\n}\n`;
 }
 
+// ---- Module skeletons (user-owned, created once) ----------------------------------------------------------
+
+// What an interrupt module's outgoing connection asks of its acknowledge function
+function interruptAck(app: any, c: any, models: AppModelInfo[]):
+        { returnType: string; handler: string; includes: string[] } {
+    const conns = (app.connections || []).filter((x: any) => x.from === c.id);
+    const byId = (id: string) => (app.components || []).find((x: any) => x.id === id);
+    const ack = `${c.irq || 'irq'}_ack`;
+    const first = conns[0];
+    const target = first ? byId(first.to) : undefined;
+    if (first && first.kind === 'stream' && target) {
+        return { returnType: 'size_t', includes: [moduleFileName(target.name)],   // the ring's template, named below
+                 handler: `        IsrCtx::template stream<${target.name}>(Hw::${ack}());   // where the DMA has written up to\n` };
+    }
+    if (first && first.kind === 'item' && target) {
+        const item = first.item || target.item || 'uint32_t';
+        return { returnType: item, includes: [],
+                 handler: `        IsrCtx::push(Hw::${ack}());                       // the item, to ${target.name}\n` };
+    }
+    if (first && first.kind === 'event' && target && target.kind === 'actor') {
+        const machine = (models.find(m => m.file === target.model) || { name: target.name }).name;
+        const event = (first.events || [])[0] || 'Event';
+        return { returnType: 'bool', includes: [`${machine.toLowerCase()}_events.hpp`],
+                 handler: `        if (Hw::${ack}()) {                               // it was ours\n` +
+                          `            IsrCtx::post(${machine}::${event}{});\n        }\n` };
+    }
+    return { returnType: 'bool', includes: [], handler: `        if (Hw::${ack}()) {\n            // IsrCtx::post(...), IsrCtx::push(...)\n        }\n` };
+}
+
+// The requirements a new module starts with: for an interrupt module, its interrupt and acknowledge function
+export function generateModuleRequirementsStub(app: any, c: any, models: AppModelInfo[]): string {
+    const kind = c.kind === 'interrupt' ? 'interrupt' : c.kind === 'periodic' ? 'periodic' : 'service';
+    let out = generateCppHwRequirementsStub(c.name, kind);
+    if (c.kind === 'interrupt' && c.irq) {
+        const ack = interruptAck(app, c, models);
+        out = out.replace(/struct HwRequirements \{\n[\s\S]*?\n\};/,
+            `struct HwRequirements {\n` +
+            `    struct Irq {\n        static const int ${c.irq};   // the board: struct Irq { static constexpr IRQn_Type ${c.irq} = ...; };\n    };\n` +
+            `    static ${ack.returnType} ${c.irq}_ack();   // acknowledge the interrupt (clear its flag)` +
+            (ack.returnType === 'bool' ? '; true = it was ours' : ack.returnType === 'size_t' ? ' and return the DMA write position' : ' and return the item') +
+            `\n};`);
+        if (!/#include <cstddef>/.test(out)) out = out.replace('#include <cstdint>\n', '#include <cstddef>\n#include <cstdint>\n');
+    }
+    return out;
+}
+
+// The module's API block: Hw for the board, and under FA_IDE (clangd only) its requirements for completion
+function moduleApiBlock(name: string): string {
+    return `#ifdef FA_IDE\n    using Hw = ::${name}::HwRequirements;   // seen only by the IDE: completion of what this module requires\n` +
+           `#else\n    using Hw = HwPolicy;\n#endif\n` +
+           `    static_assert(::${name}::HwContract<HwPolicy>::verify());   // the board provides what this module requires\n`;
+}
+
+export function generateModuleSkeleton(app: any, c: any, models: AppModelInfo[]): string {
+    const lower = String(c.name).toLowerCase();
+    const config = appFileName(app, 'config.hpp');
+    const conns = (app.connections || []).filter((x: any) => x.from === c.id);
+    const byId = (id: string) => (app.components || []).find((x: any) => x.id === id);
+    const eventIncludes = new Set<string>();
+    const examples: string[] = [];
+    for (const conn of conns) {
+        const target = byId(conn.to);
+        if (!target) continue;
+        if (conn.kind === 'event' && target.kind === 'actor') {
+            const machine = (models.find(m => m.file === target.model) || { name: target.name }).name;
+            eventIncludes.add(`${machine.toLowerCase()}_events.hpp`);
+            for (const e of conn.events || []) examples.push(`Ctx::post(${machine}::${e}{});`);
+        } else if (conn.kind === 'item') {
+            examples.push(`Ctx::mpsc_push(item);   // to ${target.name} (${conn.item || target.item})`);
+        }
+    }
+    const isr = c.kind === 'interrupt' ? interruptAck(app, c, models) : undefined;
+    isr?.includes.forEach(i => eventIncludes.add(i));
+
+    let out = `// ==========================================================================\n`;
+    out += `// ${String(KIND_TITLES[c.kind] || c.kind).toUpperCase()} - ${c.name}\n`;
+    out += `// Created once by FreeActors; this file is yours to edit (Export never overwrites it).\n`;
+    out += `// Its settings (period, priority, stack, ...) come from the application diagram: AppConfig::${c.name} in ${config}.\n`;
+    out += `// What it needs from the board: ${hwRequirementsFile(lower)} (checked by ${lower}_hw_contract.hpp).\n`;
+    out += `// ==========================================================================\n\n`;
+    out += `#pragma once\n\n`;
+    out += `#include "${config}"\n`;
+    out += `#include "${c.kind === 'interrupt' ? 'fa_interrupt.hpp' : 'fa_freertos.hpp'}"\n`;
+    out += `#include "${lower}_hw_contract.hpp"\n`;
+    eventIncludes.forEach(i => { out += `#include "${i}"\n`; });
+    out += `\nnamespace App {\n\n`;
+
+    if (c.kind === 'periodic') {
+        out += `template <typename HwPolicy, typename Ctx>\n`;
+        out += `struct ${c.name} : Fa::TimeServiceInterface<${c.name}<HwPolicy, Ctx>, AppConfig::${c.name}::period_ms> {\n`;
+        out += moduleApiBlock(c.name) + `\n`;
+        out += `    // Runs every AppConfig::${c.name}::period_ms milliseconds, in this module's own task\n`;
+        out += `    static void task() noexcept {\n`;
+        out += examples.length > 0 ? examples.map(e => `        // ${e}\n`).join('') : `        // e.g. read the board (Hw::...) and post events: Ctx::post(Machine::Event{});\n`;
+        out += `    }\n`;
+        out += `\nprivate:\n    // State kept between iterations, e.g.: static inline bool last = false;\n`;
+    } else if (c.kind === 'interrupt') {
+        out += `template <typename HwPolicy, typename IsrCtx>\n`;
+        out += `struct ${c.name} : Fa::InterruptInterface<${c.name}<HwPolicy, IsrCtx>> {\n`;
+        out += moduleApiBlock(c.name) + `\n`;
+        out += `    static constexpr auto IRQNum = Hw::Irq::${c.irq || 'irq'};          // which interrupt: the board's\n`;
+        out += `    static constexpr uint32_t PRI = AppConfig::${c.name}::pri;   // its priority: from the diagram\n\n`;
+        out += `    // Runs in the interrupt: keep it short. IsrCtx offers only what an interrupt may do (post, push, stream).\n`;
+        out += `    static void handler() {\n${isr!.handler}    }\n`;
+    } else {
+        const element = c.kind === 'dma' ? (c.element || 'uint8_t') : (c.item || 'uint32_t');
+        const base = c.kind === 'spsc' ? 'SpscServiceInterface' : c.kind === 'mpsc' ? 'MpscServiceInterface' : 'DmaRingInterface';
+        out += `template <typename HwPolicy, typename Ctx>\n`;
+        out += `struct ${c.name} : Fa::${base}<${c.name}<HwPolicy, Ctx>, ${element}, AppConfig::${c.name}::size> {\n`;
+        out += moduleApiBlock(c.name) + `\n`;
+        if (c.kind === 'dma') {
+            out += `    using Base = Fa::${base}<${c.name}<HwPolicy, Ctx>, ${element}, AppConfig::${c.name}::size>;\n\n`;
+            out += `    // Once, in this service's task, before data flows: start the board's circular DMA into Base::buffer()\n`;
+            out += `    static void on_start() noexcept {\n        // e.g. Hw::${String(c.name).toLowerCase()}_start(Base::buffer(), Base::size);\n    }\n\n`;
+            out += `    // Data the DMA wrote, in place (at most two spans per wake-up: the ring wraps)\n`;
+            out += `    static void consume_batch(${element} const* data, size_t n) noexcept {\n        (void)data; (void)n;\n`;
+            out += `        // if (!Base::span_intact()) { ... }   // the DMA overwrote this span while it was read\n    }\n`;
+        } else {
+            out += `    // Items pushed by its producer${c.kind === 'spsc' ? ' (exactly one)' : 's'}, in this service's task, in order\n`;
+            out += `    static void consume_batch(${element} const* items, size_t n) noexcept {\n        (void)items; (void)n;\n`;
+            out += examples.length > 0 ? examples.map(e => `        // ${e}\n`).join('') : `        // e.g. process the items, then Ctx::post(Machine::Result{...});\n`;
+            out += `    }\n`;
+        }
+    }
+    out += `};\n\n} // namespace App\n`;
+    return out;
+}
+
+const KIND_TITLES: { [k: string]: string } = {
+    periodic: 'Periodic module', interrupt: 'Interrupt module', spsc: 'SPSC service', mpsc: 'MPSC service', dma: 'DMA ring service',
+};
+
 // All tool-owned files of an application. requirementOwners: namespaces whose <owner>_hw_requirements.hpp exists
 export function generateAppFiles(app: any, models: AppModelInfo[], requirementOwners: string[]): { [file: string]: string } {
     return {
@@ -519,15 +651,38 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                                            'See the Problems list in the editor.');
             return;
         }
+        // Modules: requirements and module file created once (yours); contract and TestBsp regenerated
+        const created: string[] = [];
+        for (const c of (app.components || []) as any[]) {
+            if (!['periodic', 'interrupt', 'spsc', 'mpsc', 'dma'].includes(c.kind)) continue;
+            const lower = String(c.name).toLowerCase();
+            const reqUri = vscode.Uri.joinPath(folderUri, hwRequirementsFile(lower));
+            let requirements = await readFileIfExists(reqUri);
+            if (requirements === undefined) {
+                requirements = generateModuleRequirementsStub(app, c, models);
+                await vscode.workspace.fs.writeFile(reqUri, stringToUint8Array(requirements));
+                created.push(hwRequirementsFile(lower));
+            }
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_hw_contract.hpp`),
+                                                stringToUint8Array(generateCpHwContractString(c.name, requirements)));
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_test_bsp.hpp`),
+                                                stringToUint8Array(generateCppTestBspString(c.name, requirements)));
+            const moduleUri = vscode.Uri.joinPath(folderUri, moduleFileName(c.name));
+            if (!(await fileExists(moduleUri))) {
+                await vscode.workspace.fs.writeFile(moduleUri, stringToUint8Array(generateModuleSkeleton(app, c, models)));
+                created.push(moduleFileName(c.name));
+            }
+        }
         // Every component whose requirements file exists takes part in the application-wide hardware contract
         const owners: string[] = [];
-        const missingModules: string[] = [];
+        const missingActors: string[] = [];
         for (const c of (app.components || []) as any[]) {
-            const owner = c.kind === 'actor' ? (models.find(m => m.file === c.model) || { name: c.name }).name : c.name;
             if (c.kind === 'application' || c.kind === 'subsystem') continue;
-            if (await fileExists(vscode.Uri.joinPath(folderUri, hwRequirementsFile(owner.toLowerCase())))) owners.push(owner);
-            if (c.kind !== 'actor' && !(await fileExists(vscode.Uri.joinPath(folderUri, moduleFileName(c.name))))) {
-                missingModules.push(moduleFileName(c.name));
+            const owner = c.kind === 'actor' ? (models.find(m => m.file === c.model) || { name: c.name }).name : c.name;
+            if (await fileExists(vscode.Uri.joinPath(folderUri, hwRequirementsFile(owner.toLowerCase())))) {
+                owners.push(owner);
+            } else if (c.kind === 'actor') {
+                missingActors.push(c.model);
             }
         }
         const files = generateAppFiles(app, models, owners);
@@ -535,7 +690,8 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
         }
         vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}.` +
-            (missingModules.length > 0 ? ` Still to write: ${missingModules.join(', ')} (module skeletons come in a later version).` : ''));
+            (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') +
+            (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
     }
 
     public async resolveCustomTextEditor(
@@ -625,8 +781,10 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                     const uri = vscode.Uri.joinPath(folderUri, String(message.file));
                     if (String(message.file).endsWith('.hsm.json')) {
                         await vscode.commands.executeCommand('vscode.openWith', uri, 'freeactors.hsmEditor');
-                    } else {
+                    } else if (await fileExists(uri)) {
                         await vscode.window.showTextDocument(uri);
+                    } else {
+                        vscode.window.showInformationMessage(`${message.file} does not exist yet: Export Application creates it.`);
                     }
                     return;
                 }

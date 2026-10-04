@@ -4,7 +4,7 @@
 #include <cstdint>
 
 extern "C" uint32_t _estack;
-enum IRQn_Type : int { EXTI15_10_IRQn = 40 };
+enum IRQn_Type : int { ADC_IRQn = 18, DMA1_Stream1_IRQn = 12, EXTI15_10_IRQn = 40 };
 
 struct TestBoard {
     static void init() {}
@@ -16,10 +16,14 @@ struct TestBoard {
 #ifndef MISSING_TAP_IRQ
         static constexpr IRQn_Type tap = EXTI15_10_IRQn;
 #endif
+        static constexpr IRQn_Type adc = ADC_IRQn;
+        static constexpr IRQn_Type rx  = DMA1_Stream1_IRQn;
     };
     static constexpr size_t irq_count = 97;
     static constexpr void const* initial_stack = &_estack;
     static bool tap_ack() { return true; }
+    static uint16_t adc_ack() { return 0; }
+    static size_t rx_ack() { return 0; }
 
     static void trace_write(uint8_t const* data, size_t n) noexcept {
         for (size_t i = 0; i < n; ++i) *reinterpret_cast<volatile uint32_t*>(0x40004804u) = data[i];

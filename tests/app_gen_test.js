@@ -16,11 +16,17 @@ const models = [ext.describeHsmModel('timebomb.hsm.json', fs.readFileSync(path.j
 const problems = ext.checkAppModel(app, models);
 if (problems.length > 0) { console.log(`FAIL  app generation: the Minimal fixture has problems: ${JSON.stringify(problems)}`); process.exit(1); }
 
-for (const f of fs.readdirSync(appDir)) if (!f.endsWith('.app.json')) fs.copyFileSync(path.join(appDir, f), path.join(out, f));
-const owners = ['Timebomb', 'ButtonPoller', 'Tap'];   // requirement files present (Timebomb's from tests/gen.js)
-for (const [file, content] of Object.entries(ext.generateAppFiles(app, models, owners))) fs.writeFileSync(path.join(out, file), content);
-for (const owner of ['ButtonPoller', 'Tap']) {
-    const req = fs.readFileSync(path.join(appDir, `${owner.toLowerCase()}_hw_requirements.hpp`), 'utf8');
-    fs.writeFileSync(path.join(out, `${owner.toLowerCase()}_hw_contract.hpp`), ext.generateCpHwContractString(owner, req));
+// What Export Application does for the modules: requirements and module files (created once), contracts
+fs.copyFileSync(path.join(appDir, 'test_board.hpp'), path.join(out, 'test_board.hpp'));
+const owners = ['Timebomb'];                          // its requirements come from tests/gen.js
+for (const c of app.components.filter(c => !['application', 'subsystem', 'actor'].includes(c.kind))) {
+    const lower = c.name.toLowerCase();
+    const req = ext.generateModuleRequirementsStub(app, c, models);
+    fs.writeFileSync(path.join(out, `${lower}_hw_requirements.hpp`), req);
+    fs.writeFileSync(path.join(out, `${lower}_hw_contract.hpp`), ext.generateCpHwContractString(c.name, req));
+    fs.writeFileSync(path.join(out, `${lower}_test_bsp.hpp`), ext.generateCppTestBspString(c.name, req));
+    fs.writeFileSync(path.join(out, ext.moduleFileName(c.name)), ext.generateModuleSkeleton(app, c, models));
+    owners.push(c.name);
 }
+for (const [file, content] of Object.entries(ext.generateAppFiles(app, models, owners))) fs.writeFileSync(path.join(out, file), content);
 console.log(`PASS  app generation: ${Object.keys(ext.generateAppFiles(app, models, owners)).join(', ')}`);

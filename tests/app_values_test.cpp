@@ -1,6 +1,7 @@
 // The values of the Minimal application's diagram (tests/fixtures/app/minimal.app.json) arrive in the generated
 // code: features, task settings, the module order. Compiled only (static_asserts), for Cortex-M4 (run.sh).
 #include "minimal_app.hpp"
+#include <type_traits>
 
 using Ctx = App::Application::AppContext;
 using Bomb = Timebomb::Actor<TestBoard, Ctx>;
@@ -18,4 +19,6 @@ static_assert(Fa::TimeServiceTraits<App::ButtonPoller<TestBoard, Ctx>>::stack_si
 static_assert(App::ButtonPoller<TestBoard, Ctx>::period_ms == 5, "the period from the diagram");
 static_assert(App::Application::module_t<App::Tap>::PRI == 7, "the interrupt priority from the diagram");
 static_assert(App::Traits::HealthCheckMs == 50 && App::Traits::MaxTimers == 8, "application settings");
-static_assert(App::Application::actor_count == 1 && App::Application::interrupt_count == 1, "the modules of the diagram");
+static_assert(App::Application::actor_count == 1 && App::Application::interrupt_count == 3, "the modules of the diagram");
+static_assert(std::is_same_v<App::Application::spsc_services_for<uint16_t>::FirstType, App::Samples<TestBoard, Ctx>>,
+              "the SPSC service owns the diagram's item type");

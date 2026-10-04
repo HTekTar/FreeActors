@@ -73,6 +73,9 @@ document.getElementById('export-app-btn').addEventListener('click', () => vscode
 const byId = (id) => app.components.find(c => c.id === id);
 const modelOf = (component) => models.find(m => m.file === component.model);
 const isComposite = (component) => Boolean(KINDS[component.kind] && KINDS[component.kind].composite);
+// Where a component's code is: an actor's state machine, a module's file (created by Export Application)
+const codeFileOf = (c) => c.kind === 'actor' ? c.model
+    : ['periodic', 'interrupt', 'spsc', 'mpsc', 'dma'].includes(c.kind) ? `${String(c.name).toLowerCase()}_module.hpp` : undefined;
 
 function commit() {
     vscode.postMessage({ type: 'documentEdit', jsonText: JSON.stringify(app, null, 2) });
@@ -141,7 +144,8 @@ function render() {
             const rect = menuBtn.getBoundingClientRect();
             contextMenu.style.left = rect.left + 'px'; contextMenu.style.top = rect.bottom + 'px';
             document.getElementById('menu-add-inside').style.display = isComposite(c) ? 'block' : 'none';
-            document.getElementById('menu-open-model').style.display = c.kind === 'actor' && c.model ? 'block' : 'none';
+            document.getElementById('menu-open-model').style.display = codeFileOf(c) ? 'block' : 'none';
+            document.getElementById('menu-open-model').textContent = c.kind === 'actor' ? '📝 Open State Machine' : '📝 Open Code';
             document.getElementById('menu-delete').style.display = c.kind === 'application' ? 'none' : 'block';
             document.getElementById('menu-connect').style.display = isComposite(c) ? 'none' : 'block';
             contextMenu.style.display = 'flex';
@@ -152,7 +156,8 @@ function render() {
         });
         el.addEventListener('dblclick', (e) => {
             e.stopPropagation();
-            if (c.kind === 'actor' && c.model) vscode.postMessage({ type: 'openFile', file: c.model });
+            const file = codeFileOf(c);
+            if (file) vscode.postMessage({ type: 'openFile', file });
         });
 
         canvas.attachDragResize({
@@ -354,7 +359,7 @@ document.addEventListener('click', () => { contextMenu.style.display = 'none'; }
 document.getElementById('menu-add-inside').addEventListener('click', () => openComponentModal(menuComponentId));
 document.getElementById('menu-open-model').addEventListener('click', () => {
     const c = byId(menuComponentId);
-    if (c && c.model) vscode.postMessage({ type: 'openFile', file: c.model });
+    if (c && codeFileOf(c)) vscode.postMessage({ type: 'openFile', file: codeFileOf(c) });
 });
 document.getElementById('menu-delete').addEventListener('click', () => {
     const c = byId(menuComponentId);

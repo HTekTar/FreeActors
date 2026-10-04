@@ -187,6 +187,13 @@ document.getElementById('export-app-btn').click();
 report({ sent: window.__edits.map(m => m.type) });''', 'app_export')
 check('Export Application asks the extension to export', r is not None and 'exportApplication' in r.get('sent', []), json.dumps(r))
 
+r = run('app', app, '''
+node('C_1').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+node('C_2').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+report({ opened: window.__edits.filter(m => m.type === 'openFile').map(m => m.file) });''', 'app_open')
+check("double-click opens a module's code and an actor's state machine",
+      r is not None and r.get('opened') == ['buttonpoller_module.hpp', 'timebomb.hsm.json'], json.dumps(r))
+
 # Problems on the diagram: an SPSC service with two producers
 broken = json.load(open(app))
 broken['components'].append({'id': 'C_9', 'kind': 'spsc', 'name': 'Samples', 'parent': 'APP', 'item': 'uint16_t', 'size': 32,
