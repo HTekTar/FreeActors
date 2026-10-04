@@ -1,6 +1,6 @@
 # Application diagram — design
 
-Status: **agreed in discussion (2026-10-03)**: decisions in section 9. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1, written by hand until the diagram generates them). The diagram itself: not implemented.
+Status: **agreed in discussion (2026-10-03)**: decisions in section 9. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1, written by hand until the diagram generates them). Phase 2 (model and editor, `media/app.js` on the shared `media/canvas.js`) implemented; checks and generation not yet.
 Scope: FreeActors v1.x — a component-level model of the whole application, drawn in VS Code, from which the framework wiring is generated and checked; later the place where the running system is shown live.
 
 ## Goals

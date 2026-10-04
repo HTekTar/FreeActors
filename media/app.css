@@ -1,0 +1,34 @@
+/* Application editor: component kinds and the properties panel (the canvas styles are in style.css) */
+
+.fa-component .hsm-state-header { gap: 6px; }
+.fa-kind {
+    font-size: 0.72em; font-weight: normal; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 1px 6px; border-radius: 3px; opacity: 0.9; white-space: nowrap;
+    background: var(--vscode-list-hoverBackground, #2a2d2e); color: var(--vscode-foreground);
+}
+.fa-component .fa-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-component .fa-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.fa-summary { font-size: 0.82em; opacity: 0.75; display: flex; flex-direction: column; gap: 2px; }
+
+/* Kind accents: the left border carries the kind, so a box reads at a glance */
+.fa-component.kind-actor     { border-left: 5px solid var(--vscode-charts-blue, #3794ff); }
+.fa-component.kind-periodic  { border-left: 5px solid var(--vscode-charts-green, #89d185); }
+.fa-component.kind-interrupt { border-left: 5px solid var(--vscode-errorForeground, #f48771); }
+.fa-component.kind-spsc,
+.fa-component.kind-mpsc,
+.fa-component.kind-dma       { border-left: 5px solid var(--vscode-charts-purple, #b180d7); }
+.fa-component.kind-application { border-style: dashed; border-color: var(--vscode-textLink-foreground); background: rgba(255,255,255,0.01); }
+.fa-component.kind-subsystem   { border-style: dashed; background: rgba(255,255,255,0.015); }
+.fa-component.selected { box-shadow: 0 0 0 2px var(--vscode-focusBorder, #007fd4), 0 4px 8px rgba(0,0,0,0.4); }
+
+/* Sidebar */
+.prop-row { display: flex; flex-direction: column; gap: 3px; font-size: 0.85em; }
+.prop-row input, .prop-row select, #sidebar-registry input[type=text], #sidebar-registry input[type=number] {
+    background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #cccccc);
+    border: 1px solid var(--vscode-input-border, #6b6b6b); padding: 4px 6px; border-radius: 2px; font: inherit;
+}
+.check-row { display: flex; align-items: center; gap: 6px; font-size: 0.85em; }
+.hint-text { font-size: 0.82em; opacity: 0.6; font-style: italic; }
+.prop-label { font-size: 0.85em; margin-bottom: 3px; }
+#selection-props { display: flex; flex-direction: column; gap: 8px; }
+.checklist { display: flex; flex-direction: column; gap: 3px; max-height: 160px; overflow-y: auto; font-size: 0.85em; }

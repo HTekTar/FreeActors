@@ -89,6 +89,132 @@ export async function copyFrameworkFilesToWorkspace(context: vscode.ExtensionCon
 
 export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(FreeActorsEditorProvider.register(context));
+    context.subscriptions.push(FreeActorsAppEditorProvider.register(context));
+}
+
+// ==========================================================================
+// APPLICATION MODEL (*.app.json, docs/design/app-diagram.md)
+// ==========================================================================
+
+// The model of a new, empty application file: the application itself as the root component (the board frame)
+export function defaultAppModel(name: string): object {
+    return {
+        name,
+        board: { type: "Board::MyBoard", header: "bsp_my_board.hpp" },
+        features: { trace: true, commands: false, health: false, debug_commands: false },
+        settings: {},
+        components: [
+            { id: "APP", kind: "application", name, x: 40, y: 40, width: 980, height: 600 }
+        ],
+        connections: []
+    };
+}
+
+// A state machine model the application editor can use: file (relative to the folder), name, signals
+export interface AppModelInfo { file: string; name: string; signals: string[]; }
+
+export function describeHsmModel(file: string, jsonText: string): AppModelInfo | undefined {
+    try {
+        const hsm = JSON.parse(jsonText);
+        const signals = ((hsm.signals || []) as unknown[])
+            .map(s => (typeof s === 'string' ? s : String((s as any)?.name ?? '')).trim())
+            .filter(s => s.length > 0);
+        return { file, name: machineNameOf(hsm), signals };
+    } catch (e) {
+        return undefined;
+    }
+}
+
+class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
+
+    public static register(context: vscode.ExtensionContext): vscode.Disposable {
+        return vscode.window.registerCustomEditorProvider(FreeActorsAppEditorProvider.viewType, new FreeActorsAppEditorProvider(context));
+    }
+
+    private static readonly viewType = 'freeactors.appEditor';
+
+    constructor(private readonly context: vscode.ExtensionContext) { }
+
+    public async resolveCustomTextEditor(
+        document: vscode.TextDocument,
+        webviewPanel: vscode.WebviewPanel,
+        _token: vscode.CancellationToken
+    ): Promise<void> {
+        webviewPanel.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')]
+        };
+        const folderUri = vscode.Uri.joinPath(document.uri, '..');
+
+        if (document.getText().trim().length === 0) {
+            const base = (document.uri.fsPath.split(/[\\/]/).pop() || 'App').split('.')[0] || 'App';
+            const clean = base.replace(/[^a-zA-Z0-9_]/g, '') || 'App';
+            const name = clean.charAt(0).toUpperCase() + clean.slice(1);
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), JSON.stringify(defaultAppModel(name), null, 2));
+            await vscode.workspace.applyEdit(edit);
+        }
+
+        const mediaUri = vscode.Uri.joinPath(this.context.extensionUri, 'media');
+        const html = uint8ArrayToString(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(mediaUri, 'app.html')));
+        const asUri = (file: string) => webviewPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, file)).toString();
+        webviewPanel.webview.html = html
+            .replace('{{styleUri}}', asUri('style.css'))
+            .replace('{{appStyleUri}}', asUri('app.css'))
+            .replace('{{canvasUri}}', asUri('canvas.js'))
+            .replace('{{scriptUri}}', asUri('app.js'));
+
+        // The state machines next to the application file: what actors can use, and the events they accept
+        const scanModels = async (): Promise<AppModelInfo[]> => {
+            const found: AppModelInfo[] = [];
+            for (const [name, type] of await vscode.workspace.fs.readDirectory(folderUri)) {
+                if (type !== vscode.FileType.File || !name.endsWith('.hsm.json')) continue;
+                const text = uint8ArrayToString(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folderUri, name)));
+                const info = describeHsmModel(name, text);
+                if (info) found.push(info);
+            }
+            return found.sort((a, b) => a.name.localeCompare(b.name));
+        };
+
+        const update = async () => {
+            webviewPanel.webview.postMessage({ type: 'update', text: document.getText(), models: await scanModels() });
+        };
+
+        const subscriptions = [
+            vscode.workspace.onDidChangeTextDocument(e => {
+                if (e.document.uri.toString() === document.uri.toString()) update();
+            }),
+            // a state machine saved next to the application: its signals may have changed
+            vscode.workspace.onDidSaveTextDocument(d => {
+                if (d.uri.fsPath.endsWith('.hsm.json')) update();
+            }),
+        ];
+        webviewPanel.onDidDispose(() => subscriptions.forEach(s => s.dispose()));
+
+        webviewPanel.webview.onDidReceiveMessage(async message => {
+            switch (message.type) {
+                case 'ready':
+                    await update();
+                    return;
+                case 'documentEdit': {
+                    if (message.jsonText === document.getText()) return;
+                    const edit = new vscode.WorkspaceEdit();
+                    edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), message.jsonText);
+                    await vscode.workspace.applyEdit(edit);
+                    return;
+                }
+                case 'openFile': {
+                    const uri = vscode.Uri.joinPath(folderUri, String(message.file));
+                    if (String(message.file).endsWith('.hsm.json')) {
+                        await vscode.commands.executeCommand('vscode.openWith', uri, 'freeactors.hsmEditor');
+                    } else {
+                        await vscode.window.showTextDocument(uri);
+                    }
+                    return;
+                }
+            }
+        });
+    }
 }
 
 function normalizeActionName(actionName: string, machine: string): string {

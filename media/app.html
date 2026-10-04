@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FreeActors Application</title>
+    <link rel="stylesheet" href="{{styleUri}}">
+    <link rel="stylesheet" href="{{appStyleUri}}">
+</head>
+<body>
+    <div id="toolbar">
+        <strong>FreeActors Application</strong>
+        <button id="add-component-btn">+ Add Component</button>
+        <button id="reset-view-btn">🏠 Reset View</button>
+        <span id="zoom-readout">Zoom: 100%</span>
+        <span id="linking-hint" style="color:var(--vscode-textLink-foreground); font-size:0.9em; margin-left:15px; display:none;">ℹ️ Click the component to connect to (Esc or Right-Click to cancel)</span>
+    </div>
+
+    <div id="main-layout">
+        <div id="sidebar-registry">
+            <div class="registry-section">
+                <div class="registry-header"><span>Application</span></div>
+                <label class="prop-row">Name <input id="app-name" type="text"></label>
+                <label class="prop-row">Board type <input id="app-board-type" type="text" placeholder="Board::MyBoard"></label>
+                <label class="prop-row">Board header <input id="app-board-header" type="text" placeholder="bsp_my_board.hpp"></label>
+            </div>
+            <div class="registry-section">
+                <div class="registry-header"><span>Features</span></div>
+                <label class="check-row"><input id="feat-trace" type="checkbox"> Trace (FA_TRACE)</label>
+                <label class="check-row"><input id="feat-commands" type="checkbox"> Commands (FA_TRACE_COMMANDS)</label>
+                <label class="check-row"><input id="feat-health" type="checkbox"> Health monitor (FA_HEALTH)</label>
+                <label class="check-row"><input id="feat-debug" type="checkbox"> Debug commands (FA_DEBUG_COMMANDS)</label>
+            </div>
+            <div class="registry-section" id="selection-section">
+                <div class="registry-header"><span id="selection-title">Selection</span></div>
+                <div id="selection-props"><div class="hint-text">Click a component to see and edit its properties.</div></div>
+            </div>
+        </div>
+
+        <div id="canvas-container">
+            <div id="workspace-viewport">
+                <svg id="svg-layer">
+                    <defs>
+                        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-textLink-foreground, #007acc)" />
+                        </marker>
+                        <marker id="rubber-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--vscode-textLink-foreground, #007acc)" />
+                        </marker>
+                    </defs>
+                    <g id="links-group"></g>
+                    <path id="rubber-band-path" stroke="var(--vscode-textLink-foreground)" stroke-dasharray="4 4" stroke-width="2" fill="none" marker-end="url(#rubber-arrow)" style="display:none;"></path>
+                </svg>
+                <div id="nodes-layer"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="component-context-menu" class="context-menu">
+        <div class="context-menu-item" id="menu-connect">➡️ Connect to…</div>
+        <div class="context-menu-item" id="menu-add-inside">📁 Add Component Inside…</div>
+        <div class="context-menu-item" id="menu-open-model">📝 Open State Machine</div>
+        <hr style="border:0; border-top:1px solid var(--vscode-panel-border); margin:4px 0;">
+        <div class="context-menu-item" id="menu-delete" style="color:var(--vscode-errorForeground, #f48771);">❌ Delete</div>
+    </div>
+
+    <div id="component-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Add Component</h3>
+            <label class="prop-row">Kind
+                <select id="input-kind">
+                    <option value="actor">Actor (state machine)</option>
+                    <option value="periodic">Periodic module</option>
+                    <option value="interrupt">Interrupt module</option>
+                    <option value="spsc">SPSC service (one producer)</option>
+                    <option value="mpsc">MPSC service (many producers)</option>
+                    <option value="dma">DMA ring service</option>
+                    <option value="subsystem">Subsystem (group)</option>
+                </select>
+            </label>
+            <label class="prop-row" id="row-model">State machine <select id="input-model"></select></label>
+            <label class="prop-row">Name <input id="input-name" type="text" placeholder="e.g. ButtonPoller"></label>
+            <div class="validation-hint" id="hint-name"></div>
+            <label class="prop-row">Inside <select id="input-parent"></select></label>
+            <div class="modal-buttons">
+                <button id="btn-cancel-component" style="background:transparent; border:1px solid var(--vscode-panel-border);">Cancel</button>
+                <button id="btn-submit-component">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="connection-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="connection-title">Connect</h3>
+            <label class="prop-row">Kind
+                <select id="input-conn-kind">
+                    <option value="event">Events (post)</option>
+                    <option value="item">Items (push to a service)</option>
+                    <option value="stream">DMA stream</option>
+                </select>
+            </label>
+            <div id="row-events">
+                <div class="prop-label">Events the target accepts</div>
+                <div id="events-checklist" class="checklist"></div>
+                <label class="prop-row" id="row-events-text">Events (comma-separated) <input id="input-events" type="text" placeholder="ButtonPressed"></label>
+            </div>
+            <label class="prop-row" id="row-item">Item type <input id="input-item" type="text" placeholder="uint16_t"></label>
+            <div class="modal-buttons">
+                <button id="btn-cancel-connection" style="background:transparent; border:1px solid var(--vscode-panel-border);">Cancel</button>
+                <button id="btn-submit-connection">Connect</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="confirm-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="confirm-title">Delete</h3>
+            <div id="confirm-text"></div>
+            <div class="modal-buttons">
+                <button id="btn-cancel-confirm" style="background:transparent; border:1px solid var(--vscode-panel-border);">Cancel</button>
+                <button id="btn-ok-confirm" style="background:var(--vscode-statusBarItem-errorBackground, #c72e0f);">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{canvasUri}}"></script>
+    <script src="{{scriptUri}}"></script>
+</body>
+</html>

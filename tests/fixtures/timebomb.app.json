@@ -1,0 +1,134 @@
+{
+  "name": "Timebomb",
+  "board": {
+    "type": "Board::NucleoF446ZE",
+    "header": "bsp_nucleo_f446ze.hpp"
+  },
+  "features": {
+    "trace": true,
+    "commands": true,
+    "health": true,
+    "debug_commands": true
+  },
+  "settings": {
+    "HealthCheckMs": 100
+  },
+  "components": [
+    {
+      "id": "APP",
+      "kind": "application",
+      "name": "Timebomb",
+      "x": 40,
+      "y": 40,
+      "width": 1000,
+      "height": 560
+    },
+    {
+      "id": "C_1",
+      "kind": "periodic",
+      "name": "ButtonPoller",
+      "parent": "APP",
+      "x": 80,
+      "y": 130,
+      "width": 220,
+      "height": 96,
+      "period_ms": 5,
+      "priority": 3,
+      "stack": 128
+    },
+    {
+      "id": "C_2",
+      "kind": "actor",
+      "name": "Timebomb",
+      "parent": "APP",
+      "model": "timebomb.hsm.json",
+      "x": 420,
+      "y": 120,
+      "width": 240,
+      "height": 110,
+      "priority": 2,
+      "queue": 8,
+      "stack": 128
+    },
+    {
+      "id": "C_3",
+      "kind": "subsystem",
+      "name": "Comms",
+      "parent": "APP",
+      "x": 80,
+      "y": 290,
+      "width": 900,
+      "height": 270
+    },
+    {
+      "id": "C_4",
+      "kind": "interrupt",
+      "name": "CommandRxDma",
+      "parent": "C_3",
+      "x": 110,
+      "y": 360,
+      "width": 260,
+      "height": 80,
+      "irq": "command_rx_dma",
+      "pri": 6
+    },
+    {
+      "id": "C_5",
+      "kind": "interrupt",
+      "name": "CommandRxUart",
+      "parent": "C_3",
+      "x": 110,
+      "y": 460,
+      "width": 260,
+      "height": 80,
+      "irq": "command_rx_uart",
+      "pri": 6
+    },
+    {
+      "id": "C_6",
+      "kind": "dma",
+      "name": "CommandRx",
+      "parent": "C_3",
+      "x": 470,
+      "y": 400,
+      "width": 230,
+      "height": 90,
+      "element": "uint8_t",
+      "size": 256,
+      "priority": 1,
+      "stack": 256
+    }
+  ],
+  "connections": [
+    {
+      "id": "L_1",
+      "from": "C_1",
+      "to": "C_2",
+      "kind": "event",
+      "events": [
+        "ButtonPressed"
+      ]
+    },
+    {
+      "id": "L_2",
+      "from": "C_4",
+      "to": "C_6",
+      "kind": "stream"
+    },
+    {
+      "id": "L_3",
+      "from": "C_5",
+      "to": "C_6",
+      "kind": "stream"
+    },
+    {
+      "id": "L_4",
+      "from": "C_6",
+      "to": "C_2",
+      "kind": "event",
+      "events": [
+        "ButtonPressed"
+      ]
+    }
+  ]
+}

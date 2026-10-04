@@ -42,7 +42,8 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onCustomEditor:freeactors.hsmEditor"
+    "onCustomEditor:freeactors.hsmEditor",
+    "onCustomEditor:freeactors.appEditor"
   ],
   "engines": {
     "vscode": "^1.85.0"
@@ -55,6 +56,15 @@
         "selector": [
           {
             "filenamePattern": "*.hsm.json"
+          }
+        ]
+      },
+      {
+        "viewType": "freeactors.appEditor",
+        "displayName": "FreeActors Application",
+        "selector": [
+          {
+            "filenamePattern": "*.app.json"
           }
         ]
       }

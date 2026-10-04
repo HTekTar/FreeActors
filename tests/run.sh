@@ -154,6 +154,15 @@ else
     status=1
 fi
 
+# Editors: the real web views (media/) headless in Chrome, driven by scripted mouse events, checked through the DOM
+chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
+if [ -z "$chrome" ]; then
+    echo "SKIP  editor tests: no Chrome or Chromium found"
+else
+    echo "== editor tests"
+    python3 "$ROOT/tests/editor/editor_test.py" "$chrome" "$OUT/editor" || status=1
+fi
+
 # Target compile check: the firmware code path built for Cortex-M4 with arm-none-eabi-g++ and real FreeRTOS
 # headers, with and without FPU. Compiled, not linked. Needs FREERTOS_KERNEL_PATH (a FreeRTOS kernel
 # "Source" folder, containing include/ and portable/); skipped if it or the toolchain is missing.

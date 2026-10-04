@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Editor
+- Application editor (`*.app.json`): draw the application from its building blocks (actors, periodic modules, interrupt modules, SPSC/MPSC/DMA services) grouped in subsystems, connect them with events, items and DMA streams, and edit each component's properties. Connecting to an actor offers the events of its state machine; double-click opens the state machine. Code generation from the application follows in a later release.
+- The state machine editor highlights the state actually under the cursor when linking (it used to highlight the enclosing state).
+
 ## 0.0.8
 
 ### Framework

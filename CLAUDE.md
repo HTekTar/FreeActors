@@ -30,7 +30,12 @@ To exercise generated C++: open/create a `*.hsm.json` in the dev host, click exp
 
 Three parts, communicating as below:
 
-1. **Webview UI** — [media/webview.html](media/webview.html) (template with `{{styleUri}}`/`{{scriptUri}}` placeholders), [media/main.js](media/main.js) (plain JS, no bundler), [media/style.css](media/style.css). The canvas editor owns the HSM model and posts messages to the extension:
+1. **Webview UI** — two custom editors on one shared canvas, [media/canvas.js](media/canvas.js) (`FaCanvas`: pan/zoom, nested boxes with drag/resize, curved links with a draggable control point, linking rubber band; knows nothing about states or components):
+   - **State machines** (`*.hsm.json`, `freeactors.hsmEditor`): [media/webview.html](media/webview.html) (template with `{{styleUri}}`/`{{canvasUri}}`/`{{scriptUri}}`), [media/main.js](media/main.js), [media/style.css](media/style.css);
+   - **Applications** (`*.app.json`, `freeactors.appEditor`, [docs/design/app-diagram.md](docs/design/app-diagram.md)): [media/app.html](media/app.html), [media/app.js](media/app.js), [media/app.css](media/app.css); components (application root, subsystems, actors, periodic, interrupt, SPSC/MPSC/DMA services) nested by `parent`, connections (event/item/stream); the provider (`FreeActorsAppEditorProvider`) also sends the `*.hsm.json` models of the folder with their signals (`describeHsmModel`), and opens them on double-click. No code generation yet.
+   - Both are tested headless in Chrome by [tests/editor/editor_test.py](tests/editor/editor_test.py) (scripted mouse events, results read from the DOM).
+
+   The HSM editor owns the model and posts messages to the extension:
    - `ready` → extension replies with `update` (full document text)
    - `documentEdit` `{jsonText}` → extension replaces the whole TextDocument
    - `exportCppBlueprint` → triggers code generation
