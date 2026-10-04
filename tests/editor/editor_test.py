@@ -43,7 +43,17 @@ def models_next_to(path):
     return found
 
 
-def run(editor, model_path, scenario, name):
+def problems_of(app_text, models):
+    """The extension's checks (checkAppModel in out/extension.js) for an application model"""
+    script = ("const M=require('module');const l=M._load;M._load=function(r,...a){return r==='vscode'?{}:l.call(this,r,...a)};"
+              "const e=require(process.argv[1]);const i=JSON.parse(require('fs').readFileSync(0,'utf8'));"
+              "process.stdout.write(JSON.stringify(e.checkAppModel(JSON.parse(i.app),i.models)));")
+    out = subprocess.run(['node', '-e', script, os.path.join(ROOT, 'out', 'extension.js')],
+                         input=json.dumps({'app': app_text, 'models': models}), capture_output=True, text=True, timeout=30)
+    return json.loads(out.stdout or '[]')
+
+
+def run(editor, model_path, scenario, name, models_dir=None):
     """Loads the editor with the model, runs the scenario, returns its report (dict) or None."""
     page = open(os.path.join(MEDIA, 'webview.html' if editor == 'hsm' else 'app.html')).read()
     files = {'{{styleUri}}': 'style.css', '{{appStyleUri}}': 'app.css', '{{canvasUri}}': 'canvas.js',
@@ -52,10 +62,12 @@ def run(editor, model_path, scenario, name):
         page = page.replace(key, 'file://' + os.path.join(MEDIA, f))
     theme = open(os.path.join(os.path.dirname(__file__), 'theme.css')).read()
     model = open(model_path).read()
-    stub = ('<script>window.__edits = []; const MODEL = %s; const MODELS = %s;'
+    models = models_next_to(os.path.join(models_dir, 'x') if models_dir else model_path)
+    problems = problems_of(model, models) if editor == 'app' else []
+    stub = ('<script>window.__edits = []; const MODEL = %s; const MODELS = %s; const PROBLEMS = %s;'
             'window.acquireVsCodeApi = () => ({ postMessage(m) {'
-            ' if (m.type === "ready") setTimeout(() => window.postMessage({ type: "update", text: MODEL, models: MODELS }, "*"), 0);'
-            ' else window.__edits.push(m); }, getState() {}, setState() {} });</script>') % (json.dumps(model), json.dumps(models_next_to(model_path)))
+            ' if (m.type === "ready") setTimeout(() => window.postMessage({ type: "update", text: MODEL, models: MODELS, problems: PROBLEMS }, "*"), 0);'
+            ' else window.__edits.push(m); }, getState() {}, setState() {} });</script>') % (json.dumps(model), json.dumps(models), json.dumps(problems))
     script = '<script>%s\nsetTimeout(() => { try { %s } catch (e) { report({ error: String(e) }); } }, 300);</script>' % (HELPERS, scenario)
     page = page.replace('</head>', '<style>' + theme + '</style></head>', 1)
     page = page.replace('<script src="file://', stub + '<script src="file://', 1)
@@ -169,5 +181,26 @@ check('adding a component: an invalid name is refused; an interrupt module is ad
       (r.get('added') or {}).get('parent') == 'C_3' and (r.get('added') or {}).get('pri') == 6 and r.get('shown') is True and
       (r.get('added') or {}).get('x', 0) + (r.get('added') or {}).get('width', 0) <= 80 + 900,      # inside Comms (x 80, width 900)
       json.dumps(r))
+
+# Problems on the diagram: an SPSC service with two producers
+broken = json.load(open(app))
+broken['components'].append({'id': 'C_9', 'kind': 'spsc', 'name': 'Samples', 'parent': 'APP', 'item': 'uint16_t', 'size': 32,
+                             'x': 700, 'y': 130, 'width': 250, 'height': 96})
+broken['connections'] += [{'id': 'L_8', 'from': 'C_4', 'to': 'C_9', 'kind': 'item', 'item': 'uint16_t'},
+                          {'id': 'L_9', 'from': 'C_5', 'to': 'C_9', 'kind': 'item', 'item': 'uint16_t'}]
+broken_path = os.path.join(out_dir, 'broken.app.json')
+json.dump(broken, open(broken_path, 'w'))
+r = run('app', broken_path, '''
+const badge = node('C_9').querySelector('.fa-badge');
+const items = [...document.querySelectorAll('#problems-list .problem')];
+const spsc = items.find(i => i.textContent.includes('has 2 producers'));
+if (spsc) spsc.click();
+report({ marked: node('C_9').classList.contains('has-error'), badge: badge && badge.textContent, tooltip: badge && badge.title,
+         title: document.getElementById('problems-title').textContent, listed: Boolean(spsc),
+         selected: document.getElementById('selection-title').textContent });''', 'app_problems', models_dir=FIXTURES)
+check('problems are shown: the SPSC service with two producers is marked, listed, and selected by clicking the problem',
+      r is not None and r.get('marked') is True and r.get('badge') == '⛔' and 'has 2 producers' in (r.get('tooltip') or '') and
+      r.get('title', '').startswith('Problems (1 error') and r.get('listed') is True and
+      r.get('selected') == 'SPSC service: Samples', json.dumps(r))
 
 sys.exit(1 if failures else 0)

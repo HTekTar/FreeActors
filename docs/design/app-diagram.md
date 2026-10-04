@@ -1,6 +1,6 @@
 # Application diagram — design
 
-Status: **agreed in discussion (2026-10-03)**: decisions in section 9. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1, written by hand until the diagram generates them). Phase 2 (model and editor, `media/app.js` on the shared `media/canvas.js`) implemented; checks and generation not yet.
+Status: **agreed in discussion (2026-10-03)**: decisions in section 9. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1, written by hand until the diagram generates them). Phases 2 and 3 (model, editor on the shared `media/canvas.js`, checks) implemented; generation not yet.
 Scope: FreeActors v1.x — a component-level model of the whole application, drawn in VS Code, from which the framework wiring is generated and checked; later the place where the running system is shown live.
 
 ## Goals
@@ -84,20 +84,24 @@ The PC side (trace dictionary, `fa-trace post` with field values) learns field l
 
 ## 3. Checks on the diagram
 
-Shown on the box or arrow concerned, as errors (export refused) or warnings:
+Implemented in `checkAppModel` (extension), shown as badges on components and connections, as a list in the editor's sidebar (click: selects the component), and in VS Code's Problems panel on the line of the component or connection. Tested by `tests/app_check_test.js` (one variation of the Timebomb application per rule) and the editor test.
 
 | Check | Severity |
 |---|---|
-| An event drawn into an actor that its model does not accept | error |
-| An event type accepted by two actors (single-receiver rule) | error |
-| An SPSC service with more than one producer, or with producers of both kinds (task and ISR) | error (today it corrupts silently) |
-| An item type owned by two services of the same kind | error |
-| An interrupt module's priority not allowed for FreeRTOS, or two interrupt modules on one interrupt | error (also a `static_assert`) |
-| A model file missing or invalid | error |
-| An actor that nothing posts to and that schedules nothing | warning |
-| An event an actor accepts that no arrow delivers (other than timers) | warning (often posted by the PC in tests) |
-| Priorities: a service fed by an interrupt at the lowest priority; equal priorities on a producer and consumer of a full-rate stream | warning |
-| `WatchdogTimeoutMs` below 3 × `HealthCheckMs` | error (also a `static_assert`) |
+| An event drawn into an actor whose state machine has no such signal | error |
+| Events into something that is not an actor; items into something that is not an SPSC/MPSC service; a DMA stream into something that is not a DMA ring | error |
+| An actor without a state machine, or with a `*.hsm.json` not found next to the application (or not valid) | error |
+| One state machine used by two actor components (one instance per machine in v1). Event types are per machine (`Timebomb::Tick`), so two machines never share an event type: this is the single-receiver rule as it can actually be violated | error |
+| An SPSC service with more than one producer (the type cannot enforce it; two corrupt it silently) | error |
+| Two SPSC (or two MPSC) services for the same item type (pushes are routed by type) | error |
+| Items pushed with a type the service does not take | error |
+| Two interrupt modules on one interrupt; an interrupt priority more urgent than FreeRTOS allows (`settings.MaxSyscallPriority`, default 5 = `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`) | error |
+| `WatchdogTimeoutMs` below 3 × `HealthCheckMs`; commands without trace; debug commands without commands | error |
+| Names: not a C++ identifier, or two components with one name (the application's own name may equal its main actor's) | error |
+| No board type; an interrupt module without its interrupt; a stack under 64 words; a DMA stream not from an interrupt module | warning |
+| An actor no component sends events to (fine if it runs on its own timers) | warning |
+
+Not yet: rate and queue-size warnings (they need a rate on each connection).
 
 ## 4. What is generated
 

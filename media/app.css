@@ -32,3 +32,15 @@
 .prop-label { font-size: 0.85em; margin-bottom: 3px; }
 #selection-props { display: flex; flex-direction: column; gap: 8px; }
 .checklist { display: flex; flex-direction: column; gap: 3px; max-height: 160px; overflow-y: auto; font-size: 0.85em; }
+
+/* Problems: badges on components and connections, list in the sidebar */
+.fa-badge { font-size: 0.85em; cursor: help; }
+.fa-component.has-error   { border-color: var(--vscode-errorForeground, #f48771); }
+.fa-component.has-warning { border-color: var(--vscode-editorWarning-foreground, #cca700); }
+.problems-list { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+.problem { font-size: 0.8em; padding: 3px 6px; border-radius: 3px; cursor: pointer; line-height: 1.35;
+           background: var(--vscode-list-hoverBackground, #2a2d2e); border-left: 3px solid transparent; }
+.problem.error   { border-left-color: var(--vscode-errorForeground, #f48771); }
+.problem.warning { border-left-color: var(--vscode-editorWarning-foreground, #cca700); }
+.problem:hover { background: var(--vscode-list-activeSelectionBackground, #04395e); }
+.problems-ok { font-size: 0.82em; color: var(--vscode-charts-green, #89d185); }

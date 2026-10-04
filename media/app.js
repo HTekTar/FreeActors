@@ -51,6 +51,7 @@ const PROPERTIES = {
 
 let app = { name: 'App', board: {}, features: {}, settings: {}, components: [], connections: [] };
 let models = [];                 // state machines in the folder: [{ file, name, signals }]
+let problems = [];               // from the extension's checks: [{ severity, message, component?, connection? }]
 let selectedId = null;
 let menuComponentId = null;
 let isLinkingMode = false;
@@ -117,13 +118,15 @@ function render() {
     ordered.forEach(c => {
         const el = document.createElement('div');
         el.id = 'node-' + c.id;
+        const own = problems.filter(p => p.component === c.id);
+        const worst = own.some(p => p.severity === 'error') ? 'error' : own.length > 0 ? 'warning' : '';
         el.className = `hsm-state-node fa-component kind-${c.kind}` + (isComposite(c) ? ' composite' : '') +
-                       (c.id === selectedId ? ' selected' : '');
+                       (c.id === selectedId ? ' selected' : '') + (worst ? ` has-${worst}` : '');
         el.style.left = c.x + 'px'; el.style.top = c.y + 'px';
         el.style.width = (c.width || 200) + 'px'; el.style.height = (c.height || 90) + 'px';
         el.innerHTML = `
             <div class="hsm-state-header">
-                <div class="fa-title"><span class="fa-name">${escapeHtml(c.name)}</span><span class="fa-kind">${KINDS[c.kind] ? KINDS[c.kind].label : c.kind}</span></div>
+                <div class="fa-title"><span class="fa-name">${escapeHtml(c.name)}</span><span class="fa-kind">${KINDS[c.kind] ? KINDS[c.kind].label : c.kind}</span>${worst ? `<span class="fa-badge" title="${escapeHtml(own.map(p => p.message).join('\n'))}">${worst === 'error' ? '⛔' : '⚠️'}</span>` : ''}</div>
                 <button class="hamburger-btn">☰</button>
             </div>
             <div class="fa-summary">${summaryOf(c)}</div>
@@ -172,9 +175,11 @@ const CONNECTION_STROKE = {
 };
 
 function connectionLabel(conn) {
-    if (conn.kind === 'event') return (conn.events || []).join(', ') || 'events';
-    if (conn.kind === 'item') return conn.item ? `push ${conn.item}` : 'items';
-    return 'DMA stream';
+    const mark = problems.some(p => p.connection === conn.id && p.severity === 'error') ? '⛔ '
+               : problems.some(p => p.connection === conn.id) ? '⚠️ ' : '';
+    if (conn.kind === 'event') return mark + ((conn.events || []).join(', ') || 'events');
+    if (conn.kind === 'item') return mark + (conn.item ? `push ${conn.item}` : 'items');
+    return mark + 'DMA stream';
 }
 
 function drawConnections() {
@@ -207,7 +212,28 @@ function bindCheck(id, key) {
     input.onchange = () => { app.features = app.features || {}; app.features[key] = input.checked; commit(); };
 }
 
+function renderProblems() {
+    const list = document.getElementById('problems-list');
+    const errors = problems.filter(p => p.severity === 'error').length;
+    document.getElementById('problems-title').textContent =
+        problems.length === 0 ? 'Problems' : `Problems (${errors} error${errors === 1 ? '' : 's'}, ${problems.length - errors} warning${problems.length - errors === 1 ? '' : 's'})`;
+    list.innerHTML = '';
+    if (problems.length === 0) {
+        list.innerHTML = '<div class="problems-ok">✓ No problems found</div>';
+        return;
+    }
+    problems.forEach(p => {
+        const item = document.createElement('div');
+        item.className = `problem ${p.severity}`;
+        item.textContent = p.message;
+        const target = p.component || (p.connection && (app.connections.find(x => x.id === p.connection) || {}).from);
+        if (target) item.addEventListener('click', () => select(target));
+        list.appendChild(item);
+    });
+}
+
 function renderSidebar() {
+    renderProblems();
     app.board = app.board || {};
     bindText('app-name', () => app.name, v => {
         app.name = v || app.name;
@@ -438,6 +464,7 @@ window.addEventListener('message', (event) => {
         const parsed = JSON.parse(message.text || '{}');
         app = Object.assign({ name: 'App', board: {}, features: {}, settings: {}, components: [], connections: [] }, parsed);
         models = message.models || [];
+        problems = message.problems || [];
         if (selectedId && !byId(selectedId)) selectedId = null;
         render();
     } catch (e) {

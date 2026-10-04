@@ -125,15 +125,184 @@ export function describeHsmModel(file: string, jsonText: string): AppModelInfo |
     }
 }
 
+// ==========================================================================
+// APPLICATION CHECKS (docs/design/app-diagram.md, section 3): what the compiler cannot check, or only with
+// unreadable template errors, reported on the diagram and in VS Code's Problems panel.
+// ==========================================================================
+export interface AppProblem {
+    severity: 'error' | 'warning';
+    message: string;
+    component?: string;     // component id the problem belongs to
+    connection?: string;    // connection id
+}
+
+const COMPOSITE_KINDS = ['application', 'subsystem'];
+const SERVICE_KINDS = ['spsc', 'mpsc', 'dma'];
+
+export function checkAppModel(app: any, models: AppModelInfo[]): AppProblem[] {
+    const problems: AppProblem[] = [];
+    const components: any[] = Array.isArray(app.components) ? app.components : [];
+    const connections: any[] = Array.isArray(app.connections) ? app.connections : [];
+    const byId = new Map<string, any>(components.map(c => [c.id, c]));
+    const error = (message: string, where: { component?: string; connection?: string } = {}) =>
+        problems.push({ severity: 'error', message, ...where });
+    const warning = (message: string, where: { component?: string; connection?: string } = {}) =>
+        problems.push({ severity: 'warning', message, ...where });
+    const settings = app.settings || {};
+    const features = app.features || {};
+
+    // ---- The application ----
+    if (!app.board || !app.board.type) {
+        warning('No board type: set the board (AppTraits::Platform) in the Application section');
+    }
+    if (features.commands && !features.trace) error('Commands (FA_TRACE_COMMANDS) need Trace (FA_TRACE): replies travel on the trace');
+    if (features.debug_commands && !features.commands) error('Debug commands (FA_DEBUG_COMMANDS) need Commands (FA_TRACE_COMMANDS)');
+    if (features.health) {
+        const check = Number(settings.HealthCheckMs ?? 100), watchdog = Number(settings.WatchdogTimeoutMs ?? 1000);
+        if (watchdog < 3 * check) {
+            error(`WatchdogTimeoutMs (${watchdog}) must be at least 3 x HealthCheckMs (${check}): one late check would reset the chip`);
+        }
+    }
+
+    // ---- Components ----
+    const names = new Map<string, string>();
+    const modelUsers = new Map<string, string[]>();
+    for (const c of components) {
+        const where = { component: c.id };
+        if (!/^[A-Za-z_]\w*$/.test(String(c.name || ''))) error(`"${c.name}" is not a C++ identifier`, where);
+        // The application's own name is not a module of the code: it may equal its main actor's (Timebomb)
+        if (c.kind !== 'application') {
+            if (names.has(c.name)) error(`Two components are named ${c.name}`, where);
+            names.set(c.name, c.id);
+        }
+        if (c.parent !== undefined && !byId.has(c.parent)) error(`${c.name} is inside a component that does not exist`, where);
+        if (c.parent !== undefined && byId.has(c.parent) && !COMPOSITE_KINDS.includes(byId.get(c.parent).kind)) {
+            error(`${c.name} is inside ${byId.get(c.parent).name}, which is not an application or a subsystem`, where);
+        }
+        if (c.kind === 'actor') {
+            if (!c.model) {
+                error(`Actor ${c.name} has no state machine: choose its *.hsm.json`, where);
+            } else if (!models.some(m => m.file === c.model)) {
+                error(`Actor ${c.name}: state machine ${c.model} not found next to the application, or not a valid model`, where);
+            } else {
+                modelUsers.set(c.model, [...(modelUsers.get(c.model) || []), c.name]);
+            }
+        }
+        if (c.kind === 'periodic' && !(Number(c.period_ms) > 0)) error(`${c.name}: the period must be at least 1 ms`, where);
+        if (c.kind === 'interrupt') {
+            if (!c.irq) warning(`Interrupt ${c.name}: no interrupt chosen (the board's Irq:: name)`, where);
+            const maxSyscall = Number(settings.MaxSyscallPriority ?? 5);
+            if (Number(c.pri) < maxSyscall) {
+                error(`Interrupt ${c.name}: priority ${c.pri} is more urgent than FreeRTOS allows for its calls ` +
+                      `(configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY ${maxSyscall}): use ${maxSyscall} or higher`, where);
+            }
+        }
+        if ((c.kind === 'spsc' || c.kind === 'mpsc') && !c.item) error(`${c.name}: no item type`, where);
+        if (SERVICE_KINDS.includes(c.kind) && !(Number(c.size) > 0)) error(`${c.name}: the buffer size must be at least 1`, where);
+        if (Number(c.stack) > 0 && Number(c.stack) < 64) warning(`${c.name}: a stack of ${c.stack} words is very small`, where);
+    }
+    for (const [model, users] of modelUsers) {
+        if (users.length > 1) {
+            for (const name of users) {
+                error(`${model} is used by ${users.join(' and ')}: one instance per state machine (multiple instances come in v2)`,
+                      { component: names.get(name)! });
+            }
+        }
+    }
+    const interrupts = components.filter(c => c.kind === 'interrupt' && c.irq);
+    for (const c of interrupts) {
+        const same = interrupts.filter(o => o.irq === c.irq);
+        if (same.length > 1) error(`Interrupt Irq::${c.irq} is used by ${same.map(o => o.name).join(' and ')}`, { component: c.id });
+    }
+    for (const kind of ['spsc', 'mpsc']) {
+        const services = components.filter(c => c.kind === kind && c.item);
+        for (const c of services) {
+            const same = services.filter(o => o.item === c.item);
+            if (same.length > 1) {
+                error(`Items of type ${c.item} go to ${same.map(o => o.name).join(' and ')}: pushes are routed by item type, ` +
+                      'so one service per type', { component: c.id });
+            }
+        }
+    }
+
+    // ---- Connections ----
+    for (const conn of connections) {
+        const where = { connection: conn.id };
+        const from = byId.get(conn.from), to = byId.get(conn.to);
+        if (!from || !to) { error('A connection to a component that does not exist', where); continue; }
+        if (COMPOSITE_KINDS.includes(from.kind) || COMPOSITE_KINDS.includes(to.kind)) {
+            error(`${from.name} → ${to.name}: connect components, not applications or subsystems`, where);
+            continue;
+        }
+        if (conn.kind === 'event') {
+            if (to.kind !== 'actor') { error(`${from.name} → ${to.name}: events go to actors; a ${to.kind} takes items or streams`, where); continue; }
+            const model = models.find(m => m.file === to.model);
+            const events: string[] = Array.isArray(conn.events) ? conn.events : [];
+            if (events.length === 0) error(`${from.name} → ${to.name}: no events chosen`, where);
+            if (model) {
+                for (const e of events) {
+                    if (!model.signals.includes(e)) {
+                        error(`${from.name} → ${to.name}: ${to.name}'s state machine (${model.file}) has no signal ${e}`, where);
+                    }
+                }
+            }
+        } else if (conn.kind === 'item') {
+            if (to.kind !== 'spsc' && to.kind !== 'mpsc') { error(`${from.name} → ${to.name}: items go to SPSC or MPSC services`, where); continue; }
+            if (conn.item && to.item && conn.item !== to.item) {
+                error(`${from.name} → ${to.name}: pushes ${conn.item}, but ${to.name} takes ${to.item}`, where);
+            }
+        } else if (conn.kind === 'stream') {
+            if (to.kind !== 'dma') { error(`${from.name} → ${to.name}: a DMA stream goes to a DMA ring service`, where); continue; }
+            if (from.kind !== 'interrupt') warning(`${from.name} → ${to.name}: DMA progress is normally reported by an interrupt module`, where);
+        }
+    }
+    // One producer per SPSC service, and of one kind: the type cannot enforce it, and two corrupt it silently
+    for (const c of components.filter(x => x.kind === 'spsc')) {
+        const producers = connections.filter(x => x.to === c.id && x.kind === 'item').map(x => byId.get(x.from)).filter(Boolean);
+        if (producers.length > 1) {
+            error(`SPSC service ${c.name} has ${producers.length} producers (${producers.map((p: any) => p.name).join(', ')}): ` +
+                  'it allows exactly one; use an MPSC service', { component: c.id });
+        }
+    }
+    // Actors nothing posts to (they may still run on their own timers)
+    for (const c of components.filter(x => x.kind === 'actor')) {
+        if (!connections.some(x => x.to === c.id)) {
+            warning(`Actor ${c.name} receives no events from any component (fine if it runs on its own timers)`, { component: c.id });
+        }
+    }
+    return problems;
+}
+
 class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
 
     public static register(context: vscode.ExtensionContext): vscode.Disposable {
-        return vscode.window.registerCustomEditorProvider(FreeActorsAppEditorProvider.viewType, new FreeActorsAppEditorProvider(context));
+        const diagnostics = vscode.languages.createDiagnosticCollection('freeactors-app');
+        context.subscriptions.push(diagnostics);
+        return vscode.window.registerCustomEditorProvider(FreeActorsAppEditorProvider.viewType,
+                                                          new FreeActorsAppEditorProvider(context, diagnostics));
     }
 
     private static readonly viewType = 'freeactors.appEditor';
 
-    constructor(private readonly context: vscode.ExtensionContext) { }
+    constructor(private readonly context: vscode.ExtensionContext,
+                private readonly diagnostics: vscode.DiagnosticCollection) { }
+
+    // The problems as VS Code diagnostics, each on the line of the component or connection it is about
+    private publishDiagnostics(document: vscode.TextDocument, problems: AppProblem[]) {
+        const text = document.getText();
+        const lineOf = (id: string | undefined) => {
+            if (!id) return 0;
+            const at = text.indexOf(`"id": "${id}"`);
+            return at < 0 ? 0 : document.positionAt(at).line;
+        };
+        this.diagnostics.set(document.uri, problems.map(p => {
+            const line = lineOf(p.component ?? p.connection);
+            const d = new vscode.Diagnostic(document.lineAt(line).range, p.message,
+                p.severity === 'error' ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning);
+            d.source = 'FreeActors';
+            return d;
+        }));
+    }
 
     public async resolveCustomTextEditor(
         document: vscode.TextDocument,
@@ -177,7 +346,15 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         };
 
         const update = async () => {
-            webviewPanel.webview.postMessage({ type: 'update', text: document.getText(), models: await scanModels() });
+            const models = await scanModels();
+            let problems: AppProblem[] = [];
+            try {
+                problems = checkAppModel(JSON.parse(document.getText()), models);
+            } catch (e: any) {
+                problems = [{ severity: 'error', message: `Not a valid application model (JSON): ${e.message}` }];
+            }
+            this.publishDiagnostics(document, problems);
+            webviewPanel.webview.postMessage({ type: 'update', text: document.getText(), models, problems });
         };
 
         const subscriptions = [
@@ -189,7 +366,10 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                 if (d.uri.fsPath.endsWith('.hsm.json')) update();
             }),
         ];
-        webviewPanel.onDidDispose(() => subscriptions.forEach(s => s.dispose()));
+        webviewPanel.onDidDispose(() => {
+            subscriptions.forEach(s => s.dispose());
+            this.diagnostics.delete(document.uri);
+        });
 
         webviewPanel.webview.onDidReceiveMessage(async message => {
             switch (message.type) {
