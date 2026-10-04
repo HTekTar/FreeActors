@@ -99,6 +99,10 @@ struct Context {
     static constexpr bool health_enabled = App::health_enabled;
     static size_t health_report(uint8_t* out, size_t max) { return App::health_report(out, max); }
     static constexpr size_t module_count() { return App::watched_count; }
+    // Interrupt modules (trace sender 0xC0 + n, INTERRUPTS frame)
+    static constexpr size_t interrupt_count() { return App::interrupt_count; }
+    static char const* interrupt_name(size_t i) { return App::interrupt_name(i); }
+    static int interrupt_irq(size_t i) { return App::interrupt_irq(i); }
 #ifdef FA_DEBUG_COMMANDS
     static CommandStatus pause_task(uint8_t task) { return App::control_task(task, App::TaskControl::Pause); }
     static CommandStatus resume_task(uint8_t task) { return App::control_task(task, App::TaskControl::Resume); }
@@ -260,6 +264,60 @@ public:
 
     using AllModules = TypeList<module_t<Modules>...>;
     using InterruptList = typename filter_types<is_interrupt_module, AllModules>::type;
+    static constexpr size_t interrupt_count = type_list_size_v<InterruptList>;
+    static_assert(interrupt_count <= TraceSender::MaxInterrupts, "At most 32 interrupt modules");
+
+    // ---- Interrupt modules: what the vector table calls ------------------------------------------------------
+
+    // Each interrupt module runs through this: the trace attributes its posts to it (0xC0 + n), and an
+    // interrupt firing more often than its limit within one tick (a flag never cleared fires it back to back
+    // and starves every task) is disabled and reported, instead of ending in an unexplained watchdog reset.
+    template <typename I>
+    static void run_interrupt() {
+        constexpr uint8_t sender = static_cast<uint8_t>(TraceSender::FirstInterrupt + type_id_v<I, InterruptList>);
+        constexpr uint32_t limit = detail::max_rate_of<I>::value / configTICK_RATE_HZ > 0
+                                 ? detail::max_rate_of<I>::value / configTICK_RATE_HZ : 1;
+        static uint32_t window_tick = 0;
+        static uint32_t window_calls = 0;
+        const uint32_t now = static_cast<uint32_t>(xTaskGetTickCountFromISR());
+        if (now != window_tick) {
+            window_tick = now;
+            window_calls = 0;
+        }
+        if (++window_calls > limit) {
+            I::disable();
+            if (window_calls == limit + 1) {                 // report once
+                interrupt_fault(sender, HealthFault::Storm, window_calls);
+            }
+            return;
+        }
+        const uint8_t outer = detail::current_isr_sender;
+        detail::current_isr_sender = sender;
+        I::handle();
+        detail::current_isr_sender = outer;
+    }
+
+    // Every vector table slot without a module: disables that interrupt and records which one fired.
+    // It may run at ANY priority (often 0, the reset default), so it must not call FreeRTOS: the health monitor
+    // traces and reports the fault from its task; without the monitor, an assertion stops the program.
+    static void unexpected_interrupt() {
+#ifdef FA_CORTEX_M_NVIC
+        uint32_t ipsr;
+        __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+        const int32_t irq = static_cast<int32_t>(ipsr & 0x1FFu) - 16;
+        if (irq >= 0) {
+            detail::nvic_icer()[irq >> 5] = 1u << (irq & 31);
+        }
+        detail::report_interrupt_fault(TraceSender::Isr, static_cast<uint8_t>(HealthFault::Unexpected),
+                                       static_cast<uint16_t>(irq < 0 ? 0 : irq));
+#ifndef FA_HEALTH
+        FA_ASSERT(false /* an interrupt fired that is not in the application's vector table: see Fa::detail::interrupt_fault */);
+#endif
+#endif
+    }
+
+    static char const* interrupt_name(size_t i) { return interrupt_names_in(InterruptList{}, i); }
+    static int interrupt_irq(size_t i) { return interrupt_irqs_in(InterruptList{}, i); }
     using ActorList = typename filter_types<is_hsm_actor, AllModules>::type;
     using TimerService = TimeEventService<ActorList, AppTraits::MaxTimerPayloadSize, AppTraits::MaxTimers, Application>;
 #ifdef FA_TRACE
@@ -420,11 +478,11 @@ public:
         using Target = target_of<Evt>;
         using Storage = StaticActorStorage<Target>;
 #ifndef FA_TRACE_NO_POST
-        trace_record_isr(TraceKind::Post, TraceSender::Isr, event_id<Target, Evt>(), pxHigherPriorityTaskWoken);
+        trace_record_isr(TraceKind::Post, detail::current_isr_sender, event_id<Target, Evt>(), pxHigherPriorityTaskWoken);
 #endif
         typename Target::EventType message = evt;
         if (xQueueSendFromISR(Storage::queueHandle, &message, pxHigherPriorityTaskWoken) != pdPASS) {
-            trace_record_isr(TraceKind::Dropped, TraceSender::Isr, event_id<Target, Evt>(), pxHigherPriorityTaskWoken);
+            trace_record_isr(TraceKind::Dropped, detail::current_isr_sender, event_id<Target, Evt>(), pxHigherPriorityTaskWoken);
             Storage::on_queue_full();
         }
     }
@@ -706,6 +764,32 @@ private:
 
     // ---- Interrupt modules ----------------------------------------------------------------------------------
 
+    // An interrupt storm (from run_interrupt, at the module's own, FreeRTOS-safe priority): traced at once; the
+    // health monitor reports it and stops feeding the watchdog (FA_HEALTH); without the monitor, an assertion
+    // stops the program in debug builds
+    static void interrupt_fault(uint8_t module, HealthFault fault, uint32_t value) {
+        detail::report_interrupt_fault(module, static_cast<uint8_t>(fault),
+                                       static_cast<uint16_t>(value > 0xFFFFu ? 0xFFFFu : value));
+        BaseType_t woken = pdFALSE;
+        trace_record_isr(TraceKind::HealthFault, module, health_fault_id(fault, value, false), &woken);
+#ifndef FA_HEALTH
+        FA_ASSERT(false /* interrupt storm or unexpected interrupt: see Fa::detail::interrupt_fault */);
+#endif
+        FA_YIELD_FROM_ISR(woken);
+    }
+
+    template <typename... Is>
+    static char const* interrupt_names_in(TypeList<Is...>, size_t i) {
+        static constexpr char const* names[] = { detail::interrupt_name_of<Is>::value..., nullptr };
+        return i < sizeof...(Is) ? names[i] : nullptr;
+    }
+
+    template <typename... Is>
+    static int interrupt_irqs_in(TypeList<Is...>, size_t i) {
+        static constexpr int irqs[] = { static_cast<int>(Is::IRQNum)..., -1 };
+        return i < sizeof...(Is) ? irqs[i] : -1;
+    }
+
     template <typename... Is>
     static void install_vector_table(TypeList<Is...>) {
         if constexpr (sizeof...(Is) > 0) {
@@ -720,7 +804,7 @@ private:
             static_assert(detail::has_initial_stack<Hw>::value,
                 "The board must define static constexpr void const* initial_stack: the initial stack pointer from "
                 "the linker script (e.g. &_estack), which FreeRTOS reads through the vector table at start-up");
-            detail::install_vector_table(detail::VectorTable<Hw, 16 + Hw::irq_count, Is...>::table.data());
+            detail::install_vector_table(detail::VectorTable<Hw, Application, 16 + Hw::irq_count, Is...>::table.data());
 #elif defined(FA_CORTEX_M_NVIC)
             // FA_NO_VECTOR_TABLE: every module must be bound with FA_BIND_ISR (else: undefined reference)
             (detail::require_binding<Is>(), ...);

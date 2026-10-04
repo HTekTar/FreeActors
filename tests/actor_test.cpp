@@ -186,3 +186,40 @@ TEST_CASE("FA_TRACE: a guard evaluation is recorded with its result") {
     CHECK(traced[1].id == Fa::GuardDescriptor<Allowed>::id);
 }
 #endif // FA_TRACE
+
+// ---- Interrupt modules in host tests (fa_interrupt.hpp, Fa::test::IsrRecordingContext) --------------------
+#include "fa_interrupt.hpp"
+
+namespace {
+    struct IsrBoard {
+        struct Irq { static constexpr int tap = 7; };
+        static inline bool tap_ack_result = false;
+        static bool tap_ack() { Fa::test::detail::timeline().push_back("tap_ack()"); return tap_ack_result; }
+    };
+
+    struct Tap {};
+
+    template <typename Hw, typename IsrCtx>
+    struct TapIsr : Fa::InterruptInterface<TapIsr<Hw, IsrCtx>> {
+        static constexpr int IRQNum = Hw::Irq::tap;
+        static constexpr uint32_t PRI = 10;
+        static void handler() {
+            if (Hw::tap_ack()) IsrCtx::post(Tap{});
+        }
+    };
+}
+template <> struct Fa::EventDescriptor<Tap> { static constexpr const char* name = "Tap"; };
+
+TEST_CASE("an interrupt module fired in a host test: acknowledge, then post only when it was ours") {
+    using Isr = TapIsr<IsrBoard, Fa::test::IsrRecordingContext>;
+    Fa::test::detail::timeline().clear();
+    IsrBoard::tap_ack_result = false;
+    Isr::handle();
+    CHECK(Fa::test::log() == Fa::test::steps{"tap_ack()"});
+    Fa::test::detail::timeline().clear();
+    IsrBoard::tap_ack_result = true;
+    Isr::handle();
+    CHECK(Fa::test::log() == Fa::test::steps{"tap_ack()", "isr post Tap"});
+    Isr::init();                                      // no NVIC on the host: nothing happens
+    Isr::disable();
+}

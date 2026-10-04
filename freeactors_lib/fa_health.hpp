@@ -33,6 +33,8 @@ namespace Fa {
         NoProgress = 2,
         Idle       = 3,
         Paused     = 4,   // status only (HEALTH frame), never a fault: paused from the PC, not checked
+        Storm      = 5,   // an interrupt module fired more often than allowed in one tick (a flag never cleared?)
+        Unexpected = 6,   // an interrupt fired that is not in the application's vector table
     };
 
     // Why the chip last started, as reported by the board's optional reset_cause()

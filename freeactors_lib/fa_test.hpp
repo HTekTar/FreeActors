@@ -136,6 +136,33 @@ namespace Fa::test {
         static void trace(TraceKind /*kind*/, uint16_t /*id*/) {}
     };
 
+    // Context for interrupt modules in host tests: records what the interrupt does, in the same timeline.
+    //   using Isr = ButtonIsr<TestBsp, Fa::test::IsrRecordingContext>;
+    //   TestBsp::button_ack_result = true;
+    //   Isr::handle();                                   // fire it
+    //   CHECK(Fa::test::log() == steps{"button_ack()", "isr post ButtonPressed"});
+    struct IsrRecordingContext {
+        template <typename Evt>
+        static void post(Evt const & /*evt*/) {
+            detail::timeline().push_back(std::string("isr post ") + EventDescriptor<Evt>::name);
+        }
+
+        template <typename T>
+        static bool push(T const & /*item*/) {
+            detail::timeline().push_back("isr push");
+            return true;
+        }
+
+        template <template <typename, typename> class S>
+        static void stream(size_t position) {
+            detail::timeline().push_back("isr stream " + std::to_string(position));
+        }
+
+        static void command_rx(size_t position) {
+            detail::timeline().push_back("isr command_rx " + std::to_string(position));
+        }
+    };
+
     // ----------------------------------------------------------------------
     // Model-test trace capture (FA_SIM)
     // ----------------------------------------------------------------------

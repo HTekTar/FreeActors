@@ -34,12 +34,18 @@
 // ==========================================================================
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
+// FreeRTOS is optional here: host actor tests use interrupt modules with Fa::test::IsrRecordingContext and
+// no RTOS; IsrContext and the target parts need it
+#if __has_include("FreeRTOS.h")
 #include "FreeRTOS.h"
 #include "task.h"
+#define FA_HAVE_FREERTOS 1
+#endif
 
 #include "fa_common.hpp"
 
@@ -52,12 +58,14 @@
 #define FA_INTERRUPTS_UNSUPPORTED 1   // an ARM core without the ARMv7-M NVIC/VTOR (Cortex-M0/M0+, Cortex-A)
 #endif
 
+#ifdef FA_HAVE_FREERTOS
 // Yield at the end of an interrupt if a task was woken. On Cortex-M this only pends PendSV. On the host
 // (POSIX port) interrupts are simulated from the tick hook, whose tick handler switches tasks itself.
 #ifdef FA_CORTEX_M_NVIC
 #define FA_YIELD_FROM_ISR(woken) portYIELD_FROM_ISR(woken)
 #else
 #define FA_YIELD_FROM_ISR(woken) ((void)(woken))
+#endif
 #endif
 
 namespace Fa {
@@ -146,12 +154,50 @@ struct InterruptInterface {
     }
 };
 
+namespace detail {
+    // Trace sender of the interrupt running now (0xC0 + module index), saved and restored around each module,
+    // so nested interrupts are attributed correctly. TraceSender::Isr outside interrupt modules.
+    inline volatile uint8_t current_isr_sender = TraceSender::Isr;
+
+    // The first interrupt fault (storm, unexpected interrupt), for the health monitor to report: set in the
+    // interrupt, taken by the monitor task
+    struct InterruptFault {
+        std::atomic<bool> pending{false};
+        uint8_t module = 0;          // TraceSender id: 0xC0 + n, or TraceSender::Isr for an unexpected interrupt
+        uint8_t fault = 0;           // HealthFault
+        uint16_t value = 0;          // storm: calls in one tick; unexpected: the interrupt number
+    };
+    inline InterruptFault interrupt_fault;
+
+    inline void report_interrupt_fault(uint8_t module, uint8_t fault, uint16_t value) {
+        if (!interrupt_fault.pending.load(std::memory_order_relaxed)) {
+            interrupt_fault.module = module;
+            interrupt_fault.fault = fault;
+            interrupt_fault.value = value;
+            interrupt_fault.pending.store(true, std::memory_order_release);
+        }
+    }
+
+    // Interrupt storm limit: an interrupt module may set MaxRatePerSecond; the default catches a flag that is
+    // never cleared (which fires the interrupt back to back, hundreds of thousands of times per second)
+    template <typename I, typename = void>
+    struct max_rate_of { static constexpr uint32_t value = 50000; };
+    template <typename I>
+    struct max_rate_of<I, std::void_t<decltype(I::MaxRatePerSecond)>> { static constexpr uint32_t value = I::MaxRatePerSecond; };
+
+    template <typename I, typename = void>
+    struct interrupt_name_of { static constexpr const char* value = nullptr; };
+    template <typename I>
+    struct interrupt_name_of<I, std::void_t<decltype(I::Name)>> { static constexpr const char* value = I::Name; };
+}
+
 template <typename M, typename = void>
 struct is_interrupt_module : std::false_type {};
 template <typename M>
 struct is_interrupt_module<M, std::void_t<typename M::service_kind>>
     : std::is_same<typename M::service_kind, detail::InterruptKind> {};
 
+#ifdef FA_HAVE_FREERTOS
 // The context of interrupt modules: only operations allowed in an interrupt. Each one yields at its end if a
 // task was woken (portYIELD_FROM_ISR only pends PendSV on Cortex-M: several in one handler are harmless).
 template <typename App>
@@ -190,6 +236,7 @@ struct IsrContext {
     }
 #endif
 };
+#endif // FA_HAVE_FREERTOS
 
 namespace detail {
     template <typename... Is>
@@ -224,7 +271,7 @@ namespace detail {
 }
 #define FA_BIND_ISR(vector_name, App, Module)                                                                  \
     template <> bool Fa::detail::interrupt_module_bound_by_FA_BIND_ISR<App::module_t<Module>> = true;          \
-    extern "C" void vector_name(void) { App::module_t<Module>::handle(); }
+    extern "C" void vector_name(void) { App::template run_interrupt<App::module_t<Module>>(); }
 #endif
 
 #ifdef FA_VECTOR_TABLE
@@ -257,21 +304,6 @@ extern "C" {
 }
 
 namespace detail {
-    // An interrupt that is not in the application's vector table: disable it so it cannot fire forever,
-    // remember which one it was (debugger: Fa::detail::unexpected_irq), and stop in debug builds.
-    inline volatile int32_t unexpected_irq = -1;
-
-    inline void unexpected_interrupt() {
-        uint32_t ipsr;
-        __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
-        const int32_t irq = static_cast<int32_t>(ipsr & 0x1FFu) - 16;
-        unexpected_irq = irq;
-        if (irq >= 0) {
-            reinterpret_cast<volatile uint32_t*>(0xE000E180u)[irq >> 5] = 1u << (irq & 31);   // NVIC_ICER: disable it
-        }
-        FA_ASSERT(false /* an interrupt fired that is not in the application's vector table: see Fa::detail::unexpected_irq */);
-    }
-
     // VTOR needs the table aligned to a power of two at least its size (and at least 128 bytes)
     constexpr size_t vector_alignment(size_t entries) {
         size_t a = 128;
@@ -282,7 +314,7 @@ namespace detail {
     // [0] the initial stack pointer: FreeRTOS reads it through VTOR to reset the main stack when the scheduler
     //     starts (prvPortStartFirstTask), so it must be the real one (the board's Hw::initial_stack)
     // [1] reset: read from the boot table only
-    template <size_t Count, typename... Is>
+    template <size_t Count, typename App, typename... Is>
     constexpr std::array<VectorEntry, Count> build_vector_table(void const* initial_stack) {
         std::array<VectorEntry, Count> v{};
         v[0] = VectorEntry(initial_stack);
@@ -291,15 +323,15 @@ namespace detail {
         v[6] = VectorEntry(&UsageFault_Handler);
         v[11] = VectorEntry(&vPortSVCHandler);   v[12] = VectorEntry(&DebugMon_Handler);
         v[14] = VectorEntry(&xPortPendSVHandler); v[15] = VectorEntry(&xPortSysTickHandler);
-        for (size_t i = 16; i < Count; ++i) v[i] = VectorEntry(&unexpected_interrupt);
-        ((v[16 + static_cast<size_t>(Is::IRQNum)] = VectorEntry(&Is::handle)), ...);
+        for (size_t i = 16; i < Count; ++i) v[i] = VectorEntry(&App::unexpected_interrupt);
+        ((v[16 + static_cast<size_t>(Is::IRQNum)] = VectorEntry(&App::template run_interrupt<Is>)), ...);
         return v;
     }
 
-    template <typename Hw, size_t Count, typename... Is>
+    template <typename Hw, typename App, size_t Count, typename... Is>
     struct VectorTable {
         alignas(vector_alignment(Count)) static constexpr std::array<VectorEntry, Count> table =
-            build_vector_table<Count, Is...>(Hw::initial_stack);
+            build_vector_table<Count, App, Is...>(Hw::initial_stack);
     };
 
     template <typename Hw, typename = void>

@@ -186,6 +186,7 @@ static uint32_t sim_sequence = 0;
 
 template <typename Hw, typename IsrCtx>
 struct UartRxIsr : Fa::InterruptInterface<UartRxIsr<Hw, IsrCtx>> {
+    static constexpr const char* Name = "UartRxIrq";
     static constexpr int IRQNum = Hw::Irq::uart_rx;
     static constexpr uint32_t PRI = 6;
     static void handler() { IsrCtx::template stream<UartRx>(sim_dma_position); }
@@ -193,9 +194,32 @@ struct UartRxIsr : Fa::InterruptInterface<UartRxIsr<Hw, IsrCtx>> {
 
 template <typename Hw, typename IsrCtx>
 struct SequenceIsr : Fa::InterruptInterface<SequenceIsr<Hw, IsrCtx>> {
+    static constexpr const char* Name = "SeqIrq";
     static constexpr int IRQNum = Hw::Irq::sequence;
     static constexpr uint32_t PRI = 7;
     static void handler() { IsrCtx::push(sim_sequence++); }
+};
+
+// "Tap" interrupt: posts Go to the counter (the trace names it as the sender); fired once by the test
+static std::atomic<bool> tap_pending{false};
+template <typename Hw, typename IsrCtx>
+struct TapIsr : Fa::InterruptInterface<TapIsr<Hw, IsrCtx>> {
+    static constexpr const char* Name = "TapIrq";
+    static constexpr int IRQNum = Hw::Irq::tap;
+    static constexpr uint32_t PRI = 8;
+    static void handler() { IsrCtx::post(InitAction::Go{}); }
+};
+
+// A "storm": an interrupt whose flag is never cleared fires back to back. Limited to 10 000/s (10 per tick).
+static std::atomic<int> storm_burst{0};
+static std::atomic<uint32_t> storm_handled{0};
+template <typename Hw, typename IsrCtx>
+struct StormIsr : Fa::InterruptInterface<StormIsr<Hw, IsrCtx>> {
+    static constexpr const char* Name = "StormIrq";
+    static constexpr int IRQNum = Hw::Irq::storm;
+    static constexpr uint32_t PRI = 9;
+    static constexpr uint32_t MaxRatePerSecond = 10000;
+    static void handler() { ++storm_handled; }
 };
 
 // Host board for all modules. Like NucleoBsp it declares instance_id = 1, which must not affect routing.
@@ -205,6 +229,8 @@ struct HostBoard {
     struct Irq {                                 // interrupt numbers of the simulated hardware
         static constexpr int uart_rx  = 3;
         static constexpr int sequence = 4;
+        static constexpr int tap      = 5;
+        static constexpr int storm    = 6;
     };
     static inline std::atomic<bool> button{false};
     static void init() {}
@@ -252,7 +278,7 @@ struct AppTraits : Fa::DefaultAppTraits {
 };
 
 using App = Fa::Application<AppTraits, Timebomb::Actor, InitAction::Actor, TimebombButton, SeqSink, UartRx, Worker,
-                           UartRxIsr, SequenceIsr>;
+                           UartRxIsr, SequenceIsr, TapIsr, StormIsr>;
 using Work = Worker<HostBoard, App::AppContext>;
 using Rx = UartRx<HostBoard, App::AppContext>;
 using Sink = SeqSink<HostBoard, App::AppContext>;
@@ -277,7 +303,13 @@ M &instance() {
 extern "C" void vApplicationTickHook(void) {
     App::on_tick_isr();
     if (feed_sink) {
-        App::module_t<SequenceIsr>::handle();          // the "sequence interrupt": SeqSink's only producer
+        App::run_interrupt<App::module_t<SequenceIsr>>();   // the "sequence interrupt": SeqSink's only producer
+    }
+    if (tap_pending.exchange(false)) {
+        App::run_interrupt<App::module_t<TapIsr>>();
+    }
+    for (int n = storm_burst.exchange(0); n > 0; --n) {      // the same interrupt, back to back within one tick
+        App::run_interrupt<App::module_t<StormIsr>>();
     }
 
     // Simulated UART + circular DMA: the "hardware" writes a burst, then the idle-line interrupt reports it
@@ -290,7 +322,7 @@ extern "C" void vApplicationTickHook(void) {
             dma_position = (dma_position + 1) % Rx::size;
         }
         sim_dma_position = dma_position;
-        App::module_t<UartRxIsr>::handle();            // the "DMA interrupt": reports the write position
+        App::run_interrupt<App::module_t<UartRxIsr>>();     // the "DMA interrupt": reports the write position
     }
 
 #ifdef FA_TRACE_COMMANDS
@@ -554,6 +586,14 @@ namespace {
 #endif
 #endif
 
+        // ---- Interrupt modules: a post from an interrupt is attributed to it in the trace
+        {
+            const int before = instance<Counter>().go_count;
+            tap_pending = true;
+            vTaskDelay(5);
+            expect("interrupt module: TapIrq's post reaches the counter", instance<Counter>().go_count == before + 1);
+        }
+
         // ---- Full queue: posts and timer deliveries never block; lost events are counted (and asserted in debug)
         using BombStorage = Fa::StaticActorStorage<Bomb>;
         const uint32_t dropped_before = BombStorage::dropped;
@@ -623,6 +663,13 @@ namespace {
             feed_sink = false;                                  // the SPSC producer goes silent
             vTaskDelay(400);
             expect("health: a service whose input stops (MaxIdleMs) is Idle", has_fault(index_of("SeqSink"), Fa::HealthFault::Idle));
+
+            // an interrupt storm: disabled after its limit within one tick, reported as a health fault
+            storm_burst = 100;
+            vTaskDelay(150);
+            std::snprintf(detail, sizeof detail, "%u handled of 100", static_cast<unsigned>(storm_handled));
+            expect("health: an interrupt storm is cut off at its limit (10 per tick) and reported",
+                   storm_handled == 10 && has_fault(Fa::TraceSender::FirstInterrupt + 3, Fa::HealthFault::Storm), detail);
 
 #ifdef FA_DEBUG_COMMANDS
             send_command(Fa::command_frame::HealthTest, {13, task_index("Counter")});   // idle actor, paused as a fault

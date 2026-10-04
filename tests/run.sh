@@ -187,11 +187,11 @@ vector_table_checks() {
     info=$(arm-none-eabi-objdump -h "$obj" | grep -A1 -F "$sec ")
     relocs=$(arm-none-eabi-objdump -r -j "$sec" "$obj" | c++filt)
     if [ -n "$sec" ] && echo "$info" | grep -q "READONLY" && echo "$info" | grep -q "000001c4.*2\*\*9" &&
-       echo "$relocs" | grep -q "^00000088 .*AdcIsr.*::handle()" && echo "$relocs" | grep -q "^000000dc .*CommandRxIsr.*::handle()" &&
+       echo "$relocs" | grep -q "^00000088 .*run_interrupt<AdcIsr" && echo "$relocs" | grep -q "^000000dc .*run_interrupt<CommandRxIsr" &&
        echo "$relocs" | grep -q "^0000002c .*vPortSVCHandler" && echo "$relocs" | grep -q "^00000038 .*xPortPendSVHandler" &&
        echo "$relocs" | grep -q "^00000000 .*_estack" &&
        [ "$(echo "$relocs" | grep -c unexpected_interrupt)" -eq 95 ]; then
-        echo "PASS  vector table: in flash (read-only), 113 entries aligned to 512 for VTOR, entry 0 the initial stack (FreeRTOS reads it), ADC and USART3 slots hold their modules' handlers"
+        echo "PASS  vector table: in flash (read-only), 113 entries aligned to 512 for VTOR, entry 0 the initial stack (FreeRTOS reads it), ADC and USART3 slots run their modules (through run_interrupt)"
     else
         echo "FAIL  vector table: section, alignment or slots not as expected (object: tests/build/target_m4-fpu-trace-commands-health.o)"
         status=1
@@ -393,6 +393,12 @@ posix_run() {
     expect_trace "$trace" \
         "ACK #13: ok" \
         "health +\\[HEALTH\\] Counter no progress for 3[0-9][0-9] ms with work waiting"
+    # interrupt modules: named in the trace, a storm reported
+    expect_trace "$trace" \
+        "interrupt modules: UartRxIrq \\(IRQ 3\\), SeqIrq \\(IRQ 4\\), TapIrq \\(IRQ 5\\), StormIrq \\(IRQ 6\\)" \
+        "TapIrq +\\[POST\\] Go -> Counter" \
+        "Counter +\\[EVENT\\] Go +\\(from TapIrq, "
+    expect_trace "$trace" "health +\\[HEALTH\\] StormIrq interrupt storm: 11 calls in one tick, interrupt disabled"
     if grep -q "ACK #7" "$trace"; then
         echo "FAIL  trace: the damaged command #7 was answered"
         status=1

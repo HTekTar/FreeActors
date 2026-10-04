@@ -98,6 +98,8 @@ namespace Fa{
         constexpr uint8_t Pc    = 0xFD;   // PC command
         constexpr uint8_t Task  = 0xFC;   // non-actor code in a task: start-up code, periodic modules
         constexpr uint8_t Health = 0xFB;  // the health monitor (HealthReset records)
+        constexpr uint8_t FirstInterrupt = 0xC0;   // 0xC0 + n: interrupt module n (names: INTERRUPTS frame)
+        constexpr uint8_t MaxInterrupts  = 32;
     }
 
     //

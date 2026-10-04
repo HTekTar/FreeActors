@@ -41,6 +41,7 @@ namespace trace_frame {
     constexpr uint8_t Ack     = 0x05;
     constexpr uint8_t Modules = 0x06;   // names of the tasks the health monitor watches (FA_HEALTH), after HELLO
     constexpr uint8_t Health  = 0x07;   // reply to QUERY_HEALTH
+    constexpr uint8_t Interrupts = 0x08; // names of the interrupt modules (trace sender 0xC0 + n), after HELLO
     constexpr size_t RecordsPerFrame = 31;   // 1 + 31 * 8 = 249 bytes <= frame::MaxBody
     static_assert(1 + RecordsPerFrame * sizeof(TraceRecord) <= frame::MaxBody, "a RECORDS frame must fit one body");
 
@@ -233,6 +234,27 @@ private:
         }
         send(trace_frame::Hello, body, n);
         send_modules();
+        send_interrupts();
+    }
+
+    // INTERRUPTS: u8 count · per interrupt module: u8 IRQ number · u8 name_length · name (empty: unnamed)
+    static void send_interrupts() {
+        if constexpr (Ctx::interrupt_count() > 0) {
+            uint8_t *body = body_;
+            size_t n = 1, count = 0;
+            for (size_t i = 0; i < Ctx::interrupt_count(); ++i) {
+                char const *name = Ctx::interrupt_name(i);
+                size_t length = 0;
+                while (name != nullptr && name[length] != '\0' && length < 32) ++length;
+                if (n + 2 + length > frame::MaxBody) break;
+                body[n++] = static_cast<uint8_t>(Ctx::interrupt_irq(i));
+                body[n++] = static_cast<uint8_t>(length);
+                for (size_t k = 0; k < length; ++k) body[n++] = static_cast<uint8_t>(name[k]);
+                ++count;
+            }
+            body[0] = static_cast<uint8_t>(count);
+            send(trace_frame::Interrupts, body, n);
+        }
     }
 
     // MODULES (FA_HEALTH): u8 count · per task: u8 name_length · name. Indices match HealthFault records.

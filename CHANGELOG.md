@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Framework
+- Interrupt modules: an interrupt is a module of its own (`Fa::InterruptInterface`), with an interrupt-only context (`IsrCtx::post`, `push`, `stream`): no vector names, no `extern "C"`, no `woken`/`portYIELD_FROM_ISR`, no NVIC calls. The application builds the vector table at compile time (in flash) and installs it through VTOR; priorities are checked against FreeRTOS at compile time. `FA_NO_VECTOR_TABLE` + `FA_BIND_ISR` for systems that own their vector table.
+- Interrupts in the trace by name (`[POST] from CmdRxUart`); an interrupt storm (a flag never cleared) is cut off and reported, and an interrupt missing from the table is disabled and reported, both as health faults that survive the reset.
+
 ### Editor and export
 - Actors call `post`, `schedule` and `cancel` without `this->`, and the board as `Hw::`; existing actors get this on the next export, without changes to your code.
 - Event structs are yours: `<name>_events.hpp` is created once and never overwritten, so add the data an event carries as fields there (`struct Temperature { int16_t celsius = 0; };`). New signals are appended as empty structs; the event list moves to the generated `<name>_event_list.hpp`. An existing events header is converted on the next export, keeping fields you added.

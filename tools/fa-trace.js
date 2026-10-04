@@ -83,7 +83,7 @@ const Kind = { Event: 0, GuardFalse: 1, GuardTrue: 2, Action: 3, Transition: 4, 
                HealthFault: 9, HealthReset: 10 };
 const Senders = { 0xFF: 'ISR', 0xFE: 'timer', 0xFD: 'PC', 0xFC: 'task', 0xFB: 'health' };
 const ResetCause = ['unknown', 'power-on', 'reset pin', 'software reset', 'watchdog', 'brown-out', 'low-power', 'other'];
-const HealthStatus = ['ok', 'STUCK', 'NO PROGRESS', 'IDLE', 'PAUSED'];
+const HealthStatus = ['ok', 'STUCK', 'NO PROGRESS', 'IDLE', 'PAUSED', 'STORM', 'UNEXPECTED IRQ'];
 const CommandStatus = ['ok', 'unknown actor', 'unknown event', 'payload size mismatch', 'queue full', 'not supported', 'bad frame',
                        'not allowed'];
 
@@ -121,6 +121,7 @@ function createDecoder(dictionaries, out, options = {}) {
     let encoded = [];
     let actors = [];                  // index -> { name, dict }
     let modules = [];                 // health monitor task index -> name (MODULES frame)
+    let interrupts = [];              // interrupt module n -> { irq, name } (INTERRUPTS frame); sender 0xC0 + n
     let hz = 1;
     let lastRaw = null, high = 0, origin = null;
     let expectedSequence = null;
@@ -129,7 +130,8 @@ function createDecoder(dictionaries, out, options = {}) {
     const pending = new Map();        // target actor -> [{ id, sender, t }] posts waiting for their EVENT
     const stats = { frames: 0, badFrames: 0, records: 0, lostRecords: 0, lostFrames: 0 };
 
-    const actorName = i => (actors[i] ? actors[i].name : (Senders[i] || `actor${i}`));
+    const interruptName = n => (interrupts[n] ? (interrupts[n].name || `irq${interrupts[n].irq}`) : `isr${n}`);
+    const actorName = i => (actors[i] ? actors[i].name : i >= 0xC0 && i < 0xE0 ? interruptName(i - 0xC0) : (Senders[i] || `actor${i}`));
     const dictOf = i => (actors[i] ? actors[i].dict : undefined);
     const eventName = (actor, index) => { const d = dictOf(actor); return (d && d.events[index]) || `event#${index}`; };
     const stateName = (actor, index) => { const d = dictOf(actor); return (d && d.states[index]) || `state#${index}`; };
@@ -192,15 +194,18 @@ function createDecoder(dictionaries, out, options = {}) {
             actors.map((a, i) => c.actor(i)(`${i}=${a.name}`)).join(c.bold(', ')));
     }
 
-    const moduleName = i => modules[i] || (actors[i] ? actors[i].name : `task${i}`);
+    const moduleName = i => (i >= 0xC0 && i < 0xE0 ? interruptName(i - 0xC0) : i === 0xFF ? 'interrupt' :
+                             modules[i] || (actors[i] ? actors[i].name : `task${i}`));
 
     function healthFault(t, task, id) {
         const ms = id & 0x0FFF;
         const time = ms >= 4095 ? 'over 4 s' : `${ms} ms`;
         const what = [null, `stuck: busy ${time} in one step`, `no progress for ${time} with work waiting`,
-                      `idle: no input for ${time}`][(id >> 12) & 7] || `fault ${(id >> 12) & 7}`;
+                      `idle: no input for ${time}`, null,
+                      `interrupt storm: ${ms >= 4095 ? 'over 4095' : ms} calls in one tick, interrupt disabled`,
+                      `unexpected interrupt ${ms}: not in the vector table, disabled`][(id >> 12) & 7] || `fault ${(id >> 12) & 7}`;
         const previous = (id & 0x8000) !== 0;
-        line(t, 0xFB, c.boldRed(`[HEALTH] ${moduleName(task)} ${what}`) +
+        line(t, 0xFB, c.boldRed(`[HEALTH] ${task === 0xFF ? '' : moduleName(task) + ' '}${what}`) +
                       (previous ? c.dim('   (previous run: caused the reset)') : c.dim('   (watchdog no longer fed)')));
     }
 
@@ -311,6 +316,17 @@ function createDecoder(dictionaries, out, options = {}) {
             const changed = names.join(',') !== modules.join(',');
             modules = names;
             if (changed) out(c.dim(`--- health monitor watches: ${names.map((n, i) => `${i}=${n}`).join(', ')}`));
+        } else if (type === 0x08) {
+            // INTERRUPTS: interrupt module n is trace sender 0xC0 + n
+            const list = [];
+            for (let p = 1, i = 0; i < body[0] && p + 2 <= body.length; i++) {
+                const irq = body[p++], n = body[p++];
+                list.push({ irq, name: Buffer.from(body.slice(p, p + n)).toString('ascii') });
+                p += n;
+            }
+            const changed = JSON.stringify(list) !== JSON.stringify(interrupts);
+            interrupts = list;
+            if (changed) out(c.dim(`--- interrupt modules: ${list.map((x, i) => `${interruptName(i)} (IRQ ${x.irq})`).join(', ')}`));
         } else if (type === 0x07) {
             // HEALTH (reply to QUERY_HEALTH): see docs/design/health.md
             const uptime = (body[3] | (body[4] << 8) | (body[5] << 16) | (body[6] * 0x1000000)) >>> 0;

@@ -24,6 +24,7 @@
 #include "fa_common.hpp"
 #include "fa_freertos.hpp"
 #include "fa_health.hpp"
+#include "fa_interrupt.hpp"
 
 namespace Fa {
 
@@ -159,6 +160,22 @@ private:
                 on_fault(static_cast<uint8_t>(i), fault, detail::ticks_to_ms(elapsed));
             }
         }
+        // An interrupt storm or an unexpected interrupt, recorded by the interrupt itself (it already traced it)
+        auto& irq = detail::interrupt_fault;
+        if (irq.pending.load(std::memory_order_acquire) && !interrupt_fault_taken_) {
+            interrupt_fault_taken_ = true;
+            healthy = false;
+            if (!health_record.valid()) {
+                health_record.store(irq.module, static_cast<HealthFault>(irq.fault), irq.value);
+            }
+            if (static_cast<HealthFault>(irq.fault) == HealthFault::Unexpected) {
+                // the unexpected-interrupt handler cannot trace (any priority): traced here, from the task
+                Ctx::trace_raw(TraceKind::HealthFault, irq.module, health_fault_id(HealthFault::Unexpected, irq.value, false));
+            }
+            Config::on_fault(irq.module, static_cast<HealthFault>(irq.fault), irq.value);
+        } else if (interrupt_fault_taken_) {
+            healthy = false;
+        }
         if (!healthy) {
             failed_ = true;                  // sticky: a recovered system still gets its reset
         }
@@ -179,6 +196,7 @@ private:
 
     static inline bool started_ = false;
     static inline bool failed_ = false;
+    static inline bool interrupt_fault_taken_ = false;
     static inline ResetCause reset_cause_ = ResetCause::Unknown;
     static inline std::array<ProgressWatch, count> watch_{};
     static inline std::array<HealthFault, count> status_{};
