@@ -125,6 +125,31 @@ export function describeHsmModel(file: string, jsonText: string): AppModelInfo |
     }
 }
 
+// The application-wide hardware contract: the board against every module's requirements at once
+// (owners: the namespaces of the modules' HwRequirements, e.g. Timebomb, ButtonPoller)
+export function generateAppHwContractString(appName: string, owners: string[]): string {
+    const upper = appName.toUpperCase();
+    let out = `// ==========================================================================\n`;
+    out += `// AUTO-GENERATED APPLICATION HARDWARE CONTRACT - DO NOT HAND-EDIT (rewritten on every export)\n`;
+    out += `// Application: ${appName}. The board must provide what every module requires:\n`;
+    owners.forEach(o => { out += `//   ${o}: ${hwRequirementsFile(o.toLowerCase())}\n`; });
+    out += `// ==========================================================================\n\n`;
+    out += `#pragma once\n`;
+    out += `#ifndef ${upper}_APP_HW_CONTRACT_HPP\n`;
+    out += `#define ${upper}_APP_HW_CONTRACT_HPP\n\n`;
+    owners.forEach(o => { out += `#include "${o.toLowerCase()}_hw_contract.hpp"\n`; });
+    out += `\nnamespace App {\n\n`;
+    out += `template <typename Board>\n`;
+    out += `struct HwContract {\n`;
+    out += `    static constexpr bool verify() {\n`;
+    out += `        return true${owners.map(o => `\n            && ::${o}::HwContract<Board>::verify()`).join('')};\n`;
+    out += `    }\n`;
+    out += `};\n\n`;
+    out += `} // namespace App\n\n`;
+    out += `#endif // ${upper}_APP_HW_CONTRACT_HPP\n`;
+    return out;
+}
+
 // ==========================================================================
 // APPLICATION CHECKS (docs/design/app-diagram.md, section 3): what the compiler cannot check, or only with
 // unreadable template errors, reported on the diagram and in VS Code's Problems panel.
@@ -774,13 +799,64 @@ function parseHwRequirementsHeader(fileContent: string): BspMethodSignature[] {
 export const hwRequirementsFile = (lowerName: string) => `${lowerName}_hw_requirements.hpp`;
 export const legacyHwRequirementsFile = (lowerName: string) => `${lowerName}_bsp_policy.hpp`;
 
-export function generateCppHwRequirementsStub(machineName: string): string {
+// Interrupt numbers a module requires: the members of 'struct Irq { static const int name; ... };'
+// (the board defines them as CMSIS IRQn_Type constants: struct Irq { static constexpr IRQn_Type name = ...; })
+export function parseIrqRequirements(fileContent: string): string[] {
+    const code = fileContent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    const block = /struct\s+Irq\s*\{([^}]*)\}/.exec(code);
+    if (!block) return [];
+    const names: string[] = [];
+    for (const m of (block[1] ?? '').matchAll(/static\s+[\w\s:]*?\b([A-Za-z_]\w*)\s*(?:=[^;]*)?;/g)) {
+        if (m[1]) names.push(m[1]);
+    }
+    return names;
+}
+
+// What a module needs from the board: driver functions and interrupt numbers
+export interface ModuleRequirements { owner: string; functions: { name: string; signature: string }[]; irqs: string[]; }
+
+export function moduleRequirements(owner: string, content: string): ModuleRequirements {
+    return {
+        owner,
+        functions: parseHwRequirementsHeader(content).map(m => ({
+            name: m.name,
+            signature: `static ${m.returnType} ${m.name}(${m.argTypes.join(', ')})`.replace(/\s+/g, ' '),
+        })),
+        irqs: parseIrqRequirements(content),
+    };
+}
+
+// Requirements one board cannot satisfy at once: one function with two signatures, one interrupt for two modules
+export function findRequirementConflicts(all: ModuleRequirements[]): string[] {
+    const conflicts: string[] = [];
+    const functions = new Map<string, { signature: string; owner: string }[]>();
+    const irqs = new Map<string, string[]>();
+    for (const m of all) {
+        for (const f of m.functions) functions.set(f.name, [...(functions.get(f.name) || []), { signature: f.signature, owner: m.owner }]);
+        for (const i of m.irqs) irqs.set(i, [...(irqs.get(i) || []), m.owner]);
+    }
+    for (const [name, uses] of functions) {
+        const signatures = [...new Set(uses.map(u => u.signature))];
+        if (signatures.length > 1) {
+            conflicts.push(`Board function ${name} is required with different signatures: ` +
+                           uses.map(u => `${u.owner}: ${u.signature}`).join('; '));
+        }
+    }
+    for (const [name, owners] of irqs) {
+        if (owners.length > 1) conflicts.push(`Interrupt Irq::${name} is required by ${owners.join(' and ')}: one interrupt per module`);
+    }
+    return conflicts;
+}
+
+export function generateCppHwRequirementsStub(machineName: string, kind: 'actor' | 'periodic' | 'interrupt' | 'service' = 'actor'): string {
     const lower = machineName.toLowerCase();
     let out = `// ==========================================================================\n`;
-    out += `// HARDWARE REQUIREMENTS - ${machineName} actor\n`;
+    const what = kind === 'actor' ? 'actor' : kind === 'periodic' ? 'periodic module' : kind === 'interrupt' ? 'interrupt module' : 'service';
+    out += `// HARDWARE REQUIREMENTS - ${machineName} ${what}\n`;
     out += `// Created once by FreeActors; this file is yours to edit.\n`;
     out += `//\n`;
-    out += `// Declare here the static driver functions the ${machineName} actor calls as Hw::name(...).\n`;
+    out += `// Declare here the static driver functions the ${machineName} ${what} calls as Hw::name(...)` +
+           (kind === 'interrupt' ? `,\n// and in struct Irq the interrupt it handles (used as Hw::Irq::name).\n` : `.\n`);
     out += `// This file only lists requirements - do not implement them here:\n`;
     out += `//   - your board file implements them (e.g. struct MyBoard { static void set_led(bool on) {...} };)\n`;
     out += `//     and the application selects the board once: AppTraits::Platform = MyBoard\n`;
@@ -794,8 +870,13 @@ export function generateCppHwRequirementsStub(machineName: string): string {
 
     out += `namespace ${machineName} {\n\n`;
     out += `struct HwRequirements {\n`;
-    out += `    // static void set_led(bool on);\n`;
-    out += `    // static uint16_t read_adc(uint8_t channel);\n`;
+    if (kind === 'interrupt') {
+        out += `    // struct Irq { static const int button; };   // the board: struct Irq { static constexpr IRQn_Type button = EXTI15_10_IRQn; };\n`;
+        out += `    // static bool button_ack();                  // acknowledge the interrupt (clear its flag); true = it was ours\n`;
+    } else {
+        out += `    // static void set_led(bool on);\n`;
+        out += `    // static uint16_t read_adc(uint8_t channel);\n`;
+    }
     out += `};\n\n`;
     out += `} // namespace ${machineName}\n`;
 
@@ -806,9 +887,10 @@ export function generateCpHwContractString(machineName: string, requirementsCont
     const upperMachineName = machineName.toUpperCase();
     const lowerMachineName = machineName.toLowerCase();
     const bspMethods = parseHwRequirementsHeader(requirementsContent);
+    const irqs = parseIrqRequirements(requirementsContent);
 
     let out = `// ==========================================================================\n`;
-    out += `// AUTO-GENERATED HARDWARE POLICY CONTRACT - DO NOT HAND-EDIT\n`;
+    out += `// AUTO-GENERATED HARDWARE CONTRACT - DO NOT HAND-EDIT\n`;
     out += `// Machine: ${machineName}\n`;
     out += `// ==========================================================================\n\n`;
 
@@ -829,15 +911,22 @@ export function generateCpHwContractString(machineName: string, requirementsCont
         const declvalArgs = m.argTypes.map(t => `std::declval<${t}>()`).join(', ');
         out += `    template <typename T> using fn_${m.name}_${idx} = decltype(T::${m.name}(${declvalArgs}));\n`;
     });
+    irqs.forEach(name => {
+        out += `    template <typename T> using irq_${name} = decltype(static_cast<int>(T::Irq::${name}));\n`;
+    });
 
     out += `\npublic:\n`;
     out += `    static constexpr bool verify() {\n`;
-    if (bspMethods.length === 0) {
+    if (bspMethods.length === 0 && irqs.length === 0) {
         out += `        // No static driver prototypes declared in ${hwRequirementsFile(lowerMachineName)}\n`;
     } else {
         bspMethods.forEach((m, idx) => {
             out += `        static_assert(Fa::is_detected_v<fn_${m.name}_${idx}, HwPolicy>,\n`;
-            out += `            "[${machineName} Actor Contract Violation] HwPolicy must define: static ${m.returnType} ${m.name}(${m.rawArgs})");\n`;
+            out += `            "[${machineName} Contract Violation] the board must define: static ${m.returnType} ${m.name}(${m.rawArgs})");\n`;
+        });
+        irqs.forEach(name => {
+            out += `        static_assert(Fa::is_detected_v<irq_${name}, HwPolicy>,\n`;
+            out += `            "[${machineName} Contract Violation] the board must define its interrupt: struct Irq { static constexpr IRQn_Type ${name} = ...; }");\n`;
         });
     }
     out += `        return true;\n`;
@@ -2051,6 +2140,12 @@ export function generateCppTestBspString(machineName: string, requirementsConten
             resettable.push(`${m.name}_result = {};`);
         }
     });
+    const irqs = parseIrqRequirements(requirementsContent);
+    if (irqs.length > 0) {
+        out += `\n    struct Irq {   // stand-in interrupt numbers (no NVIC on the host)\n`;
+        irqs.forEach((name, i) => { out += `        static constexpr int ${name} = ${i};\n`; });
+        out += `    };\n`;
+    }
     out += `\n    static void reset() {${resettable.length > 0 ? ' ' + resettable.join(' ') + ' ' : ''}}\n`;
     out += `};\n\n`;
     out += `} // namespace ${machineName}\n\n`;

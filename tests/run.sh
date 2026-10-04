@@ -110,6 +110,28 @@ for model in timebomb init_action transition_action; do
     fi
 done
 
+# Hardware requirements of periodic and interrupt modules (functions and struct Irq), the application-wide
+# contract, conflicts between modules; a board missing an interrupt or a function fails with a named message
+req="$OUT/requirements"
+if node "$ROOT/tests/requirements/gen_requirements.js" "$req"; then
+    OUT_SAVED="$OUT"; OUT="$req"
+    build_and_run requirements_test "$ROOT/tests/requirements/requirements_test.cpp"
+    OUT="$OUT_SAVED"
+    for case in "MISSING_IRQ|CommandRxIsr Contract Violation\] the board must define its interrupt: struct Irq { static constexpr IRQn_Type command_rx_dma" \
+                "MISSING_ACK|CommandRxIsr Contract Violation\] the board must define: static size_t command_rx_uart_ack()"; do
+        flag="${case%%|*}"; expected="${case#*|}"
+        if g++ -std=c++17 -fsyntax-only -D"$flag" -I"$req" -I"$ROOT/freeactors_lib" "$ROOT/tests/requirements/requirements_test.cpp" 2> "$req/$flag.log"; then
+            echo "FAIL  requirements: a board with $flag compiled"; status=1
+        elif grep -q "$expected" "$req/$flag.log"; then
+            echo "PASS  requirements: a board with $flag fails with the module's contract message"
+        else
+            echo "FAIL  requirements: $flag failed without the expected message (log: tests/build/requirements/$flag.log)"; status=1
+        fi
+    done
+else
+    status=1
+fi
+
 # An actor written before the API block: the patcher adds it once, and the actor still compiles and
 # passes the generated actor test (tests/patcher_test.js); FA_IDE (clangd's view) must parse as well
 patched="$OUT/patched_actor"

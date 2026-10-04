@@ -140,7 +140,7 @@ namespace Fa::test {
     //   using Isr = ButtonIsr<TestBsp, Fa::test::IsrRecordingContext>;
     //   TestBsp::button_ack_result = true;
     //   Isr::handle();                                   // fire it
-    //   CHECK(Fa::test::log() == steps{"button_ack()", "isr post ButtonPressed"});
+    //   CHECK(Fa::test::log() == steps{"button_ack", "isr post ButtonPressed"});
     struct IsrRecordingContext {
         template <typename Evt>
         static void post(Evt const & /*evt*/) {
