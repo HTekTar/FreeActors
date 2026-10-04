@@ -61,6 +61,16 @@ namespace detail {
 #endif
 }
 
+#ifdef FA_VECTOR_TABLE
+namespace detail {
+    // NVIC registers (ARMv7-M architecture: the same address on every vendor's Cortex-M3/M4/M7)
+    inline volatile uint32_t* nvic_iser() { return reinterpret_cast<volatile uint32_t*>(0xE000E100u); }
+    inline volatile uint32_t* nvic_icer() { return reinterpret_cast<volatile uint32_t*>(0xE000E180u); }
+    inline volatile uint32_t* nvic_icpr() { return reinterpret_cast<volatile uint32_t*>(0xE000E280u); }
+    inline volatile uint8_t*  nvic_ipr()  { return reinterpret_cast<volatile uint8_t*>(0xE000E400u); }
+}
+#endif
+
 // Base of every interrupt module (CRTP). I provides IRQNum, PRI and static void handler().
 template <typename I>
 struct InterruptInterface {
@@ -72,12 +82,31 @@ struct InterruptInterface {
     }
 
     // Called once by Fa::Application::init, after every module exists: sets the priority (PRI), drops a
-    // request that came before the handler was installed, and enables the interrupt
-    static void init();
+    // request that came before the handler was installed, and enables the interrupt.
+    // On the host (tests, POSIX port) there is no NVIC: init, enable and disable do nothing.
+    static void init() {
+#ifdef FA_VECTOR_TABLE
+        detail::nvic_ipr()[irq()] = static_cast<uint8_t>(I::PRI << (8 - detail::nvic_priority_bits));
+        detail::nvic_icpr()[irq() >> 5] = 1u << (irq() & 31);
+        enable();
+#endif
+    }
 
     // At run time, e.g. to mask the interrupt in some state or while reconfiguring its peripheral
-    static void enable();
-    static void disable();
+    static void enable() {
+#ifdef FA_VECTOR_TABLE
+        detail::nvic_iser()[irq() >> 5] = 1u << (irq() & 31);
+#endif
+    }
+
+    static void disable() {
+#ifdef FA_VECTOR_TABLE
+        detail::nvic_icer()[irq() >> 5] = 1u << (irq() & 31);
+        __asm volatile("dsb\n isb" ::: "memory");   // the interrupt cannot fire once this returns
+#endif
+    }
+
+    static constexpr unsigned irq() { return static_cast<unsigned>(I::IRQNum); }
 
     // Compile-time checks, evaluated when the application installs the module
     static constexpr bool check() {
@@ -240,9 +269,6 @@ namespace detail {
     struct has_initial_stack<Hw, std::void_t<decltype(Hw::initial_stack)>> : std::true_type {};
 
     inline volatile uint32_t& vtor() { return *reinterpret_cast<volatile uint32_t*>(0xE000ED08u); }
-    inline volatile uint8_t* nvic_ipr() { return reinterpret_cast<volatile uint8_t*>(0xE000E400u); }
-    inline volatile uint32_t* nvic_iser() { return reinterpret_cast<volatile uint32_t*>(0xE000E100u); }
-    inline volatile uint32_t* nvic_icpr() { return reinterpret_cast<volatile uint32_t*>(0xE000E280u); }
 
     // Points VTOR at the table (interrupts must not fire meanwhile: called before any is enabled)
     inline void install_vector_table(VectorEntry const* table) {
@@ -250,36 +276,7 @@ namespace detail {
         vtor() = reinterpret_cast<uint32_t>(table);
         __asm volatile("dsb\n isb" ::: "memory");
     }
-
-    inline volatile uint32_t* nvic_icer() { return reinterpret_cast<volatile uint32_t*>(0xE000E180u); }
 }
-
-template <typename I>
-void InterruptInterface<I>::init() {
-    constexpr unsigned irq = static_cast<unsigned>(I::IRQNum);
-    detail::nvic_ipr()[irq] = static_cast<uint8_t>(I::PRI << (8 - detail::nvic_priority_bits));
-    detail::nvic_icpr()[irq >> 5] = 1u << (irq & 31);
-    enable();
-}
-
-template <typename I>
-void InterruptInterface<I>::enable() {
-    constexpr unsigned irq = static_cast<unsigned>(I::IRQNum);
-    detail::nvic_iser()[irq >> 5] = 1u << (irq & 31);
-}
-
-template <typename I>
-void InterruptInterface<I>::disable() {
-    constexpr unsigned irq = static_cast<unsigned>(I::IRQNum);
-    detail::nvic_icer()[irq >> 5] = 1u << (irq & 31);
-    __asm volatile("dsb\n isb" ::: "memory");   // the interrupt cannot fire once this returns
-}
-
-#else // host: no NVIC; tests fire interrupts by calling handle()
-
-template <typename I> void InterruptInterface<I>::init() {}
-template <typename I> void InterruptInterface<I>::enable() {}
-template <typename I> void InterruptInterface<I>::disable() {}
 
 #endif // FA_VECTOR_TABLE
 
