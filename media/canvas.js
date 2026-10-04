@@ -285,13 +285,15 @@ const FaCanvas = (() => {
             rubberBand.setAttribute('d', `M ${edgeX1} ${edgeY1} Q ${cx} ${cy} ${mouse.x} ${mouse.y}`);
             rubberBand.style.display = 'block';
 
-            let found = null;
+            // The innermost box under the cursor (the smallest of those containing it): the one a click picks
+            let found = null, foundArea = Infinity;
             for (const node of rubber.candidates()) {
                 if (node === srcEl) continue;
                 const r = node.getBoundingClientRect();
-                if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+                if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom &&
+                    r.width * r.height < foundArea) {
                     found = node;
-                    break;
+                    foundArea = r.width * r.height;
                 }
             }
             if (found) {
