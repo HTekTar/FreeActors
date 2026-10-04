@@ -2079,6 +2079,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
         
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'style.css'));
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'main.js'));
+        const canvasUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'canvas.js'));
         const htmlUri = vscode.Uri.joinPath(mediaUri, 'webview.html');
 
         const htmlRaw = await vscode.workspace.fs.readFile(htmlUri);
@@ -2086,6 +2087,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
 
         return htmlText
             .replace('{{styleUri}}', styleUri.toString())
+            .replace('{{canvasUri}}', canvasUri.toString())
             .replace('{{scriptUri}}', scriptUri.toString());
     }
 }

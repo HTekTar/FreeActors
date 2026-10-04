@@ -30,39 +30,14 @@ let linkTargetStateId = null;
 let activeDelSourceId = null;
 let activeDelTransIndex = null;
 
-let scale = 1.0; let panX = 0; let panY = 0;
-let isPanning = false; let startPanX = 0; let startPanY = 0;
-
-function applyTransformMatrix() {
-    viewport.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-    canvasContainer.style.backgroundSize = `${20 * scale}px ${20 * scale}px`;
-    canvasContainer.style.backgroundPosition = `${panX}px ${panY}px`;
-    zoomReadout.innerText = `Zoom: ${Math.round(scale * 100)}%`;
-}
-
-canvasContainer.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const zoomIntensity = 0.05;
-    const rect = canvasContainer.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left; const mouseY = e.clientY - rect.top;
-    const viewportMouseX = (mouseX - panX) / scale; const viewportMouseY = (mouseY - panY) / scale;
-    const delta = e.deltaY < 0 ? 1 : -1;
-    const nextScale = Math.min(Math.max(0.3, scale + delta * zoomIntensity), 2.5);
-    panX = mouseX - viewportMouseX * nextScale; panY = mouseY - viewportMouseY * nextScale;
-    scale = nextScale;
-    applyTransformMatrix();
+// The shared canvas (media/canvas.js): view, pan and zoom, links, dragging, the linking rubber band
+const canvas = FaCanvas.create({
+    container: canvasContainer, viewport, linksGroup, rubberBand: rubberBandPath, zoomReadout,
+    panBlocked: () => isLinkingMode,
+    onCommit: () => commitHsmChange(),
 });
-
-canvasContainer.addEventListener('mousedown', (e) => {
-    if (e.target !== canvasContainer && e.target.id !== 'workspace-viewport' && e.target.id !== 'svg-layer') return;
-    if (isLinkingMode) return;
-    isPanning = true; startPanX = e.clientX - panX; startPanY = e.clientY - panY;
-});
-window.addEventListener('mousemove', (e) => {
-    if (!isPanning) return; panX = e.clientX - startPanX; panY = e.clientY - startPanY; applyTransformMatrix();
-});
-window.addEventListener('mouseup', () => { isPanning = false; });
-document.getElementById('reset-view-btn').addEventListener('click', () => { scale = 1.0; panX = 0; panY = 0; applyTransformMatrix(); });
+function applyTransformMatrix() { canvas.applyTransform(); }
+document.getElementById('reset-view-btn').addEventListener('click', () => canvas.resetView());
 
 window.addEventListener('message', event => {
     const message = event.data;
@@ -102,8 +77,7 @@ canvasContainer.addEventListener('click', (e) => {
     e.stopPropagation();
     linkTargetStateId = targetId;
     
-    rubberBandPath.style.display = 'none';
-    window.removeEventListener('mousemove', onRubberBandMove);
+    canvas.hideRubberBand();
     
     const eventInput = document.getElementById('input-trans-event');
     const actionInput = document.getElementById('input-trans-action');
@@ -428,7 +402,7 @@ function renderHsmWorkspace() {
                 linkSourceStateId = state.id;
                 linkingHint.style.display = 'inline';
                 canvasContainer.style.cursor = 'crosshair';
-                window.addEventListener('mousemove', onRubberBandMove);
+                startStateLinking();
             });
             node.appendChild(initDot);
         }
@@ -540,78 +514,20 @@ document.getElementById('menu-add-transition').addEventListener('click', () => {
     isLinkingFromInitDot = false;
     linkSourceStateId = activeMenuStateId;
     linkingHint.style.display = 'inline'; canvasContainer.style.cursor = 'crosshair';
-    window.addEventListener('mousemove', onRubberBandMove);
+    startStateLinking();
 });
 
-let lastHoveredNodeEl = null;
+// The rubber band starts at the state's edge, or at its initial pseudo-state dot
+function initDotPoint(srcEl) {
+    return { x: srcEl.offsetLeft + srcEl.offsetWidth - 40, y: srcEl.offsetTop + 16 };
+}
 
-function onRubberBandMove(e) {
-    if (!isLinkingMode) return;
-    const srcEl = document.getElementById('node-' + linkSourceStateId);
-    if (!srcEl) return;
-    
-    const rect = canvasContainer.getBoundingClientRect();
-    const mouseX = (e.clientX - rect.left - panX) / scale;
-    const mouseY = (e.clientY - rect.top - panY) / scale;
-    
-    let edgeX1, edgeY1;
-    
-    if (isLinkingFromInitDot) {
-        edgeX1 = srcEl.offsetLeft + srcEl.offsetWidth - 40;
-        edgeY1 = srcEl.offsetTop + 16;
-    } else {
-        const w = srcEl.offsetWidth / 2;
-        const h = srcEl.offsetHeight / 2;
-        const srcCenterX = srcEl.offsetLeft + w;
-        const srcCenterY = srcEl.offsetTop + h;
-        const dx = mouseX - srcCenterX;
-        const dy = mouseY - srcCenterY;
-        edgeX1 = srcCenterX; edgeY1 = srcCenterY;
-        if (dx !== 0 || dy !== 0) {
-            const t = Math.min(Math.abs(w / dx), Math.abs(h / dy));
-            edgeX1 = srcCenterX + dx * t;
-            edgeY1 = srcCenterY + dy * t;
-        }
-    }
-    
-    const mx = (edgeX1 + mouseX) / 2;
-    const my = (edgeY1 + mouseY) / 2;
-    const dx_tot = mouseX - edgeX1;
-    const dy_tot = mouseY - edgeY1;
-    const dist = Math.sqrt(dx_tot * dx_tot + dy_tot * dy_tot) || 1;
-    const cx = mx - (dy_tot / dist) * 30;
-    const cy = my + (dx_tot / dist) * 30;
-    
-    rubberBandPath.setAttribute('d', `M ${edgeX1} ${edgeY1} Q ${cx} ${cy} ${mouseX} ${mouseY}`);
-    rubberBandPath.style.display = 'block';
-
-    let foundTargetNode = null;
-    const stateNodes = document.querySelectorAll('.hsm-state-node');
-    
-    for (let node of stateNodes) {
-        if (isLinkingFromInitDot && node.id === 'node-' + linkSourceStateId) continue;
-        if (!isLinkingFromInitDot && node.id === 'node-' + linkSourceStateId) continue;
-        
-        const nodeRect = node.getBoundingClientRect();
-        if (e.clientX >= nodeRect.left && e.clientX <= nodeRect.right &&
-            e.clientY >= nodeRect.top && e.clientY <= nodeRect.bottom) {
-            foundTargetNode = node;
-            break;
-        }
-    }
-
-    if (foundTargetNode) {
-        if (lastHoveredNodeEl !== foundTargetNode) {
-            if (lastHoveredNodeEl) lastHoveredNodeEl.classList.remove('link-target-candidate');
-            foundTargetNode.classList.add('link-target-candidate');
-            lastHoveredNodeEl = foundTargetNode;
-        }
-    } else {
-        if (lastHoveredNodeEl) {
-            lastHoveredNodeEl.classList.remove('link-target-candidate');
-            lastHoveredNodeEl = null;
-        }
-    }
+function startStateLinking() {
+    canvas.startLinking({
+        sourceEl: () => document.getElementById('node-' + linkSourceStateId),
+        start: (srcEl) => (isLinkingFromInitDot ? initDotPoint(srcEl) : null),
+        candidates: () => document.querySelectorAll('.hsm-state-node'),
+    });
 }
 
 function cancelLinkingMode() {
@@ -619,16 +535,9 @@ function cancelLinkingMode() {
     isLinkingFromInitDot = false;
     linkSourceStateId = null;
     linkTargetStateId = null;
-    rubberBandPath.style.display = 'none';
     linkingHint.style.display = 'none';
     canvasContainer.style.cursor = 'default';
-    window.removeEventListener('mousemove', onRubberBandMove);
-    
-    if (lastHoveredNodeEl) {
-        lastHoveredNodeEl.classList.remove('link-target-candidate');
-        lastHoveredNodeEl = null;
-    }
-    document.querySelectorAll('.hsm-state-node').forEach(n => n.classList.remove('link-target-candidate'));
+    canvas.stopLinking(document.querySelectorAll('.hsm-state-node'));
 }
 
 document.getElementById('btn-cancel-trans').addEventListener('click', () => { transitionModal.style.display = 'none'; cancelLinkingMode(); });
@@ -664,202 +573,40 @@ document.getElementById('btn-submit-trans').addEventListener('click', () => {
 });
 
 function updateAllTransitions() {
-    linksGroup.innerHTML = ''; const linkCounts = {};
+    linksGroup.innerHTML = '';
+    const links = [];
     currentHsmData.states.forEach(state => {
-        if (state.transitions) {
-            state.transitions.forEach((trans, transIdx) => {
-                const idArray = [state.id, trans.target].sort();
-                const pairKey = `${idArray[0]}<->${idArray[1]}`;
-                if(!linkCounts[pairKey]) linkCounts[pairKey] = 0;
-                linkCounts[pairKey]++; const index = linkCounts[pairKey];
-                
-                let baseCurve = 35; if (index > 1) baseCurve = 35 + (Math.floor(index / 2) * 30);
-                let finalCurveness = state.id === idArray[0] ? baseCurve : -baseCurve;
-                if (index > 2 && index % 2 === 0) finalCurveness = -finalCurveness;
-                
-                const isInitialLink = Boolean(trans.event && trans.event.startsWith('Init_sig'));
-                drawTransitionLink(state.id, trans.target, trans.event || '', trans.guard, finalCurveness, transIdx, isInitialLink, trans);
-            });
-        }
+        (state.transitions || []).forEach((trans, transIdx) => links.push({ from: state.id, to: trans.target, state, trans, transIdx }));
     });
-}
-
-function drawTransitionLink(sourceId, targetId, eventName, guardName, curveness, transIdx, isInitialLink, transData) {
-    const srcEl = document.getElementById('node-' + sourceId); const dstEl = document.getElementById('node-' + targetId);
-    if (!srcEl || !dstEl) return;
-    
-    let srcCenterX, srcCenterY;
-    if (isInitialLink) {
-        srcCenterX = srcEl.offsetLeft + srcEl.offsetWidth - 40;
-        srcCenterY = srcEl.offsetTop + 16;
-    } else {
-        srcCenterX = srcEl.offsetLeft + (srcEl.offsetWidth / 2);
-        srcCenterY = srcEl.offsetTop + (srcEl.offsetHeight / 2);
-    }
-    
-    const dstCenterX = dstEl.offsetLeft + (dstEl.offsetWidth / 2); const dstCenterY = dstEl.offsetTop + (dstEl.offsetHeight / 2);
-    const mx = (srcCenterX + dstCenterX) / 2; const my = (srcCenterY + dstCenterY) / 2;
-    const dx = dstCenterX - srcCenterX; const dy = dstCenterY - srcCenterY; const distance = Math.sqrt(dx * dx + dy * dy) || 1;
-    
-    let cx = mx - (dy / distance) * curveness; 
-    let cy = my + (dx / distance) * curveness;
-    
-    if (transData.ctrlX !== undefined && transData.ctrlY !== undefined) {
-        cx = transData.ctrlX;
-        cy = transData.ctrlY;
-    }
-
-    function getRectangleIntersection(rectEl, fromX, fromY, toX, toY) {
-        const w = rectEl.offsetWidth / 2; const h = rectEl.offsetHeight / 2;
-        const rectCenterX = rectEl.offsetLeft + w; const rectCenterY = rectEl.offsetTop + h;
-        const dx = toX - fromX; const dy = toY - fromY;
-        if (dx === 0 && dy === 0) return { x: rectCenterX, y: rectCenterY };
-        const absX = Math.abs(w / dx); const absY = Math.abs(h / dy);
-        return { x: rectCenterX + dx * Math.min(absX, absY), y: rectCenterY + dy * Math.min(absX, absY) };
-    }
-
-    const edgeX1 = isInitialLink ? srcCenterX : getRectangleIntersection(srcEl, srcCenterX, srcCenterY, cx, cy).x; 
-    const edgeY1 = isInitialLink ? srcCenterY : getRectangleIntersection(srcEl, srcCenterX, srcCenterY, cx, cy).y;
-    const edgeX2 = getRectangleIntersection(dstEl, dstCenterX, dstCenterY, cx, cy).x; const edgeY2 = getRectangleIntersection(dstEl, dstCenterX, dstCenterY, cx, cy).y;
-
-    const apexX = 0.25 * edgeX1 + 0.5 * cx + 0.25 * edgeX2;
-    const apexY = 0.25 * edgeY1 + 0.5 * cy + 0.25 * edgeY2;
-
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', `M ${edgeX1} ${edgeY1} Q ${cx} ${cy} ${edgeX2} ${edgeY2}`);
-    path.setAttribute('stroke', isInitialLink ? 'var(--vscode-charts-blue, #007acc)' : 'var(--vscode-button-background)');
-    path.setAttribute('stroke-width', '2'); path.setAttribute('fill', 'none'); path.setAttribute('marker-end', 'url(#arrow)');
-    path.className.baseVal = "transition-clickable-path";
-    
-    path.addEventListener('click', (e) => {
-        e.stopPropagation(); activeDelSourceId = sourceId; activeDelTransIndex = transIdx;
-        document.getElementById('delete-trans-text').innerText = `Remove transition triggered by: ${eventName}?`;
-        deleteTransModal.style.display = 'flex';
+    const curves = canvas.fanOut(links);
+    links.forEach(({ state, trans, transIdx }, i) => {
+        const srcEl = document.getElementById('node-' + state.id);
+        const isInitialLink = Boolean(trans.event && trans.event.startsWith('Init_sig'));
+        const eventName = trans.event || '';
+        canvas.drawLink({
+            srcEl, dstEl: document.getElementById('node-' + trans.target),
+            start: isInitialLink && srcEl ? initDotPoint(srcEl) : null,
+            curveness: curves[i], data: trans,
+            label: trans.guard ? `${eventName} [${trans.guard}]` : eventName,
+            stroke: isInitialLink ? 'var(--vscode-charts-blue, #007acc)' : 'var(--vscode-button-background)',
+            onClick: () => {
+                activeDelSourceId = state.id; activeDelTransIndex = transIdx;
+                document.getElementById('delete-trans-text').innerText = `Remove transition triggered by: ${eventName}?`;
+                deleteTransModal.style.display = 'flex';
+            },
+        });
     });
-    linksGroup.appendChild(path);
-
-    const handleCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    handleCircle.setAttribute('cx', apexX);
-    handleCircle.setAttribute('cy', apexY);
-    handleCircle.setAttribute('r', '6');
-    handleCircle.setAttribute('fill', 'var(--vscode-textLink-foreground, #007acc)');
-    handleCircle.setAttribute('style', 'cursor: move; pointer-events: auto; opacity: 0; transition: opacity 0.2s;');
-    
-    path.addEventListener('mouseenter', () => handleCircle.style.opacity = '1');
-    handleCircle.addEventListener('mouseenter', () => handleCircle.style.opacity = '1');
-    path.addEventListener('mouseleave', () => handleCircle.style.opacity = '0');
-    handleCircle.addEventListener('mouseleave', () => handleCircle.style.opacity = '0');
-
-    handleCircle.addEventListener('mousedown', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        let startMouseX = e.clientX;
-        let startMouseY = e.clientY;
-        const initCtrlX = cx;
-        const initCtrlY = cy;
-
-        function onHandleMove(moveEvent) {
-            const deltaX = (moveEvent.clientX - startMouseX) / scale;
-            const deltaY = (moveEvent.clientY - startMouseY) / scale;
-            
-            transData.ctrlX = initCtrlX + deltaX;
-            transData.ctrlY = initCtrlY + deltaY;
-            
-            const liveX1 = isInitialLink ? srcCenterX : getRectangleIntersection(srcEl, srcCenterX, srcCenterY, transData.ctrlX, transData.ctrlY).x;
-            const liveY1 = isInitialLink ? srcCenterY : getRectangleIntersection(srcEl, srcCenterX, srcCenterY, transData.ctrlX, transData.ctrlY).y;
-            const liveX2 = getRectangleIntersection(dstEl, dstCenterX, dstCenterY, transData.ctrlX, transData.ctrlY).x;
-            const liveY2 = getRectangleIntersection(dstEl, dstCenterX, dstCenterY, transData.ctrlX, transData.ctrlY).y;
-            
-            const liveApexX = 0.25 * liveX1 + 0.5 * transData.ctrlX + 0.25 * liveX2;
-            const liveApexY = 0.25 * liveY1 + 0.5 * transData.ctrlY + 0.25 * liveY2;
-
-            handleCircle.setAttribute('cx', liveApexX);
-            handleCircle.setAttribute('cy', liveApexY);
-            text.setAttribute('x', liveApexX + 8);
-            text.setAttribute('y', liveApexY - 8);
-            
-            path.setAttribute('d', `M ${liveX1} ${liveY1} Q ${transData.ctrlX} ${transData.ctrlY} ${liveX2} ${liveY2}`);
-        }
-
-        function onHandleUp() {
-            window.removeEventListener('mousemove', onHandleMove);
-            window.removeEventListener('mouseup', onHandleUp);
-            commitHsmChange();
-        }
-
-        window.addEventListener('mousemove', onHandleMove);
-        window.addEventListener('mouseup', onHandleUp);
-    });
-    linksGroup.appendChild(handleCircle);
-
-    const labelText = guardName ? `${eventName} [${guardName}]` : eventName;
-    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    text.setAttribute('x', apexX + 8); text.setAttribute('y', apexY - 8); text.setAttribute('class', 'transition-label'); text.textContent = labelText;
-    linksGroup.appendChild(text);
-}
-
-function setupRaggedClampPosition(mainState, deltaX, deltaY, index, el, allDescendants) {
-    let nextMainX = Math.max(0, mainState.x + deltaX);
-    let nextMainY = Math.max(0, mainState.y + deltaY);
-    const allowedDeltaX = nextMainX - mainState.x;
-    const allowedDeltaY = nextMainY - mainState.y;
-    
-    mainState.x = nextMainX;
-    mainState.y = nextMainY;
-    el.style.left = mainState.x + "px"; 
-    el.style.top = mainState.y + "px";
-    
-    allDescendants.forEach(descendant => {
-        descendant.x += allowedDeltaX;
-        descendant.y += allowedDeltaY;
-        const childEl = document.getElementById('node-' + descendant.id);
-        if (childEl) { 
-            childEl.style.left = descendant.x + "px"; 
-            childEl.style.top = descendant.y + "px"; 
-        }
-    });
-    updateAllTransitions();
 }
 
 function setupDragAndResize(el, index) {
-    const handle = el.querySelector('.resize-handle');
-    let initialWidth = 0, initialHeight = 0, initialX = 0, initialY = 0;
-
-    handle.addEventListener('mousedown', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        initialWidth = el.offsetWidth; initialHeight = el.offsetHeight; initialX = e.clientX; initialY = e.clientY;
-        function onResizeMove(moveEvent) {
-            const deltaW = (moveEvent.clientX - initialX) / scale; const deltaH = (moveEvent.clientY - initialY) / scale;
-            const nextWidth = Math.max(140, initialWidth + deltaW); const nextHeight = Math.max(80, initialHeight + deltaH);
-            el.style.width = nextWidth + 'px'; el.style.height = nextHeight + 'px';
-            currentHsmData.states[index].width = nextWidth; currentHsmData.states[index].height = nextHeight; updateAllTransitions();
-        }
-        function onResizeUp() { window.removeEventListener('mousemove', onResizeMove); window.removeEventListener('mouseup', onResizeUp); commitHsmChange(); }
-        window.addEventListener('mousemove', onResizeMove); window.addEventListener('mouseup', onResizeUp);
+    const state = currentHsmData.states[index];
+    canvas.attachDragResize({
+        el, item: state, minWidth: 140, minHeight: 80,
+        descendants: () => canvas.descendantsOf(currentHsmData.states, state.id),
+        elOf: (s) => document.getElementById('node-' + s.id),
+        skip: (target) => target.classList.contains('initial-pseudostate-dot') || isLinkingMode,
+        onMove: updateAllTransitions,
     });
-
-    el.onmousedown = function(e) {
-        if(e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.classList.contains('resize-handle') || e.target.classList.contains('initial-pseudostate-dot') || isLinkingMode) return;
-        e.preventDefault(); e.stopPropagation(); initialX = e.clientX; initialY = e.clientY;
-        const mainState = currentHsmData.states[index];
-        
-        function getAllDescendants(parentId) {
-            let descendants = []; const immediateChildren = currentHsmData.states.filter(s => s.parent === parentId);
-            descendants = descendants.concat(immediateChildren);
-            immediateChildren.forEach(child => { descendants = descendants.concat(getAllDescendants(child.id)); });
-            return descendants;
-        }
-        const allDescendants = getAllDescendants(mainState.id);
-
-        function elementDrag(moveEvent) {
-            moveEvent.preventDefault();
-            const deltaX = (moveEvent.clientX - initialX) / scale;
-            const deltaY = (moveEvent.clientY - initialY) / scale;
-            initialX = moveEvent.clientX; initialY = moveEvent.clientY;
-            setupRaggedClampPosition(mainState, deltaX, deltaY, index, el, allDescendants);
-        }
-        function closeDragElement() { window.removeEventListener('mousemove', elementDrag); window.removeEventListener('mouseup', closeDragElement); commitHsmChange(); }
-        window.addEventListener('mousemove', elementDrag); window.addEventListener('mouseup', closeDragElement);
-    };
 }
 
 document.getElementById('menu-add-event').addEventListener('click', () => {
