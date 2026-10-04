@@ -47,6 +47,12 @@ check('user code is untouched', once.includes('this->cancel(Tick{}); }   // user
 const twice = ext.patchExistingActorHeader(once, jsonText).updatedContent;
 check('patching again changes nothing', twice === once);
 
+// The default task settings of an actor from before 0.0.9 are wrapped in #ifndef FA_APP_MANAGED, once
+const oldTraits = once.split('#ifndef FA_APP_MANAGED\n').join('').split('#endif // FA_APP_MANAGED\n').join('');
+const wrapped = ext.patchExistingActorHeader(oldTraits, jsonText).updatedContent;
+check('an old default traits block is wrapped in #ifndef FA_APP_MANAGED (the application sets the task)',
+      !oldTraits.includes('#ifndef FA_APP_MANAGED') && /#ifndef FA_APP_MANAGED[^\n]*\nnamespace Fa \{[\s\S]*struct ActorTraits<Timebomb::Actor[\s\S]*\} \/\/ namespace Fa\n#endif \/\/ FA_APP_MANAGED/.test(wrapped));
+check('wrapping again changes nothing', ext.patchExistingActorHeader(wrapped, jsonText).updatedContent === wrapped);
 fs.writeFileSync(outPath, once);
 
 // Events: a header from before 0.0.8 (tool-owned banner) is converted once into the user-owned form,

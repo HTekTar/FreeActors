@@ -182,6 +182,11 @@ check('adding a component: an invalid name is refused; an interrupt module is ad
       (r.get('added') or {}).get('x', 0) + (r.get('added') or {}).get('width', 0) <= 80 + 900,      # inside Comms (x 80, width 900)
       json.dumps(r))
 
+r = run('app', app, '''
+document.getElementById('export-app-btn').click();
+report({ sent: window.__edits.map(m => m.type) });''', 'app_export')
+check('Export Application asks the extension to export', r is not None and 'exportApplication' in r.get('sent', []), json.dumps(r))
+
 # Problems on the diagram: an SPSC service with two producers
 broken = json.load(open(app))
 broken['components'].append({'id': 'C_9', 'kind': 'spsc', 'name': 'Samples', 'parent': 'APP', 'item': 'uint16_t', 'size': 32,

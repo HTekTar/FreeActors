@@ -66,6 +66,7 @@ const canvas = FaCanvas.create({
     onCommit: () => commit(),
 });
 document.getElementById('reset-view-btn').addEventListener('click', () => canvas.resetView());
+document.getElementById('export-app-btn').addEventListener('click', () => vscode.postMessage({ type: 'exportApplication' }));
 
 // ---- Model ---------------------------------------------------------------------------------------------
 

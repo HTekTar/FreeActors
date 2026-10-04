@@ -151,6 +151,181 @@ export function generateAppHwContractString(appName: string, owners: string[]): 
 }
 
 // ==========================================================================
+// APPLICATION GENERATION (docs/design/app-diagram.md, section 4): tool-owned files from <app>.app.json
+//   <app>_config.hpp    features (FA_TRACE...) and each component's values from the diagram (AppConfig::<Name>)
+//   <app>_app.hpp       the board, actors and modules, AppTraits, task settings, App::Application
+//   <app>_app.cpp       FreeRTOS hooks and app_start()
+//   <app>_main.cpp      int main() { app_start(); }
+//   <app>_app_hw_contract.hpp  the board against every module's hardware requirements
+// ==========================================================================
+const MODULE_KINDS = ['periodic', 'interrupt', 'spsc', 'mpsc', 'dma'];
+const TASK_KINDS = ['periodic', 'spsc', 'mpsc', 'dma'];      // modules with a task of their own
+
+export const appFileName = (app: any, suffix: string) =>
+    `${String(app.name || 'App').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase()}_${suffix}`;
+// The user-owned file of a periodic module, interrupt module or service (its template App::<Name>)
+export const moduleFileName = (name: string) => `${String(name).toLowerCase()}_module.hpp`;
+
+function appComponents(app: any): any[] {
+    return (Array.isArray(app.components) ? app.components : []).filter((c: any) => !COMPOSITE_KINDS.includes(c.kind));
+}
+
+export function generateAppConfigString(app: any): string {
+    const features = app.features || {};
+    let out = `// ==========================================================================\n`;
+    out += `// AUTO-GENERATED APPLICATION CONFIGURATION - DO NOT HAND-EDIT (from ${appFileName(app, '').slice(0, -1)}.app.json)\n`;
+    out += `// The features and every component's values as set in the application diagram. Module files read their\n`;
+    out += `// values from here (e.g. AppConfig::ButtonPoller::period_ms), so a change in the diagram reaches the code.\n`;
+    out += `// Include this file before any FreeActors header (the features below switch framework code).\n`;
+    out += `// ==========================================================================\n\n`;
+    out += `#pragma once\n#include <cstddef>\n#include <cstdint>\n\n`;
+    const switches: [boolean, string][] = [[features.trace, 'FA_TRACE'], [features.commands, 'FA_TRACE_COMMANDS'],
+                                           [features.health, 'FA_HEALTH'], [features.debug_commands, 'FA_DEBUG_COMMANDS']];
+    out += `// ---- Features ----\n`;
+    switches.forEach(([on, name]) => {
+        out += on ? `#ifndef ${name}\n#define ${name}\n#endif\n` : `// ${name}: off\n`;
+    });
+    out += `\nnamespace AppConfig {\n\n`;
+    for (const c of appComponents(app)) {
+        out += `struct ${c.name} {   // ${c.kind}\n`;
+        if (c.kind === 'actor') {
+            out += `    static constexpr unsigned priority = ${Number(c.priority) || 2};\n`;
+            out += `    static constexpr size_t queue = ${Number(c.queue) || 8};\n`;
+            out += `    static constexpr size_t stack = ${Number(c.stack) || 128};\n`;
+        } else if (c.kind === 'interrupt') {
+            out += `    static constexpr uint32_t pri = ${Number(c.pri) || 0};\n`;
+        } else {
+            if (c.kind === 'periodic') out += `    static constexpr size_t period_ms = ${Number(c.period_ms) || 1};\n`;
+            if (SERVICE_KINDS.includes(c.kind)) out += `    static constexpr size_t size = ${Number(c.size) || 1};\n`;
+            out += `    static constexpr unsigned priority = ${Number(c.priority) || 1};\n`;
+            out += `    static constexpr size_t stack = ${Number(c.stack) || 128};\n`;
+        }
+        out += `};\n`;
+    }
+    out += `\n} // namespace AppConfig\n`;
+    return out;
+}
+
+export function generateAppHeaderString(app: any, models: AppModelInfo[]): string {
+    const components = appComponents(app);
+    const actorMachine = (c: any) => (models.find(m => m.file === c.model) || { name: c.name }).name;
+    const config = appFileName(app, 'config.hpp');
+    let out = `// ==========================================================================\n`;
+    out += `// AUTO-GENERATED APPLICATION - DO NOT HAND-EDIT (rewritten on every export of the application)\n`;
+    out += `// The board, the components and their task settings, as drawn in the application diagram.\n`;
+    out += `// ==========================================================================\n\n`;
+    out += `#pragma once\n\n`;
+    out += `#include "${config}"\n`;
+    out += `#define FA_APP_MANAGED   // task settings come from here, not from the actor headers' defaults\n\n`;
+    if (app.board && app.board.header) out += `#include "${app.board.header}"\n`;
+    components.filter(c => c.kind === 'actor').forEach(c => { out += `#include "${actorMachine(c).toLowerCase()}_actor.hpp"\n`; });
+    components.filter(c => MODULE_KINDS.includes(c.kind)).forEach(c => { out += `#include "${moduleFileName(c.name)}"\n`; });
+    out += `#include "fa_app.hpp"\n\n`;
+
+    out += `namespace App {\n\n`;
+    out += `struct Traits : Fa::DefaultAppTraits {\n`;
+    out += `    using Platform = ${(app.board && app.board.type) || 'Board'};\n`;
+    for (const [key, value] of Object.entries(app.settings || {})) {
+        if (key === 'MaxSyscallPriority') continue;              // a check of the diagram, not a framework setting
+        if (typeof value === 'number') out += `    static constexpr ${key.endsWith('Ms') ? 'uint32_t' : 'size_t'} ${key} = ${value};\n`;
+    }
+    out += `};\n\n} // namespace App\n\n`;
+    out += `// The board provides what every module requires (${appFileName(app, 'app_hw_contract.hpp')})\n`;
+    out += `#include "${appFileName(app, 'app_hw_contract.hpp')}"\n`;
+    out += `static_assert(App::HwContract<App::Traits::Platform>::verify());\n\n`;
+
+    out += `// ---- Task settings (from the diagram) ----\nnamespace Fa {\n\n`;
+    components.filter(c => c.kind === 'actor').forEach(c => {
+        const m = actorMachine(c);
+        out += `template <typename Hw, typename Ctx>\n`;
+        out += `struct ActorTraits<${m}::Actor<Hw, Ctx>> {\n`;
+        out += `    static constexpr size_t QueueLength     = AppConfig::${c.name}::queue;\n`;
+        out += `    static constexpr size_t StackDepthWords = AppConfig::${c.name}::stack;\n`;
+        out += `    static constexpr unsigned Priority      = AppConfig::${c.name}::priority;\n`;
+        out += `    static constexpr const char* Name       = "${c.name}";\n`;
+        out += `};\n\n`;
+    });
+    components.filter(c => TASK_KINDS.includes(c.kind)).forEach(c => {
+        out += `template <typename Hw, typename Ctx>\n`;
+        out += `struct TimeServiceTraits<App::${c.name}<Hw, Ctx>> {\n`;
+        out += `    static constexpr const char* name     = "${c.name}";\n`;
+        out += `    static constexpr size_t stack_size    = AppConfig::${c.name}::stack;\n`;
+        out += `    static constexpr UBaseType_t priority = AppConfig::${c.name}::priority;\n`;
+        out += `};\n\n`;
+    });
+    out += `} // namespace Fa\n\n`;
+
+    const list = components.map(c => c.kind === 'actor' ? `${actorMachine(c)}::Actor` : c.name);
+    out += `namespace App {\n\n`;
+    out += `using Application = Fa::Application<Traits${list.map(x => `,\n    ${x}`).join('')}>;\n\n`;
+    out += `} // namespace App\n\n`;
+    out += `// Board init, tasks, scheduler (${appFileName(app, 'app.cpp')}); does not return\n`;
+    out += `void app_start();\n`;
+    if (app.settings && app.settings.on_init) out += `// Yours (${appFileName(app, 'on_init.cpp')}): code outside FreeActors, before the scheduler starts\nvoid app_on_init();\n`;
+    return out;
+}
+
+export function generateAppSourceString(app: any): string {
+    let out = `// ==========================================================================\n`;
+    out += `// AUTO-GENERATED APPLICATION START-UP - DO NOT HAND-EDIT\n`;
+    out += `// The FreeRTOS hooks every FreeActors application needs, and app_start().\n`;
+    out += `// Vendor start-up (HAL/SDK init, clocks) belongs to the board's init(), which app_start() calls first.\n`;
+    out += `// ==========================================================================\n\n`;
+    out += `#include "${appFileName(app, 'app.hpp')}"\n\n`;
+    out += `#include <type_traits>\n\n`;
+    out += `namespace {\n`;
+    out += `    // Optional board hook: static void on_stack_overflow(char const* task) noexcept, e.g. a red LED\n`;
+    out += `    template <typename B, typename = void> struct has_overflow_hook : std::false_type {};\n`;
+    out += `    template <typename B> struct has_overflow_hook<B, std::void_t<decltype(B::on_stack_overflow(nullptr))>> : std::true_type {};\n`;
+    out += `    template <typename B> void report_stack_overflow(char *task) {   // a template: the hook is optional\n`;
+    out += `        if constexpr (has_overflow_hook<B>::value) B::on_stack_overflow(task); else (void)task;\n`;
+    out += `    }\n`;
+    out += `}\n\n`;
+    out += `extern "C" {\n\n`;
+    out += `// Every RTOS tick: FreeActors timers (and interrupt-free tick hooks of modules)\n`;
+    out += `void vApplicationTickHook(void) {\n    App::Application::on_tick_isr();\n}\n\n`;
+    out += `// Static memory for the idle task (configSUPPORT_STATIC_ALLOCATION = 1)\n`;
+    out += `void vApplicationGetIdleTaskMemory(StaticTask_t **tcb, StackType_t **stack, configSTACK_DEPTH_TYPE *size) {\n`;
+    out += `    static StaticTask_t idle_tcb;\n    static StackType_t idle_stack[configMINIMAL_STACK_SIZE];\n`;
+    out += `    *tcb = &idle_tcb;\n    *stack = idle_stack;\n    *size = configMINIMAL_STACK_SIZE;\n}\n\n`;
+    out += `#if configUSE_TIMERS\n`;
+    out += `// Static memory for the FreeRTOS timer task (FreeActors itself does not use it)\n`;
+    out += `void vApplicationGetTimerTaskMemory(StaticTask_t **tcb, StackType_t **stack, configSTACK_DEPTH_TYPE *size) {\n`;
+    out += `    static StaticTask_t timer_tcb;\n    static StackType_t timer_stack[configTIMER_TASK_STACK_DEPTH];\n`;
+    out += `    *tcb = &timer_tcb;\n    *stack = timer_stack;\n    *size = configTIMER_TASK_STACK_DEPTH;\n}\n#endif\n\n`;
+    out += `// configCHECK_FOR_STACK_OVERFLOW: stop; the board may show it (on_stack_overflow), the debugger shows pcTaskName\n`;
+    out += `void vApplicationStackOverflowHook(TaskHandle_t, char *pcTaskName) {\n`;
+    out += `    taskDISABLE_INTERRUPTS();\n`;
+    out += `    report_stack_overflow<App::Traits::Platform>(pcTaskName);\n`;
+    out += `    for (;;) {}\n}\n\n`;
+    out += `} // extern "C"\n\n`;
+    out += `void app_start() {\n`;
+    out += `    App::Application::init();    // the board's init() (vendor start-up), vector table, tasks and queues\n`;
+    if (app.settings && app.settings.on_init) out += `    app_on_init();               // yours: code outside FreeActors\n`;
+    out += `    App::Application::start();   // the scheduler; does not return\n`;
+    out += `}\n`;
+    return out;
+}
+
+export function generateAppMainString(app: any): string {
+    return `// AUTO-GENERATED - DO NOT HAND-EDIT. The firmware's entry point: everything starts in app_start()\n` +
+           `// (${appFileName(app, 'app.cpp')}); vendor start-up is the board's init().\n` +
+           `#include "${appFileName(app, 'app.hpp')}"\n\n` +
+           `int main() {\n    app_start();\n}\n`;
+}
+
+// All tool-owned files of an application. requirementOwners: namespaces whose <owner>_hw_requirements.hpp exists
+export function generateAppFiles(app: any, models: AppModelInfo[], requirementOwners: string[]): { [file: string]: string } {
+    return {
+        [appFileName(app, 'config.hpp')]: generateAppConfigString(app),
+        [appFileName(app, 'app.hpp')]: generateAppHeaderString(app, models),
+        [appFileName(app, 'app.cpp')]: generateAppSourceString(app),
+        [appFileName(app, 'main.cpp')]: generateAppMainString(app),
+        [appFileName(app, 'app_hw_contract.hpp')]: generateAppHwContractString(String(app.name || 'App'), requirementOwners),
+    };
+}
+
+// ==========================================================================
 // APPLICATION CHECKS (docs/design/app-diagram.md, section 3): what the compiler cannot check, or only with
 // unreadable template errors, reported on the diagram and in VS Code's Problems panel.
 // ==========================================================================
@@ -329,6 +504,40 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         }));
     }
 
+    // Writes the tool-owned application files (generateAppFiles) next to the model; refused while it has errors
+    private async exportApplication(document: vscode.TextDocument, folderUri: vscode.Uri, models: AppModelInfo[]) {
+        let app: any;
+        try {
+            app = JSON.parse(document.getText());
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`❌ Export failed: the application model is not valid JSON (${e.message})`);
+            return;
+        }
+        const errors = checkAppModel(app, models).filter(p => p.severity === 'error');
+        if (errors.length > 0) {
+            vscode.window.showErrorMessage(`❌ Export refused: ${errors.length} error(s) in the application, e.g. "${errors[0]!.message}". ` +
+                                           'See the Problems list in the editor.');
+            return;
+        }
+        // Every component whose requirements file exists takes part in the application-wide hardware contract
+        const owners: string[] = [];
+        const missingModules: string[] = [];
+        for (const c of (app.components || []) as any[]) {
+            const owner = c.kind === 'actor' ? (models.find(m => m.file === c.model) || { name: c.name }).name : c.name;
+            if (c.kind === 'application' || c.kind === 'subsystem') continue;
+            if (await fileExists(vscode.Uri.joinPath(folderUri, hwRequirementsFile(owner.toLowerCase())))) owners.push(owner);
+            if (c.kind !== 'actor' && !(await fileExists(vscode.Uri.joinPath(folderUri, moduleFileName(c.name))))) {
+                missingModules.push(moduleFileName(c.name));
+            }
+        }
+        const files = generateAppFiles(app, models, owners);
+        for (const [file, content] of Object.entries(files)) {
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
+        }
+        vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}.` +
+            (missingModules.length > 0 ? ` Still to write: ${missingModules.join(', ')} (module skeletons come in a later version).` : ''));
+    }
+
     public async resolveCustomTextEditor(
         document: vscode.TextDocument,
         webviewPanel: vscode.WebviewPanel,
@@ -406,6 +615,10 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                     const edit = new vscode.WorkspaceEdit();
                     edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), message.jsonText);
                     await vscode.workspace.applyEdit(edit);
+                    return;
+                }
+                case 'exportApplication': {
+                    await this.exportApplication(document, folderUri, await scanModels());
                     return;
                 }
                 case 'openFile': {
@@ -1540,6 +1753,38 @@ export function generateCppBlueprintString(jsonText: string): string {
     return out;
 }
 
+// The actor's default task settings. Inside an application model the application generates them from the
+// diagram (<app>_app.hpp defines FA_APP_MANAGED), so this block only applies to actors used on their own.
+export function actorTraitsBlock(machineName: string): string {
+    return `// ==========================================================================\n` +
+           `// DEFAULT ACTOR TRAITS: used when no application model sets them (FA_APP_MANAGED, <app>_app.hpp)\n` +
+           `// ==========================================================================\n` +
+           `#ifndef FA_APP_MANAGED\n` +
+           `namespace Fa {\n\n` +
+           `template <typename HwPolicy, typename Ctx>\n` +
+           `struct ActorTraits<${machineName}::Actor<HwPolicy, Ctx>> {\n` +
+           `    static constexpr size_t QueueLength     = 8;   // Default FreeRTOS event queue depth\n` +
+           `    static constexpr size_t StackDepthWords = 128; // Default stack size in words (512 bytes on ARM)\n` +
+           `    static constexpr unsigned Priority      = 2;   // Default FreeRTOS task priority\n` +
+           `    static constexpr const char* Name       = "${machineName}";\n` +
+           `};\n\n` +
+           `} // namespace Fa\n` +
+           `#endif // FA_APP_MANAGED\n\n`;
+}
+
+// Wraps an existing default traits block in #ifndef FA_APP_MANAGED (actors from before 0.0.9)
+function wrapActorTraitsBlock(content: string, machineName: string): string {
+    const at = new RegExp(`struct\\s+ActorTraits\\s*<\\s*${machineName}::Actor`).exec(content);
+    if (!at) return content;
+    const start = content.lastIndexOf('namespace Fa {', at.index);
+    const closing = content.indexOf('} // namespace Fa', at.index);
+    if (start < 0 || closing < 0) return content;
+    if (content.slice(Math.max(0, start - 200), start).includes('#ifndef FA_APP_MANAGED')) return content;
+    const end = closing + '} // namespace Fa'.length;
+    return content.slice(0, start) + '#ifndef FA_APP_MANAGED   // the application model sets the task (<app>_app.hpp)\n' +
+           content.slice(start, end) + '\n#endif // FA_APP_MANAGED' + content.slice(end);
+}
+
 export function patchExistingActorHeader(
     existingContent: string,
     hsmJsonText: string
@@ -1684,30 +1929,18 @@ export function patchExistingActorHeader(
         );
     }
 
-    // 8. If ActorTraits is completely missing, append the default configuration
+    // 8. Default task settings: added if missing, wrapped in #ifndef FA_APP_MANAGED if from before 0.0.9
     const traitsPattern = new RegExp(`struct\\s+ActorTraits\\s*<\\s*${machineName}::Actor`);
     if (!traitsPattern.test(updatedContent)) {
-        const traitsBlock = 
-            `\n// ==========================================================================\n` +
-            `// DEFAULT ACTOR TRAITS CONFIGURATION\n` +
-            `// Application-level overrides can be defined in app_cfg.hpp\n` +
-            `// ==========================================================================\n` +
-            `namespace Fa {\n\n` +
-            `template <typename HwPolicy, typename Ctx>\n` +
-            `struct ActorTraits<${machineName}::Actor<HwPolicy, Ctx>> {\n` +
-            `    static constexpr size_t QueueLength     = 8;   // Default FreeRTOS event queue depth\n` +
-            `    static constexpr size_t StackDepthWords = 128; // Default stack size in words (512 bytes on ARM)\n` +
-            `    static constexpr unsigned Priority      = 2;   // Default FreeRTOS task priority\n` +
-            `    static constexpr const char* Name       = "${machineName}";\n` +
-            `};\n\n` +
-            `} // namespace Fa\n\n`;
-
+        const traitsBlock = '\n' + actorTraitsBlock(machineName);
         const lastEndifIdx = updatedContent.lastIndexOf('#endif');
         if (lastEndifIdx !== -1) {
             updatedContent = updatedContent.slice(0, lastEndifIdx) + traitsBlock + updatedContent.slice(lastEndifIdx);
         } else {
             updatedContent += '\n' + traitsBlock;
         }
+    } else {
+        updatedContent = wrapActorTraitsBlock(updatedContent, machineName);
     }
 
     return { updatedContent, addedCount };
@@ -1833,20 +2066,7 @@ export function generateCppConcreteHeaderStub(jsonText: string): string {
 
     out += `} // namespace ${machineName}\n\n`;
 
-    // --- Default Actor Traits Configuration ---
-    out += `// ==========================================================================\n`;
-    out += `// DEFAULT ACTOR TRAITS CONFIGURATION\n`;
-    out += `// Application-level overrides can be defined in app_cfg.hpp\n`;
-    out += `// ==========================================================================\n`;
-    out += `namespace Fa {\n\n`;
-    out += `template <typename HwPolicy, typename Ctx>\n`;
-    out += `struct ActorTraits<${machineName}::Actor<HwPolicy, Ctx>> {\n`;
-    out += `    static constexpr size_t QueueLength     = 8;   // Default FreeRTOS event queue depth\n`;
-    out += `    static constexpr size_t StackDepthWords = 128; // Default stack size in words (512 bytes on ARM)\n`;
-    out += `    static constexpr unsigned Priority      = 2;   // Default FreeRTOS task priority\n`;
-    out += `    static constexpr const char* Name       = "${machineName}";\n`;
-    out += `};\n\n`;
-    out += `} // namespace Fa\n\n`;
+    out += actorTraitsBlock(machineName);
 
     out += `#endif // ${upperMachineName}_ACTOR_HPP\n`;
 

@@ -1,0 +1,16 @@
+{
+  "name": "Minimal",
+  "board": { "type": "TestBoard", "header": "test_board.hpp" },
+  "features": { "trace": true, "commands": false, "health": true, "debug_commands": false },
+  "settings": { "HealthCheckMs": 50, "WatchdogTimeoutMs": 500, "MaxTimers": 8 },
+  "components": [
+    { "id": "APP", "kind": "application", "name": "Minimal", "x": 40, "y": 40, "width": 900, "height": 400 },
+    { "id": "C_1", "kind": "actor", "name": "Timebomb", "parent": "APP", "model": "timebomb.hsm.json", "priority": 3, "queue": 6, "stack": 160, "x": 400, "y": 120 },
+    { "id": "C_2", "kind": "periodic", "name": "ButtonPoller", "parent": "APP", "period_ms": 5, "priority": 2, "stack": 96, "x": 80, "y": 120 },
+    { "id": "C_3", "kind": "interrupt", "name": "Tap", "parent": "APP", "irq": "tap", "pri": 7, "x": 80, "y": 260 }
+  ],
+  "connections": [
+    { "id": "L_1", "from": "C_2", "to": "C_1", "kind": "event", "events": ["ButtonPressed"] },
+    { "id": "L_2", "from": "C_3", "to": "C_1", "kind": "event", "events": ["ButtonPressed"] }
+  ]
+}

@@ -5,6 +5,7 @@
 ### Editor
 - Application editor (`*.app.json`): draw the application from its building blocks (actors, periodic modules, interrupt modules, SPSC/MPSC/DMA services) grouped in subsystems, connect them with events, items and DMA streams, and edit each component's properties. Connecting to an actor offers the events of its state machine; double-click opens the state machine. Code generation from the application follows in a later release.
 - Checks on the application: wrong events, a state machine used twice, an SPSC service with several producers, conflicting interrupts or priorities FreeRTOS does not allow, invalid names and more, shown on the diagram, in the editor's problem list and in VS Code's Problems panel.
+- Export Application: generates the application's configuration, its `Application` with every component's task settings from the diagram, the FreeRTOS hooks, `app_start()` and `main`, and checks the board against every module's hardware requirements at compile time. Periodic and interrupt modules can declare hardware requirements (including their interrupts) like state machines.
 - The hardware requirements file is now `<name>_hw_requirements.hpp` (was `<name>_bsp_policy.hpp`: it lists what a state machine needs from any board, it is not the board). Export renames an existing file once, unchanged, and updates the include in your actor header.
 - The state machine editor highlights the state actually under the cursor when linking (it used to highlight the enclosing state).
 

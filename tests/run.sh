@@ -212,6 +212,36 @@ target_compile() {
     fi
 }
 
+# Application generation: the Minimal application (tests/fixtures/app) generated as Export Application would,
+# compiled for Cortex-M4; the diagram's values must arrive in the code; a board missing an interrupt fails
+app_generation_checks() {
+    local app="$OUT/app" k="$FREERTOS_KERNEL_PATH" f
+    local flags=(-std=c++17 -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard -Os -fno-exceptions -fno-rtti -Wall -Wextra
+                 -Werror=stack-usage=256 -I"$ROOT/tests/target" -I"$k/include" -I"$k/portable/GCC/ARM_CM4F" -I"$app" -I"$ROOT/freeactors_lib")
+    if ! node "$ROOT/tests/app_gen_test.js" "$app" || ! node "$ROOT/tests/gen.js" "$ROOT/tests/fixtures/timebomb.hsm.json" "$app"; then
+        status=1; return
+    fi
+    for f in minimal_app.cpp minimal_main.cpp; do
+        if arm-none-eabi-g++ "${flags[@]}" -c "$app/$f" -o "$app/${f%.cpp}.o" 2> "$app/${f%.cpp}.log"; then
+            echo "PASS  app generation: $f compiles for Cortex-M4"
+        else
+            echo "FAIL  app generation: $f does not compile (log: tests/build/app/${f%.cpp}.log)"; grep -m 5 error "$app/${f%.cpp}.log"; status=1
+        fi
+    done
+    if arm-none-eabi-g++ "${flags[@]}" -fsyntax-only "$ROOT/tests/app_values_test.cpp" 2> "$app/values.log"; then
+        echo "PASS  app generation: the diagram's features, task settings, period, interrupt priority and settings reach the code"
+    else
+        echo "FAIL  app generation: values from the diagram (log: tests/build/app/values.log)"; grep -m 5 error "$app/values.log"; status=1
+    fi
+    if arm-none-eabi-g++ "${flags[@]}" -fsyntax-only -DMISSING_TAP_IRQ "$app/minimal_app.cpp" 2> "$app/missing.log"; then
+        echo "FAIL  app generation: a board without the Tap interrupt compiled"; status=1
+    elif grep -q "Tap Contract Violation\] the board must define its interrupt" "$app/missing.log"; then
+        echo "PASS  app generation: a board without the Tap interrupt fails the application contract, naming the module"
+    else
+        echo "FAIL  app generation: missing interrupt without the contract message (log: tests/build/app/missing.log)"; status=1
+    fi
+}
+
 # The vector table built from the interrupt modules (fa_interrupt.hpp): read-only, aligned for VTOR, each
 # module's handle() in its slot; invalid modules rejected at compile time with a clear message
 vector_table_checks() {
@@ -289,6 +319,7 @@ else
     target_compile m4-fpu-trace-commands ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS
     target_compile m4-fpu-trace-commands-health ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS -DFA_HEALTH -DFA_DEBUG_COMMANDS
     vector_table_checks
+    app_generation_checks
 fi
 
 # Runtime integration: a real Fa::Application on the FreeRTOS POSIX port (tasks = Linux threads, real tick).
