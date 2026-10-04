@@ -1,6 +1,6 @@
 # Application diagram — design
 
-Status: **agreed in discussion (2026-10-03)**: decisions in section 9. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1, written by hand until the diagram generates them). Phases 2 and 3 (model, editor on the shared `media/canvas.js`, checks) implemented; generation not yet.
+Status: **agreed in discussion (2026-10-03)**: decisions in section 10. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1). Phases 2 to 4 (model, editor on the shared `media/canvas.js`, checks, generation including the board blueprint) implemented for 0.0.9; Timebomb is generated from its application model and verified on the board. Next: phase 5, top-down design, one source of truth for events and the target (section 7, agreed 2026-10-04).
 Scope: FreeActors v1.x — a component-level model of the whole application, drawn in VS Code, from which the framework wiring is generated and checked; later the place where the running system is shown live.
 
 ## Goals
@@ -80,7 +80,7 @@ Event structs belong to the user, not the tool (since 0.0.8): `<name>_events.hpp
 
 The PC side (trace dictionary, `fa-trace post` with field values) learns field layouts by reading the user's header on export (best effort, like the hardware requirements parser), with a `static_assert` on each parsed event's size so a struct changed without re-exporting fails the build instead of garbling commands. Events it cannot read fall back to raw bytes. The simulator needs no payloads: it runs the model, where guards are set by hand and actions are only recorded.
 
-**Who owns an event**: the receiving machine, as today. Routing is by type and every event type has exactly one receiving actor, so the receiver's model and events header are the natural home; the diagram offers the receiver's signals when an arrow is drawn.
+**Who owns an event**: the receiving machine, as today. Routing is by type and every event type has exactly one receiving actor, so the receiver's model and events header are the natural home; the diagram offers the receiver's signals when an arrow is drawn. Phase 5 makes this the single source of truth in both directions: events typed on a connection are added to the receiver's machine, and renames and deletions keep the two consistent (section 7.2).
 
 ## 3. Checks on the diagram
 
@@ -186,17 +186,96 @@ With `fa-trace` connected (the extension runs the decoder and owns the serial po
 - each actor shows its current state (STATES), each box its queue high-water mark, health status and free stack (HEALTH); faults turn the box red, paused tasks grey;
 - double-clicking an actor opens its HSM with the current state highlighted.
 
-## 7. Phases
+## 7. Top-down design, one source of truth for events, and the target
+
+Recreating Timebomb from scratch with the designer (2026-10-03) worked, but only bottom-up: the state machine had to exist before the diagram could use it, and the firmware build (CMake, toolchain, FreeRTOS configuration, linker script, vendor sources) was copied from the old project by hand. This phase makes the application the starting point and the diagram the place where the target is described.
+
+### 7.1 The workflow
+
+Two roles, as before: the **designer** (models, modules, behaviour) and the **BSP engineer** (the board). On a small project they are one person.
+
+1. **Draw the application** (designer). Create `Timebomb.app.json`; add the components (the Timebomb actor, still without a state machine, ButtonPoller, the command interrupts in a subsystem); connect them, typing the events (`ButtonPressed`); choose the features; name the board (`Board::NucleoF446ZE`, `bsp_nucleo_f446ze.hpp`). An actor without a state machine is a to-do (a warning), not an error.
+2. **Export Application** (designer). Writes the application and module files as today, and **creates the missing state machines**: `Timebomb.hsm.json` with a ROOT state and the signals the diagram sends to it, linked to the actor, and exported like the HSM editor does (actor header, events, requirements, tests), so the whole project compiles from the start. An actor's context menu offers the same for one actor: **Create State Machine**.
+3. **Design each state machine** (designer). Double-click the actor: the HSM editor opens with its signals already there; draw the states, add internal signals (`Tick`).
+4. **Write the behaviour** (designer): actions, module bodies, each module's hardware requirements; the simulator and designer tests run on the PC.
+5. **The board** (BSP engineer), in parallel from step 1, as soon as the board is named: **Generate Board**, the **Target** section (7.5) or a vendor flavour, bring-up one function at a time against the contracts. Each export appends what the designers' requirements added.
+6. **Build, flash, trace**: Export Application also writes the firmware build files (7.5); `cmake --build --preset firmware --target flash`, then `fa-trace`.
+
+Bottom-up stays possible: a state machine drawn first is chosen for an actor as today.
+
+What the user writes by hand comes down to the behaviour, the board's vendor code and the SDK download; everything that is wiring or configuration comes from the diagram or is generated from it.
+
+### 7.2 Events: one source of truth
+
+**The state machine owns its signals** (they make the actor's `Event` type and its event structs); the events on connections in `*.app.json` are **references** to them. Keeping the two consistent is the tool's job, whichever editor the change is made in:
+
+| The user | In the diagram | In the state machine |
+|---|---|---|
+| types a new event on a connection to an actor | saved on the connection | **added to the machine's signals** at once (the transition is drawn when the designer is ready) |
+| adds a signal in the HSM editor | nothing (it may be internal, like `Tick`); the connection dialog offers it from now on | — |
+| renames a signal, in either editor | **renamed on every connection**, in every `*.app.json` of the folder | **renamed in the signal list and in every transition** (`ButtonPressed/act`) |
+| removes an event from a connection | removed from that connection | **kept**: a timer, the PC or another sender may still use it |
+| deletes a signal in the HSM editor | **removed from every connection** carrying it (a connection left without events is removed), with a note naming what changed | — |
+| renames a state machine | the actors using it follow | the machine's name is its event namespace (7.3), renamed with it |
+
+**Renames reach the C++**: the struct in the user-owned `<name>_events.hpp` is renamed, keeping its fields. The user's own uses of the name (`Ctx::post(Timebomb::ButtonPressed{})` in a module) are renamed through clangd's Rename Symbol when clangd runs; otherwise the compiler points each one out.
+
+**Mechanics**:
+- Both editors run in one extension, which makes the cross-file edits as workspace edits to the other document: an open editor redraws at once, the change is unsaved there until saved.
+- A rename is an **explicit message** from the editor (`renameSignal { from, to }`), not inferred by comparing the file before and after (a rename and a delete-plus-add look the same).
+- Undo is per file in VS Code: undoing a rename in one editor does not undo it in the other, so the extension shows a note naming the files it changed.
+
+### 7.3 Where an event lives: the receiver's namespace
+
+An event belongs to the state machine that receives it, so its namespace is that **machine's name**: `ButtonPressed` on a connection into the Timebomb actor is `Timebomb::ButtonPressed`, declared in `timebomb_events.hpp`. A sender never declares an event; it uses the receiver's type (the module skeletons already write `Ctx::post(Timebomb::ButtonPressed{});`). An event created through a connection is added to the receiver's machine, so its struct lands in the receiver's file and namespace.
+
+- **One name into two actors is two types**: `ButtonPressed` into Timebomb and into a Logger actor is `Timebomb::ButtonPressed` and `Logger::ButtonPressed`, and the sender posts each. This is the single-instance, type-routed design (one receiver per type, routing resolved at compile time), not publish/subscribe.
+- **Top-down**: the namespace exists before the machine; a state machine created for an actor takes the actor's name, so events into the Timebomb actor are `Timebomb::...` from the start.
+- **The machine's name, not the box's**: an actor named `Bomb` using `Timebomb.hsm.json` receives `Timebomb::...` events; the dialog and the generated code both resolve through the model. Renaming a machine is therefore renaming a namespace (7.2).
+- Actors sending events are no different: `post(Timebomb::Explode{})`. Only the receiver matters.
+
+### 7.4 Item types: owned by the receiving service
+
+The same rule for items: built-in types (`uint16_t`) need no home, but a type named on a connection into a service (`LogLine` into an MPSC service) is **declared by that service**: its module file gets `struct LogLine` in the service's namespace, created once when a connection names a type that does not exist yet, its fields left to the user. Producers include the service's module file.
+
+### 7.5 The target
+
+Decisions belong in the diagram; vendor content does not. The board's **Target** section in the sidebar (stored under `board` in `*.app.json`; it can move to a shared `*.board.json` later without changing anything else) holds the decisions, and Export Application generates the mechanics from them and from the diagram:
+
+| Item | In the designer | File, owner |
+|---|---|---|
+| Core | Cortex-M3 / M4 / M4F / M7 / M33 | drives `-mcpu`, the FPU flags and the FreeRTOS port (`ARM_CM3`, `ARM_CM4F`, `ARM_CM7`, ...) |
+| CMake presets | — | `CMakePresets.json` (`host`, `firmware`), tool; the user's own presets go in CMake's `CMakeUserPresets.json` |
+| Toolchain | its folder, if `arm-none-eabi-gcc` is not on PATH | `cmake/arm-none-eabi.cmake`, tool |
+| Firmware target | vendor sources, include folders, defines (`STM32F446xx USE_HAL_DRIVER`), startup file, flash command template (`openocd -f board/st_nucleo_f4.cfg -c "program {elf} verify reset exit"`) | `freeactors_firmware.cmake`, tool, included by `CMakeLists.txt` like `freeactors_tests.cmake` (a hint if an existing one does not) |
+| FreeRTOS kernel | its folder (default `$env{FREERTOS_KERNEL_PATH}`) | used by the firmware target |
+| `FreeRTOSConfig.h` | tick rate; the device header (for `__NVIC_PRIO_BITS`) | tool: `configMAX_PRIORITIES` from the highest priority in the diagram, the hooks and static allocation FreeActors needs, stack overflow checking, `configASSERT`; it includes the user-owned `freertos_config_user.h` (created once) first, for overrides |
+| Linker script | its path | the user's or the vendor's; checked, not written |
+| HAL / SDK configuration | its folder | the vendor's template |
+| Startup and system files | their paths | the vendor's |
+
+**Checks** (section 3, Problems panel): a linker script without a `.noinit` section while the health monitor is on; a FreeRTOS, SDK or source path that does not exist; a core without an ARMv7-M NVIC and VTOR while the application has interrupt modules.
+
+**Vendor flavours** fill these fields: *STM32F4 + HAL, STM32F446ZE* sets the HAL sources, the startup file for the part, the HAL configuration template and the OpenOCD board file. The fields are generic, checked against nRF52 (nrfx), TM4C (TivaWare), Kinetis (MCUXpresso) and SAM4 (ASF): every SDK comes down to sources, include folders, defines, a linker script, a startup file and a flash command (OpenOCD, pyOCD, J-Link, probe-rs, nrfjprog).
+
+## 8. Phases
 
 1. **Event payloads** (section 2): user-owned event structs (done in 0.0.8); field layouts read for the trace dictionary and `fa-trace` (done in 0.0.8).
 2. **Model and editor**: `*.app.json`, components, connections, drill-down; no generation yet.
 3. **Checks** (section 3).
 4. **Generation** (section 4), with the Timebomb project migrated to it and verified on the board; the POSIX test application generated from a model as well. Includes the board blueprint (4.2); vendor flavours after it, STM32 HAL first.
-5. **Live view** (section 6).
+5. **Top-down design and the target** (section 7), in steps:
+   1. an actor without a state machine is a warning; Export Application and **Create State Machine** create the missing `*.hsm.json` with the signals from the diagram;
+   2. one source of truth for events: additions and renames from either editor, deletions in the HSM editor removing them from connections, renaming a machine (7.2, 7.3);
+   3. item types declared by the receiving service (7.4);
+   4. the Target section and the generated firmware build files and `FreeRTOSConfig.h` (7.5);
+   5. the first vendor flavour, STM32F4 + HAL;
+   6. acceptance: Timebomb recreated top-down from an empty folder (application first), nothing copied but the SDK, verified on the board.
+6. **Live view** (section 6).
 
 Each phase ships as a release of the extension.
 
-## 8. Testing
+## 9. Testing
 
 | What | How |
 |---|---|
@@ -206,9 +285,15 @@ Each phase ships as a release of the extension.
 | Editor | the webview rendered headless (as for the README screenshot) for a smoke test of loading and drawing a model |
 | Board blueprint | a blueprint generated for each fixture application compiles as is, and passes the hardware contract; appending after a change keeps hand-written members |
 | Board | Timebomb from its application model: trace, commands, health, as verified today |
+| Signal sync | each rule of 7.2 on fixture models: the edit to the other file, renames in transitions and connections, the events struct renamed keeping its fields; the editors' explicit rename messages in the editor test |
+| Top-down | a diagram with an actor and no state machine: Export Application creates and exports the machine, and the project builds (host and Cortex-M4) |
+| Target | the generated firmware build for the fixture application configures and builds with the FreeRTOS kernel (as the target compile check today); each target check on a broken variation |
 
-## 9. Decisions
+## 10. Decisions
 
 1. **`main` is generated**; vendor start-up belongs to the board (`Hw::init()`); an optional user hook `app_on_init()` starts code outside FreeActors.
 2. **Interrupts are C++ template modules** (`InterruptInterface<I>`, `template <typename Hw, typename IsrCtx>`) with an interrupt-only context; the interrupt number comes from the board inside the module, so the `Fa::Application` list only names modules; the vector table is built at compile time and installed through VTOR (section 4.1). Plain-C interrupt functions with a generated `app_isr.h` were considered and set aside for now (they would need interrupt numbers in the application's definition).
 3. **One application per `*.app.json`**, the root of a component hierarchy; subsystems are structural in v1 (section 1.3).
+4. **Top-down design**: the application can be drawn first; Export Application creates the missing state machines with the signals the diagram sends them (section 7.1).
+5. **One source of truth for events**: the receiving state machine owns its signals, connections refer to them; the tool keeps both consistent, including deleting a signal in the HSM editor, which removes it from the connections (section 7.2). An event's namespace is the receiving machine's name; item types are declared by the receiving service (7.3, 7.4).
+6. **The diagram holds the target's decisions, not vendor content**: core, paths, sources, defines, flash command in the board's Target section; the CMake build and `FreeRTOSConfig.h` are generated; linker script, SDK configuration and startup files stay the vendor's, referenced by path and checked (section 7.5).
