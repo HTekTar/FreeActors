@@ -46,6 +46,20 @@ build_and_run spsc_test_tsan "$ROOT/tests/spsc_test.cpp" -O1 -g -pthread -fsanit
 build_and_run dma_test "$ROOT/tests/dma_test.cpp" -O2 -pthread
 build_and_run dma_test_tsan "$ROOT/tests/dma_test.cpp" -O1 -g -pthread -fsanitize=thread
 build_and_run health_test "$ROOT/tests/health_test.cpp"
+# fa-trace warns when another process has the serial port open (two readers split its bytes: lost replies)
+if [ "$(uname)" = Linux ]; then
+    port_file="$OUT/fake_port"; : > "$port_file"
+    node -e 'require("fs").openSync(process.argv[1], "r"); setTimeout(() => {}, 5000)' "$port_file" & holder=$!
+    sleep 0.5
+    if node -e 'const r = require(process.argv[1]).otherReaders(process.argv[2]); process.exit(r.some(x => x.pid === Number(process.argv[3])) ? 0 : 1)' \
+            "$ROOT/tools/fa-trace.js" "$port_file" "$holder"; then
+        echo "PASS  fa-trace: another process holding the serial port is found (and warned about)"
+    else
+        echo "FAIL  fa-trace: another process holding the serial port was not found"; status=1
+    fi
+    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+fi
+
 # Event payloads: fa-trace encodes field values from the dictionary; the C++ side rebuilds the events from them
 node "$ROOT/tests/gen.js" "$ROOT/tests/fixtures/sensor.hsm.json" "$OUT" || status=1
 node "$ROOT/tools/fa-trace.js" --dict "$OUT/sensor_trace.json" --actors Sensor \

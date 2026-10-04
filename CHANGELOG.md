@@ -20,6 +20,10 @@
 - The hardware requirements file is now `<name>_hw_requirements.hpp` (was `<name>_bsp_policy.hpp`: it lists what a state machine needs from any board, it is not the board). Export renames an existing file once, unchanged, and updates the include in your actor header.
 - The state machine editor highlights the state actually under the cursor when linking (it used to highlight the enclosing state).
 
+### fa-trace
+- Warns when another program already has the serial port open (on Linux): two readers split the bytes, so frames and command replies get lost, which looks like a target losing them.
+- Shows damaged frames as they happen (they were only counted).
+
 ### Framework
 - The core exception handlers FreeActors' vector table names (`HardFault_Handler`, ...) have weak defaults: any start-up file links.
 

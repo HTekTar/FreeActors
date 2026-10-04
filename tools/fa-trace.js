@@ -368,6 +368,8 @@ function createDecoder(dictionaries, out, options = {}) {
                     onFrame(raw[0], raw.slice(1, raw.length - 2));
                 } else {
                     stats.badFrames++;
+                    // the first frame may be cut by opening the port mid-frame; after that, bytes were lost on the way
+                    if (stats.frames > 0) out(c.red('--- a damaged frame (CRC): bytes lost on the line (another program reading the port?) ---'));
                 }
             }
             encoded = [];
@@ -593,7 +595,28 @@ function createCommander(actors, tasks = () => actors().map(a => a.name)) {
 
 // ---- Sources and CLI -------------------------------------------------------------------------------------
 
+// Other processes that have the device open (Linux: /proc/<pid>/fd). Two readers on one serial port split its
+// bytes between them: frames arrive damaged or not at all, which looks like a target losing replies.
+function otherReaders(port) {
+    if (process.platform !== 'linux') return [];
+    let target;
+    try { target = fs.realpathSync(port); } catch (e) { return []; }
+    const found = [];
+    for (const pid of fs.readdirSync('/proc').filter(d => /^\d+$/.test(d) && Number(d) !== process.pid)) {
+        try {
+            if (!fs.readdirSync(`/proc/${pid}/fd`).some(fd => { try { return fs.readlinkSync(`/proc/${pid}/fd/${fd}`) === target; } catch (e) { return false; } })) continue;
+            const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' ');
+            found.push({ pid: Number(pid), cmd });
+        } catch (e) { /* another user's process, or gone */ }
+    }
+    return found;
+}
+
 function openSerial(port, baud, onData, onEnd) {
+    for (const other of otherReaders(port)) {
+        console.error(`serial: warning: ${port} is also open in process ${other.pid} (${other.cmd}): ` +
+                      'it takes part of the data, so frames and replies get lost. Close it (kill ' + other.pid + ').');
+    }
     let SerialPort;
     try {
         ({ SerialPort } = require('serialport'));
@@ -777,7 +800,7 @@ function startCommandLine(decoder, write) {
     return rl;
 }
 
-module.exports = { createDecoder, createCommander, loadDictionaries, crc16, cobsDecode, cobsEncode, encodeFrame };
+module.exports = { createDecoder, createCommander, loadDictionaries, crc16, cobsDecode, cobsEncode, encodeFrame, otherReaders };
 
 if (require.main === module) {
     main(process.argv.slice(2));

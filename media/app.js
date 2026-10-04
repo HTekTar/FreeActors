@@ -379,9 +379,9 @@ function openComponentModal(parentId) {
         .map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} (${KINDS[c.kind].label})</option>`).join('');
     parentSelect.value = parentId || (app.components.find(c => c.kind === 'application') || {}).id || '';
     const modelSelect = document.getElementById('input-model');
-    modelSelect.innerHTML = models.length === 0
-        ? '<option value="">(no *.hsm.json in this folder)</option>'
-        : models.map(m => `<option value="${escapeHtml(m.file)}">${escapeHtml(m.name)}</option>`).join('');
+    // top-down: a new state machine, created by Export Application (or double-click) from the events sent to it
+    modelSelect.innerHTML = '<option value="">(new: created from the diagram)</option>' +
+        models.map(m => `<option value="${escapeHtml(m.file)}">${escapeHtml(m.name)} (${escapeHtml(m.file)})</option>`).join('');
     document.getElementById('input-name').value = '';
     document.getElementById('hint-name').style.display = 'none';
     updateComponentModal();
@@ -449,7 +449,7 @@ document.getElementById('btn-submit-component').addEventListener('click', () => 
         id: newId('C'), kind, name, parent: parent ? parent.id : undefined, x, y, width, height,
     }, JSON.parse(JSON.stringify(DEFAULTS[kind] || {})));
     growToContain(parent, component);
-    if (kind === 'actor') component.model = document.getElementById('input-model').value;
+    if (kind === 'actor' && document.getElementById('input-model').value) component.model = document.getElementById('input-model').value;
     app.components.push(component);
     componentModal.style.display = 'none';
     selectedId = component.id;
