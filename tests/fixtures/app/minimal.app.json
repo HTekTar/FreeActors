@@ -107,7 +107,7 @@
       "kind": "mpsc",
       "name": "Log",
       "parent": "APP",
-      "item": "uint32_t",
+      "item": "LogLine",
       "size": 16,
       "priority": 1,
       "stack": 128,
@@ -152,7 +152,7 @@
       "from": "C_2",
       "to": "C_8",
       "kind": "item",
-      "item": "uint32_t"
+      "item": "LogLine"
     }
   ]
 }

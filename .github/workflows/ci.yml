@@ -1,6 +1,7 @@
 # Runs every test layer (npm test -> tests/run.sh) on each push and pull request:
 # generator and model tests, actor tests, ThreadSanitizer stress tests, exported projects (CMake/CTest),
-# the FreeRTOS POSIX runtime test with the decoded trace, and the Cortex-M4 cross-compiles.
+# the FreeRTOS POSIX runtime test with the decoded trace, the Cortex-M4 cross-compiles, and firmware projects built
+# from an application alone (five cores, and the STM32F4 + HAL flavour with ST's SDK).
 name: CI
 
 on:
@@ -32,6 +33,14 @@ jobs:
       - name: Fetch the FreeRTOS kernel
         run: git clone --depth 1 --branch V11.1.0 https://github.com/FreeRTOS/FreeRTOS-Kernel.git "$RUNNER_TEMP/FreeRTOS-Kernel"
 
+      # ST's SDK for the STM32F4 + HAL flavour build (the tags the Timebomb sample was verified with)
+      - name: Fetch ST's STM32F4 SDK
+        run: |
+          sdk="$RUNNER_TEMP/st"
+          git clone --depth 1 --branch v5.9.0_20250520 https://github.com/STMicroelectronics/cmsis_core.git "$sdk/cmsis_core"
+          git clone --depth 1 --branch v2.6.11 https://github.com/STMicroelectronics/cmsis_device_f4.git "$sdk/cmsis_device_f4"
+          git clone --depth 1 --branch v1.8.5 https://github.com/STMicroelectronics/stm32f4xx_hal_driver.git "$sdk/stm32f4xx_hal_driver"
+
       # ThreadSanitizer cannot map its shadow memory with the runners' high ASLR entropy
       - name: Allow ThreadSanitizer
         run: sudo sysctl vm.mmap_rnd_bits=28
@@ -41,6 +50,7 @@ jobs:
       - name: Test
         env:
           FREERTOS_KERNEL_PATH: ${{ runner.temp }}/FreeRTOS-Kernel
+          STM32_SDK_PATH: ${{ runner.temp }}/st
         run: |
           set -o pipefail
           npm test 2>&1 | tee test.log

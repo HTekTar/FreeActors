@@ -290,13 +290,15 @@ union VectorEntry {
 static_assert(sizeof(VectorEntry) == 4, "a vector table entry is one 32-bit word");
 
 extern "C" {
-    // Core exceptions: CMSIS names, defined (often weakly) by the vendor's startup file
-    void NMI_Handler(void);
-    void HardFault_Handler(void);
-    void MemManage_Handler(void);
-    void BusFault_Handler(void);
-    void UsageFault_Handler(void);
-    void DebugMon_Handler(void);
+    // Core exceptions: CMSIS names. A vendor's startup file usually defines them (weakly); any definition of the
+    // application's or the vendor's replaces these weak defaults, which stop here (attach the debugger: the
+    // exception's registers are on the stack), so start-up code without them links too
+    __attribute__((weak)) void NMI_Handler(void) { for (;;) {} }
+    __attribute__((weak)) void HardFault_Handler(void) { for (;;) {} }
+    __attribute__((weak)) void MemManage_Handler(void) { for (;;) {} }
+    __attribute__((weak)) void BusFault_Handler(void) { for (;;) {} }
+    __attribute__((weak)) void UsageFault_Handler(void) { for (;;) {} }
+    __attribute__((weak)) void DebugMon_Handler(void) { for (;;) {} }
     // FreeRTOS port handlers (FreeRTOSConfig.h may rename them to SVC_Handler etc.; the names follow it)
     void vPortSVCHandler(void);
     void xPortPendSVHandler(void);

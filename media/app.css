@@ -52,3 +52,17 @@
 .signal-item button { background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.6; cursor: pointer; padding: 0 4px; }
 .signal-item button:hover { opacity: 1; }
 .signal-item input { flex: 1; min-width: 0; }
+
+/* Target and settings: collapsible sections */
+details.registry-section > summary { cursor: pointer; list-style: revert; }
+details.registry-section { display: flex; flex-direction: column; gap: 6px; }
+details.registry-section[open] > summary { margin-bottom: 6px; }
+details.registry-section > .prop-row, details.registry-section > .hint-text, details.registry-section > .flavour-fields { margin-bottom: 6px; }
+#sidebar-registry textarea {
+    background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #cccccc);
+    border: 1px solid var(--vscode-input-border, #6b6b6b); padding: 4px 6px; border-radius: 2px; font: inherit; resize: vertical;
+}
+.flavour-fields { flex-direction: column; gap: 6px; padding: 6px; border-left: 2px solid var(--vscode-textLink-foreground, #3794ff); }
+.flavour-row { display: flex; gap: 6px; }
+.flavour-row .prop-row { flex: 1; min-width: 0; }
+.flavour-row input { width: 100%; box-sizing: border-box; }

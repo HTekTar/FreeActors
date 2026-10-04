@@ -84,4 +84,22 @@ expect('a name that is not a C++ identifier', variant(a => { comp(a, 'ButtonPoll
 expect('an actor nothing sends events to (a warning)', variant(a => { a.connections = a.connections.filter(c => c.to !== 'C_2'); }),
        'receives no events from any component', 'C_2', 'warning');
 
+// The board's Target: checked against what is on disk (the provider passes it in)
+function expectWithFiles(name, app, files, text, severity) {
+    const hit = ext.checkAppModel(app, models, files).find(p => p.message.includes(text) && p.severity === severity);
+    console.log(`${hit ? 'PASS' : 'FAIL'}  app check: ${name}${hit ? '' : ` — got ${JSON.stringify(ext.checkAppModel(app, models, files).map(p => p.message))}`}`);
+    if (!hit) failures++;
+}
+const withTarget = (target) => variant(a => { a.board.target = target; });
+expect('a core FreeActors does not support (no NVIC with VTOR)', withTarget({ core: 'cortex-m0plus' }), 'core cortex-m0plus is not supported');
+expectWithFiles('a linker script without the .noinit section the health monitor needs',
+                withTarget({ core: 'cortex-m4f', linker_script: 'board.ld' }), { 'board.ld': { exists: true, content: 'SECTIONS { .bss : {} }' } },
+                'has no .noinit section', 'error');
+expectWithFiles('a source file of the Target that does not exist (a warning: the SDK may come later)',
+                withTarget({ core: 'cortex-m4f', linker_script: 'board.ld', sources: ['sdk/hal.c'] }),
+                { 'board.ld': { exists: true, content: '.noinit (NOLOAD) : {}' }, 'sdk/hal.c': { exists: false } }, 'Target: sdk/hal.c not found', 'warning');
+expect('an interrupt feeding the PC commands while Commands is off',
+       variant(a => { a.features.commands = false; a.features.debug_commands = false; comp(a, 'CommandRxDma').commands = true; }),
+       'feeds the PC commands, but Commands (FA_TRACE_COMMANDS) is off', 'C_4');
+
 process.exit(failures === 0 ? 0 : 1);

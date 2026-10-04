@@ -26,6 +26,49 @@
                 <label class="prop-row">Board type <input id="app-board-type" type="text" placeholder="Board::MyBoard"></label>
                 <label class="prop-row">Board header <input id="app-board-header" type="text" placeholder="bsp_my_board.hpp"></label>
             </div>
+            <details class="registry-section" id="target-section">
+                <summary class="registry-header"><span>Target (the board's build)</span></summary>
+                <div class="hint-text">The firmware build Export Application writes: CMake presets, toolchain, FreeRTOSConfig.h.
+                    Paths are relative to this file. Leave the core empty for no firmware build.</div>
+                <label class="prop-row">Vendor flavour
+                    <select id="target-flavour"><option value="">(none: fill in the fields)</option><option value="stm32f4-hal">STM32F4 + HAL</option></select></label>
+                <div id="flavour-fields" class="flavour-fields">
+                    <label class="prop-row">Part (device define) <input id="target-part" type="text" placeholder="STM32F446xx"></label>
+                    <label class="prop-row">SDK folder <input id="target-sdk" type="text" placeholder="third_party/st"></label>
+                    <div class="flavour-row">
+                        <label class="prop-row">Flash (KB) <input id="target-flash-kb" type="number" placeholder="512"></label>
+                        <label class="prop-row">RAM (KB) <input id="target-ram-kb" type="number" placeholder="128"></label>
+                    </div>
+                    <button id="apply-flavour-btn" title="Fill in the fields below for this part, and create the vendor files that are missing">Apply flavour</button>
+                    <div class="hint-text" id="flavour-hint"></div>
+                </div>
+                <label class="prop-row">Core <select id="target-core">
+                    <option value="">(no firmware build)</option>
+                    <option value="cortex-m3">Cortex-M3</option>
+                    <option value="cortex-m4">Cortex-M4 (no FPU)</option>
+                    <option value="cortex-m4f">Cortex-M4F</option>
+                    <option value="cortex-m7">Cortex-M7 (double-precision FPU)</option>
+                    <option value="cortex-m33">Cortex-M33 (FPU, no TrustZone)</option>
+                </select></label>
+                <label class="prop-row">NVIC priority bits <input id="target-prio-bits" type="number" placeholder="4"></label>
+                <label class="prop-row">Tick rate (Hz) <input id="target-tick" type="number" placeholder="1000"></label>
+                <label class="prop-row">Linker script <input id="target-linker" type="text" placeholder="firmware/my_board.ld"></label>
+                <label class="prop-row">Startup file <input id="target-startup" type="text" placeholder="sdk/startup_mydevice.s"></label>
+                <label class="prop-row">Sources (one per line) <textarea id="target-sources" rows="4" placeholder="bsp_my_board.cpp"></textarea></label>
+                <label class="prop-row">Include folders (one per line) <textarea id="target-includes" rows="3"></textarea></label>
+                <label class="prop-row">Defines (one per line) <textarea id="target-defines" rows="2"></textarea></label>
+                <label class="prop-row">FreeRTOS kernel <input id="target-freertos" type="text" placeholder="$env{FREERTOS_KERNEL_PATH}"></label>
+                <label class="prop-row">Toolchain folder <input id="target-toolchain" type="text" placeholder="(arm-none-eabi-gcc on PATH)"></label>
+                <label class="prop-row">Flash command <input id="target-flash" type="text" placeholder='openocd -f board/x.cfg -c "program {elf} verify reset exit"'></label>
+            </details>
+            <details class="registry-section" id="settings-section">
+                <summary class="registry-header"><span>Settings</span></summary>
+                <div class="hint-text">Empty: the framework's default.</div>
+                <label class="prop-row">Health check period (ms) <input id="setting-HealthCheckMs" type="number" placeholder="100"></label>
+                <label class="prop-row">Watchdog timeout (ms) <input id="setting-WatchdogTimeoutMs" type="number" placeholder="1000"></label>
+                <label class="prop-row">Timers (MaxTimers) <input id="setting-MaxTimers" type="number" placeholder="16"></label>
+                <label class="prop-row">Most urgent FreeRTOS-safe interrupt priority <input id="setting-MaxSyscallPriority" type="number" placeholder="5"></label>
+            </details>
             <div class="registry-section">
                 <div class="registry-header"><span>Features</span></div>
                 <label class="check-row"><input id="feat-trace" type="checkbox"> Trace (FA_TRACE)</label>

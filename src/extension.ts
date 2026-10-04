@@ -307,6 +307,319 @@ export function renameEventStruct(eventsText: string, from: string, to: string):
     return eventsText.replace(new RegExp(`(\\bstruct\\s+)${from}(\\s*[{;:])`), `$1${to}$2`);
 }
 
+// ==========================================================================
+// THE TARGET (docs/design/app-diagram.md section 7.5): the board's build decisions, under board.target in
+// *.app.json; Export Application generates the firmware build and FreeRTOSConfig.h from them and the diagram.
+// ==========================================================================
+
+// The cores FreeActors supports (ARMv7-M and ARMv8-M Mainline: NVIC with VTOR): compiler flags, FreeRTOS port
+export const TARGET_CORES: { [core: string]: { label: string; flags: string[]; port: string; portSources: string[] } } = {
+    'cortex-m3':  { label: 'Cortex-M3', flags: ['-mcpu=cortex-m3', '-mthumb'], port: 'ARM_CM3', portSources: ['port.c'] },
+    'cortex-m4':  { label: 'Cortex-M4 (no FPU)', flags: ['-mcpu=cortex-m4', '-mthumb', '-mfloat-abi=soft'], port: 'ARM_CM3', portSources: ['port.c'] },
+    'cortex-m4f': { label: 'Cortex-M4F', flags: ['-mcpu=cortex-m4', '-mthumb', '-mfpu=fpv4-sp-d16', '-mfloat-abi=hard'], port: 'ARM_CM4F', portSources: ['port.c'] },
+    'cortex-m7':  { label: 'Cortex-M7 (double-precision FPU)', flags: ['-mcpu=cortex-m7', '-mthumb', '-mfpu=fpv5-d16', '-mfloat-abi=hard'], port: 'ARM_CM4F', portSources: ['port.c'] },
+    'cortex-m33': { label: 'Cortex-M33 (FPU, no TrustZone)', flags: ['-mcpu=cortex-m33', '-mthumb', '-mfpu=fpv5-sp-d16', '-mfloat-abi=hard'],
+                    port: 'ARM_CM33_NTZ/non_secure', portSources: ['port.c', 'portasm.c'] },
+};
+
+export interface Target {
+    core?: string; nvic_prio_bits?: number; tick_hz?: number; toolchain?: string; freertos?: string;
+    linker_script?: string; startup?: string; sources?: string[]; includes?: string[]; defines?: string[]; flash?: string;
+    flavour?: string; part?: string; sdk?: string; flash_kb?: number; ram_kb?: number;
+}
+
+export function targetOf(app: any): Target { return (app && app.board && app.board.target) || {}; }
+
+export const FIRMWARE_CMAKE_FILENAME = 'freeactors_firmware.cmake';
+export const TOOLCHAIN_FILENAME = 'cmake/arm-none-eabi.cmake';
+export const FREERTOS_USER_CONFIG_FILENAME = 'freertos_config_user.h';
+
+// A path from the Target as CMake reads it: relative to the project, absolute as is, $env{X} from the environment
+function cmakePath(p: string): string {
+    const t = p.trim().replace(/\$env\{(\w+)\}/g, '$ENV{$1}');
+    return /^(\/|[A-Za-z]:[\\/]|\$)/.test(t) ? t : `\${CMAKE_CURRENT_SOURCE_DIR}/${t}`;
+}
+
+// A command line split into arguments, honouring "double" and 'single' quotes
+function splitCommand(command: string): string[] {
+    const args: string[] = [];
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(command)) !== null) args.push(m[1] ?? m[2] ?? m[3] ?? '');
+    return args;
+}
+
+export function generateToolchainFile(app: any): string {
+    const dir = (targetOf(app).toolchain || '').trim().replace(/[\\/]+$/, '');
+    const prefix = dir ? `${dir}/arm-none-eabi-` : 'arm-none-eabi-';
+    let out = `# AUTO-GENERATED - DO NOT HAND-EDIT (from ${app.name}.app.json, the board's Target: Export Application)\n`;
+    out += `# CMake toolchain file: GNU Arm Embedded (arm-none-eabi-gcc), bare metal. Used by the "firmware" preset.\n\n`;
+    out += `set(CMAKE_SYSTEM_NAME Generic)\nset(CMAKE_SYSTEM_PROCESSOR arm)\n\n`;
+    out += `set(CMAKE_C_COMPILER   ${prefix}gcc)\nset(CMAKE_CXX_COMPILER ${prefix}g++)\nset(CMAKE_ASM_COMPILER ${prefix}gcc)\n`;
+    out += `set(CMAKE_OBJCOPY      ${prefix}objcopy CACHE FILEPATH "objcopy")\nset(CMAKE_SIZE         ${prefix}size CACHE FILEPATH "size")\n\n`;
+    out += `# Test-compile a static library: linking a test program would need a linker script\n`;
+    out += `set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\n\n`;
+    out += `set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\nset(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\nset(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n`;
+    return out;
+}
+
+// CMakePresets.json: "host" (simulator and tests) and "firmware". Marked as FreeActors' so a later export may
+// rewrite it; your own presets go in CMakeUserPresets.json
+export function generateCMakePresets(app: any): string {
+    const presets = {
+        version: 3,
+        cmakeMinimumRequired: { major: 3, minor: 21, patch: 0 },
+        vendor: { freeactors: { generated: `from ${app.name}.app.json by Export Application; your own presets: CMakeUserPresets.json` } },
+        configurePresets: [
+            { name: 'host', displayName: 'Host: REPL simulator + tests', binaryDir: '${sourceDir}/build',
+              cacheVariables: { CMAKE_EXPORT_COMPILE_COMMANDS: 'ON' } },
+            { name: 'firmware', displayName: `Firmware: ${app.board?.type || 'the board'} (arm-none-eabi)`, binaryDir: '${sourceDir}/build-fw',
+              toolchainFile: '${sourceDir}/' + TOOLCHAIN_FILENAME,
+              cacheVariables: { CMAKE_BUILD_TYPE: 'MinSizeRel', CMAKE_EXPORT_COMPILE_COMMANDS: 'ON' } },
+        ],
+        buildPresets: [{ name: 'host', configurePreset: 'host' }, { name: 'firmware', configurePreset: 'firmware' }],
+        testPresets: [{ name: 'host', configurePreset: 'host', output: { outputOnFailure: true } }],
+    };
+    return JSON.stringify(presets, null, 2) + '\n';
+}
+
+export function generateFirmwareCMake(app: any): string {
+    const t = targetOf(app);
+    const core = TARGET_CORES[t.core || ''] || TARGET_CORES['cortex-m4f']!;
+    const name = String(app.name).toLowerCase();
+    const list = (xs: string[] | undefined) => (xs || []).map(s => s.trim()).filter(Boolean);
+    const freertos = (t.freertos || '').trim() ? cmakePath(t.freertos!) : '$ENV{FREERTOS_KERNEL_PATH}';
+    let out = `# ==========================================================================\n`;
+    out += `# AUTO-GENERATED FIRMWARE BUILD - DO NOT HAND-EDIT (from ${app.name}.app.json: the board's Target, Export Application)\n`;
+    out += `# Included by CMakeLists.txt when cross-compiling (the "firmware" preset): ${name}.elf and .bin, the memory use,\n`;
+    out += `# and a "flash" target.\n`;
+    out += `#   cmake --preset firmware && cmake --build --preset firmware                 # build\n`;
+    out += `#   cmake --build --preset firmware --target flash                             # program the board\n`;
+    out += `# ==========================================================================\n\n`;
+    out += `enable_language(C ASM)\n\n`;
+    out += `set(FREERTOS_KERNEL_PATH "${freertos}" CACHE PATH "FreeRTOS kernel 'Source' folder")\n`;
+    out += `if(NOT EXISTS "\${FREERTOS_KERNEL_PATH}/include/FreeRTOS.h")\n`;
+    out += `    message(FATAL_ERROR "FreeRTOS kernel not found at '\${FREERTOS_KERNEL_PATH}': set it in the application's Target, or FREERTOS_KERNEL_PATH")\n`;
+    out += `endif()\n`;
+    out += `set(FA_FREERTOS_PORT \${FREERTOS_KERNEL_PATH}/portable/GCC/${core.port})   # ${core.label}\n\n`;
+    out += `add_executable(${name}\n`;
+    out += `    ${appFileName(app, 'main.cpp')}                           # generated (Export Application)\n`;
+    out += `    ${appFileName(app, 'app.cpp')}\n`;
+    for (const s of list(t.sources)) out += `    ${cmakePath(s)}\n`;
+    if ((t.startup || '').trim()) out += `    ${cmakePath(t.startup!)}\n`;
+    for (const k of ['tasks.c', 'queue.c', 'list.c']) out += `    \${FREERTOS_KERNEL_PATH}/${k}\n`;
+    for (const k of core.portSources) out += `    \${FA_FREERTOS_PORT}/${k}\n`;
+    out += `)\nset_target_properties(${name} PROPERTIES SUFFIX ".elf")\n\n`;
+    out += `target_include_directories(${name} PRIVATE\n`;
+    out += `    \${CMAKE_CURRENT_SOURCE_DIR}                 # generated and your headers, FreeRTOSConfig.h\n`;
+    out += `    \${CMAKE_CURRENT_SOURCE_DIR}/freeactors      # the FreeActors library\n`;
+    for (const i of list(t.includes)) out += `    ${cmakePath(i)}\n`;
+    out += `    \${FREERTOS_KERNEL_PATH}/include\n    \${FA_FREERTOS_PORT}\n)\n\n`;
+    if (list(t.defines).length > 0) out += `target_compile_definitions(${name} PRIVATE ${list(t.defines).join(' ')})\n\n`;
+    out += `# FreeActors' features (trace, commands, health) come from ${appFileName(app, 'config.hpp')}, set in the diagram\n`;
+    out += `set(FA_MCU_FLAGS ${core.flags.join(' ')})\n`;
+    out += `target_compile_options(${name} PRIVATE\n    \${FA_MCU_FLAGS}\n    -Os -g3 -ffunction-sections -fdata-sections -Wall\n`;
+    out += `    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit>\n)\n`;
+    out += `target_compile_features(${name} PRIVATE cxx_std_17)\n\n`;
+    out += `target_link_options(${name} PRIVATE\n    \${FA_MCU_FLAGS}\n`;
+    if ((t.linker_script || '').trim()) out += `    -T${cmakePath(t.linker_script!)}\n`;
+    out += `    --specs=nano.specs --specs=nosys.specs\n    -Wl,--gc-sections\n    -Wl,-Map=\${CMAKE_CURRENT_BINARY_DIR}/${name}.map\n    -Wl,--print-memory-usage\n)\n\n`;
+    out += `add_custom_command(TARGET ${name} POST_BUILD\n`;
+    out += `    COMMAND \${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${name}> \${CMAKE_CURRENT_BINARY_DIR}/${name}.bin\n`;
+    out += `    COMMAND \${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${name}> \${CMAKE_CURRENT_BINARY_DIR}/${name}.hex\n`;
+    out += `    COMMAND \${CMAKE_SIZE} $<TARGET_FILE:${name}>\n    COMMENT "${name}.bin, ${name}.hex"\n)\n`;
+    if ((t.flash || '').trim()) {
+        const args = splitCommand(t.flash!).map(a => a
+            .replace(/\{elf\}/g, `$<TARGET_FILE:${name}>`)
+            .replace(/\{bin\}/g, `\${CMAKE_CURRENT_BINARY_DIR}/${name}.bin`)
+            .replace(/\{hex\}/g, `\${CMAKE_CURRENT_BINARY_DIR}/${name}.hex`));
+        out += `\n# Program the board: ${t.flash!.trim()}\n`;
+        out += `add_custom_target(flash\n    COMMAND ${args.map(a => (/[\s;"]/.test(a) || a === '' ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ')}\n`;
+        out += `    DEPENDS ${name}\n    USES_TERMINAL\n)\n`;
+    }
+    return out;
+}
+
+// The highest task priority in the application (actors, periodic modules, services; FreeActors' own tasks use 1)
+function highestPriority(app: any): number {
+    return Math.max(1, ...((app.components || []) as any[]).filter(c => Number(c.priority) > 0).map(c => Number(c.priority)));
+}
+
+export function generateFreeRTOSConfig(app: any): string {
+    const t = targetOf(app);
+    const core = t.core || 'cortex-m4f';
+    const bits = Number(t.nvic_prio_bits) > 0 ? Number(t.nvic_prio_bits) : 4;
+    const maxSyscall = Number((app.settings || {}).MaxSyscallPriority ?? 5);
+    const lines: [string, string, string?][] = [
+        ['configCPU_CLOCK_HZ', '( SystemCoreClock )', 'CMSIS: the clock at scheduler start'],
+        ['configTICK_RATE_HZ', `( ${Number(t.tick_hz) > 0 ? Number(t.tick_hz) : 1000} )`],
+        ['configUSE_PREEMPTION', '1'],
+        ['configUSE_PORT_OPTIMISED_TASK_SELECTION', '1'],
+        ['configMAX_PRIORITIES', String(highestPriority(app) + 1), 'the highest priority in the diagram + 1'],
+        ['configMINIMAL_STACK_SIZE', '128'],
+        ['configMAX_TASK_NAME_LEN', '16'],
+        ['configUSE_16_BIT_TICKS', '0'],
+        ['configIDLE_SHOULD_YIELD', '1'],
+        ['configSUPPORT_STATIC_ALLOCATION', '1', 'FreeActors allocates every task and queue statically'],
+        ['configSUPPORT_DYNAMIC_ALLOCATION', '0'],
+        ['configUSE_IDLE_HOOK', '0'],
+        ['configUSE_TICK_HOOK', '1', 'drives Fa::Application::on_tick_isr() (timers)'],
+        ['configUSE_MUTEXES', '0'],
+        ['configUSE_TIMERS', '0', 'FreeActors\' timers run from the tick hook'],
+        ['configQUEUE_REGISTRY_SIZE', '0'],
+        ['configCHECK_FOR_STACK_OVERFLOW', '2', 'vApplicationStackOverflowHook (generated) and the board\'s on_stack_overflow'],
+        ['configUSE_MALLOC_FAILED_HOOK', '0'],
+        ['INCLUDE_vTaskDelay', '1'],
+        ['INCLUDE_xTaskDelayUntil', '1'],
+        ['INCLUDE_vTaskSuspend', '1'],
+        ['INCLUDE_uxTaskGetStackHighWaterMark', '1', 'free stack per task (fa-trace "health")'],
+        ['configPRIO_BITS', String(bits), 'the device\'s NVIC priority bits (__NVIC_PRIO_BITS)'],
+        ['configLIBRARY_LOWEST_INTERRUPT_PRIORITY', String((1 << bits) - 1)],
+        ['configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY', String(maxSyscall), 'interrupt modules use this priority or less urgent'],
+        ['configKERNEL_INTERRUPT_PRIORITY', '( configLIBRARY_LOWEST_INTERRUPT_PRIORITY << ( 8 - configPRIO_BITS ) )'],
+        ['configMAX_SYSCALL_INTERRUPT_PRIORITY', '( configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY << ( 8 - configPRIO_BITS ) )'],
+    ];
+    if (core === 'cortex-m33') {
+        lines.push(['configENABLE_FPU', '1'], ['configENABLE_MPU', '0'], ['configENABLE_TRUSTZONE', '0'],
+                   ['configRUN_FREERTOS_SECURE_ONLY', '1', 'ARM_CM33_NTZ: no TrustZone'], ['configENABLE_MVE', '0']);
+    }
+    let out = `/* ==========================================================================\n`;
+    out += ` * AUTO-GENERATED FREERTOS CONFIGURATION - DO NOT HAND-EDIT (from ${app.name}.app.json: the diagram and the\n`;
+    out += ` * board's Target, Export Application). To change a value, define it in ${FREERTOS_USER_CONFIG_FILENAME} (yours):\n`;
+    out += ` * it is included first, and every value below is only a default.\n`;
+    out += ` * ========================================================================== */\n\n`;
+    out += `#ifndef FREERTOS_CONFIG_H\n#define FREERTOS_CONFIG_H\n\n`;
+    out += `#include "${FREERTOS_USER_CONFIG_FILENAME}"\n\n`;
+    out += `#if defined(__GNUC__) && !defined(__ASSEMBLER__)\n#include <stdint.h>\n#ifdef __cplusplus\nextern "C" {\n#endif\n`;
+    out += `extern uint32_t SystemCoreClock;   /* CMSIS (the vendor's system_<device>.c) */\n#ifdef __cplusplus\n}\n#endif\n#endif\n\n`;
+    for (const [key, value, comment] of lines) {
+        out += `#ifndef ${key}\n#define ${key} ${value}${comment ? `   /* ${comment} */` : ''}\n#endif\n`;
+    }
+    out += `\n/* A failed assertion stops here with interrupts off: attach the debugger to see where */\n`;
+    out += `#ifndef configASSERT\n#define configASSERT( x )    if( ( x ) == 0 ) { taskDISABLE_INTERRUPTS(); for( ;; ) {} }\n#endif\n\n`;
+    out += `/* FreeRTOS's handlers under the CMSIS names of the vendor's vector table (and FreeActors' own table) */\n`;
+    out += `#define vPortSVCHandler      SVC_Handler\n#define xPortPendSVHandler   PendSV_Handler\n#define xPortSysTickHandler  SysTick_Handler\n\n`;
+    out += `#endif /* FREERTOS_CONFIG_H */\n`;
+    return out;
+}
+
+export function generateFreeRTOSUserConfigStub(app: any): string {
+    return `/* Your FreeRTOS settings for ${app.name} (created once by FreeActors; Export never overwrites it).\n` +
+           ` * FreeRTOSConfig.h is generated from the application and includes this file first: a value defined here\n` +
+           ` * replaces the generated default, e.g.\n` +
+           ` *     #define configMINIMAL_STACK_SIZE 256\n */\n` +
+           `#ifndef FREERTOS_CONFIG_USER_H\n#define FREERTOS_CONFIG_USER_H\n\n#endif\n`;
+}
+
+// The firmware build files Export Application writes when the board's Target names a core: tool-owned
+// (CMakePresets.json only while it is FreeActors', see the provider)
+export function generateFirmwareFiles(app: any): { [file: string]: string } {
+    return {
+        [FIRMWARE_CMAKE_FILENAME]: generateFirmwareCMake(app),
+        [TOOLCHAIN_FILENAME]: generateToolchainFile(app),
+        'FreeRTOSConfig.h': generateFreeRTOSConfig(app),
+        'CMakePresets.json': generateCMakePresets(app),
+    };
+}
+
+// ---- Vendor flavours: a vendor's SDK layout turned into the Target's fields and the vendor-side files --------
+
+export const FLAVOURS: { [id: string]: string } = { 'stm32f4-hal': 'STM32F4 + HAL' };
+
+export const STM32F4_SDK_REPOSITORIES = ['cmsis_core', 'cmsis_device_f4', 'stm32f4xx_hal_driver'];
+
+// The board's vendor glue for the STM32 HAL (user-owned, created once): the HAL's time base is the RTOS tick
+export function generateStm32HalGlue(app: any): string {
+    return `// ==========================================================================\n` +
+        `// ${app.board?.type || 'The board'}: the vendor glue that cannot live in the header (C functions the HAL calls,\n` +
+        `// defined once). Created once by FreeActors (the STM32F4 + HAL flavour); this file is yours.\n` +
+        `// FreeRTOS owns SysTick: the HAL's time base is the RTOS tick.\n` +
+        `// ==========================================================================\n\n` +
+        `#include "stm32f4xx_hal.h"\n\n#include "FreeRTOS.h"\n#include "task.h"\n\nextern "C" {\n\n` +
+        `// The HAL must not reconfigure SysTick (FreeRTOS uses it); HAL_Init() calls this\n` +
+        `HAL_StatusTypeDef HAL_InitTick(uint32_t /*TickPriority*/) {\n    return HAL_OK;\n}\n\n` +
+        `uint32_t HAL_GetTick(void) {\n    return xTaskGetTickCount();\n}\n\n} // extern "C"\n`;
+}
+
+// A linker script for an STM32F4 (user-owned, created once): flash at 0x08000000, SRAM at 0x20000000, the symbols
+// of ST's GCC startup files, and the .noinit section FreeActors' health monitor keeps its fault record in
+export function generateStm32LinkerScript(part: string, flashKb: number, ramKb: number): string {
+    return `/*\n * Linker script for ${part}: ${flashKb} KB flash, ${ramKb} KB SRAM. Created once by FreeActors (the STM32F4 + HAL\n` +
+` * flavour); this file is yours. Section and symbol names match ST's GCC startup files (startup_*.s):\n` +
+` * _estack, _sidata, _sdata, _edata, _sbss, _ebss. FreeActors allocates everything statically, so there is no heap;\n` +
+` * the stack below is used by main() until the scheduler starts, and by interrupts afterwards (MSP).\n */\n\n` +
+`ENTRY(Reset_Handler)\n\n_estack = ORIGIN(RAM) + LENGTH(RAM);   /* initial MSP: top of SRAM */\n_Min_Stack_Size = 0x800;               /* 2 KB */\n\n` +
+`MEMORY\n{\n    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = ${flashKb}K\n    RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = ${ramKb}K\n}\n\n` +
+`SECTIONS\n{\n` +
+`    .isr_vector : { . = ALIGN(4); KEEP(*(.isr_vector)) . = ALIGN(4); } > FLASH\n\n` +
+`    .text :\n    {\n        . = ALIGN(4);\n        *(.text) *(.text*) *(.glue_7) *(.glue_7t) *(.eh_frame)\n        KEEP(*(.init)) KEEP(*(.fini))\n        . = ALIGN(4);\n        _etext = .;\n    } > FLASH\n\n` +
+`    .rodata : { . = ALIGN(4); *(.rodata) *(.rodata*) . = ALIGN(4); } > FLASH\n\n` +
+`    .ARM.extab : { *(.ARM.extab* .gnu.linkonce.armextab.*) } > FLASH\n` +
+`    .ARM : { __exidx_start = .; *(.ARM.exidx*) __exidx_end = .; } > FLASH\n\n` +
+`    .preinit_array : { PROVIDE_HIDDEN(__preinit_array_start = .); KEEP(*(.preinit_array*)) PROVIDE_HIDDEN(__preinit_array_end = .); } > FLASH\n` +
+`    .init_array : { PROVIDE_HIDDEN(__init_array_start = .); KEEP(*(SORT(.init_array.*))) KEEP(*(.init_array*)) PROVIDE_HIDDEN(__init_array_end = .); } > FLASH\n` +
+`    .fini_array : { PROVIDE_HIDDEN(__fini_array_start = .); KEEP(*(SORT(.fini_array.*))) KEEP(*(.fini_array*)) PROVIDE_HIDDEN(__fini_array_end = .); } > FLASH\n\n` +
+`    _sidata = LOADADDR(.data);\n\n` +
+`    .data : { . = ALIGN(4); _sdata = .; *(.data) *(.data*) . = ALIGN(4); _edata = .; } > RAM AT > FLASH\n\n` +
+`    .bss :\n    {\n        . = ALIGN(4);\n        _sbss = .;\n        __bss_start__ = _sbss;\n        *(.bss) *(.bss*) *(COMMON)\n        . = ALIGN(4);\n        _ebss = .;\n        __bss_end__ = _ebss;\n    } > RAM\n\n` +
+`    /* Not zeroed at start-up: survives a reset (FreeActors' health record, FA_NOINIT) */\n` +
+`    .noinit (NOLOAD) : { . = ALIGN(4); *(.noinit) *(.noinit*) . = ALIGN(4); } > RAM\n\n` +
+`    /* Fails the link if static data leaves less than _Min_Stack_Size for the main stack */\n` +
+`    ._user_stack :\n    {\n        . = ALIGN(8);\n        PROVIDE(end = .);\n        PROVIDE(_end = .);\n        . = . + _Min_Stack_Size;\n        . = ALIGN(8);\n    } > RAM\n\n` +
+`    .ARM.attributes 0 : { *(.ARM.attributes) }\n}\n`;
+}
+
+// The STM32F4 + HAL flavour: the Target's fields for the part (STM32F446xx) and the SDK folder holding ST's
+// repositories cmsis_core, cmsis_device_f4 and stm32f4xx_hal_driver; the files it creates if missing (yours)
+export function stm32f4HalFlavour(app: any): { target: Target; create: { [file: string]: string }; copy: { [file: string]: string } } {
+    const t = targetOf(app);
+    const part = (t.part || 'STM32F446xx').trim();
+    const sdk = (t.sdk || 'third_party/st').trim().replace(/[\\/]+$/, '');
+    const lowerPart = part.toLowerCase();
+    const boardSource = String(app.board?.header || 'bsp_board.hpp').replace(/\.(hpp|h)$/, '.cpp');
+    const linker = `firmware/${lowerPart}_flash.ld`;
+    const hal = (m: string) => `${sdk}/stm32f4xx_hal_driver/Src/stm32f4xx_hal${m}.c`;
+    const flavourSources = [boardSource, `${sdk}/cmsis_device_f4/Source/Templates/system_stm32f4xx.c`,
+        ...['', '_cortex', '_rcc', '_rcc_ex', '_gpio', '_dma', '_dma_ex', '_pwr', '_pwr_ex', '_uart'].map(hal)];
+    const flavourIncludes = [`${sdk}/cmsis_core/Core/Include`, `${sdk}/cmsis_device_f4/Include`, `${sdk}/stm32f4xx_hal_driver/Inc`, 'firmware'];
+    const union = (a: string[], b: string[] | undefined) => [...new Set([...a, ...(b || [])])];
+    return {
+        target: {
+            ...t, flavour: 'stm32f4-hal', part, sdk, core: 'cortex-m4f', nvic_prio_bits: 4,
+            linker_script: linker, startup: `${sdk}/cmsis_device_f4/Source/Templates/gcc/startup_${lowerPart}.s`,
+            sources: union(flavourSources, t.sources), includes: union(flavourIncludes, t.includes),
+            defines: union([part, 'USE_HAL_DRIVER'], t.defines),
+            flash: (t.flash || '').trim() || 'openocd -f interface/stlink.cfg -f target/stm32f4x.cfg -c "program {elf} verify reset exit"',
+        },
+        create: {
+            [linker]: generateStm32LinkerScript(part, Number(t.flash_kb) > 0 ? Number(t.flash_kb) : 512, Number(t.ram_kb) > 0 ? Number(t.ram_kb) : 128),
+            [boardSource]: generateStm32HalGlue(app),
+        },
+        copy: { 'firmware/stm32f4xx_hal_conf.h': `${sdk}/stm32f4xx_hal_driver/Inc/stm32f4xx_hal_conf_template.h` },
+    };
+}
+
+// What a flavour adds to the board blueprint: the vendor's header, its start-up call, the device's interrupt count
+export interface BoardFlavour { include: string; init: string; irqCount?: number; }
+
+export function boardFlavourOf(app: any, deviceHeader?: string): BoardFlavour | undefined {
+    if (targetOf(app).flavour !== 'stm32f4-hal') return undefined;
+    // the device header's IRQn_Type: the last interrupt's number + 1 sizes the vector table
+    const numbers = deviceHeader ? [...deviceHeader.matchAll(/^\s*\w+_IRQn\s*=\s*(\d+)\b/gm)].map(m => Number(m[1])) : [];
+    const flavour: BoardFlavour = {
+        include: '#include "stm32f4xx_hal.h"   // STM32F4 HAL and CMSIS (the STM32F4 + HAL flavour)',
+        init: 'HAL_Init();   // flash prefetch and caches, NVIC priority grouping 4 (as FreeRTOS requires); the HAL\'s tick is the RTOS tick',
+    };
+    if (numbers.length > 0) flavour.irqCount = Math.max(...numbers) + 1;
+    return flavour;
+}
+
+// The paths of the Target the checks look at (relative to the application's folder, or absolute)
+export function targetPaths(app: any): string[] {
+    const t = targetOf(app);
+    return [...(t.sources || []), t.startup || '', t.linker_script || ''].map(s => s.trim()).filter(s => s && !s.includes('$'));
+}
+
 // The application-wide hardware contract: the board against every module's requirements at once
 // (owners: the namespaces of the modules' HwRequirements, e.g. Timebomb, ButtonPoller)
 export function generateAppHwContractString(appName: string, owners: string[]): string {
@@ -504,6 +817,10 @@ function interruptAck(app: any, c: any, models: AppModelInfo[]):
     const conns = (app.connections || []).filter((x: any) => x.from === c.id);
     const byId = (id: string) => (app.components || []).find((x: any) => x.id === id);
     const ack = `${c.irq || 'irq'}_ack`;
+    if (c.commands) {   // receives the PC's commands for the built-in command service (FA_TRACE_COMMANDS)
+        return { returnType: 'size_t', includes: [],
+                 handler: `        IsrCtx::command_rx(Hw::${ack}());                 // where the receive DMA has written up to\n` };
+    }
     const first = conns[0];
     const target = first ? byId(first.to) : undefined;
     if (first && first.kind === 'stream' && target) {
@@ -512,7 +829,7 @@ function interruptAck(app: any, c: any, models: AppModelInfo[]):
     }
     if (first && first.kind === 'item' && target) {
         const item = first.item || target.item || 'uint32_t';
-        return { returnType: item, includes: [],
+        return { returnType: isBuiltinItemType(item) ? item : `App::${item}`, includes: isBuiltinItemType(item) ? [] : [moduleFileName(target.name)],
                  handler: `        IsrCtx::push(Hw::${ack}());                       // the item, to ${target.name}\n` };
     }
     if (first && first.kind === 'event' && target && target.kind === 'actor') {
@@ -538,6 +855,9 @@ export function generateModuleRequirementsStub(app: any, c: any, models: AppMode
             (ack.returnType === 'bool' ? '; true = it was ours' : ack.returnType === 'size_t' ? ' and return the DMA write position' : ' and return the item') +
             `\n};`);
         if (!/#include <cstddef>/.test(out)) out = out.replace('#include <cstdint>\n', '#include <cstddef>\n#include <cstdint>\n');
+        // an item type of the application's (declared by the service it goes to): named here, defined there
+        const custom = /^App::(\w+)$/.exec(ack.returnType);
+        if (custom) out = out.replace(`namespace ${c.name} {`, `namespace App { struct ${custom[1]}; }   // declared in the service's module file\n\nnamespace ${c.name} {`);
     }
     return out;
 }
@@ -547,6 +867,13 @@ function moduleApiBlock(name: string): string {
     return `#ifdef FA_IDE\n    using Hw = ::${name}::HwRequirements;   // seen only by the IDE: completion of what this module requires\n` +
            `#else\n    using Hw = HwPolicy;\n#endif\n` +
            `    static_assert(::${name}::HwContract<HwPolicy>::verify());   // the board provides what this module requires\n`;
+}
+
+// Item types the language provides; any other type named on a service (LogLine) is declared by the service
+export function isBuiltinItemType(type: string): boolean {
+    const t = String(type).trim();
+    return /^(u?int(8|16|32|64)_t|u?int_(least|fast)(8|16|32|64)_t|size_t|bool|char|float|double|(unsigned |signed )?(char|short|int|long|long long))$/.test(t) ||
+           t.includes('::') || t.includes('<') || t.endsWith('*');
 }
 
 export function generateModuleSkeleton(app: any, c: any, models: AppModelInfo[]): string {
@@ -564,7 +891,9 @@ export function generateModuleSkeleton(app: any, c: any, models: AppModelInfo[])
             eventIncludes.add(`${machine.toLowerCase()}_events.hpp`);
             for (const e of conn.events || []) examples.push(`Ctx::post(${machine}::${e}{});`);
         } else if (conn.kind === 'item') {
-            examples.push(`Ctx::mpsc_push(item);   // to ${target.name} (${conn.item || target.item})`);
+            const item = conn.item || target.item || 'uint32_t';
+            if (!isBuiltinItemType(item)) eventIncludes.add(moduleFileName(target.name));   // the service declares it
+            examples.push(`Ctx::${target.kind === 'spsc' ? 'spsc' : 'mpsc'}_push(${item}{});   // to ${target.name}`);
         }
     }
     const isr = c.kind === 'interrupt' ? interruptAck(app, c, models) : undefined;
@@ -603,6 +932,12 @@ export function generateModuleSkeleton(app: any, c: any, models: AppModelInfo[])
     } else {
         const element = c.kind === 'dma' ? (c.element || 'uint8_t') : (c.item || 'uint32_t');
         const base = c.kind === 'spsc' ? 'SpscServiceInterface' : c.kind === 'mpsc' ? 'MpscServiceInterface' : 'DmaRingInterface';
+        if (!isBuiltinItemType(element)) {
+            // The service owns its item type (one source of truth, as an actor owns its events): producers include this file
+            out += `// What ${c.name}'s producers push and consume_batch() receives: add its fields, with default values.\n`;
+            out += `// Items are copied into the buffer (and may come from interrupts): keep them small and plain.\n`;
+            out += `struct ${element} {\n    // e.g. uint32_t code = 0;\n};\n\n`;
+        }
         out += `template <typename HwPolicy, typename Ctx>\n`;
         out += `struct ${c.name} : Fa::${base}<${c.name}<HwPolicy, Ctx>, ${element}, AppConfig::${c.name}::size> {\n`;
         out += moduleApiBlock(c.name) + `\n`;
@@ -727,7 +1062,7 @@ function boardTypeParts(app: any): { ns: string | undefined; name: string } {
     return { name: parts.pop() || 'MyBoard', ns: parts.length > 0 ? parts.join('::') : undefined };
 }
 
-export function generateBoardBlueprint(app: any, sources: RequirementSource[]): string {
+export function generateBoardBlueprint(app: any, sources: RequirementSource[], flavour?: BoardFlavour): string {
     const { members, irqs } = boardMembers(app, sources);
     const { ns, name } = boardTypeParts(app);
     const features = app.features || {};
@@ -762,6 +1097,15 @@ export function generateBoardBlueprint(app: any, sources: RequirementSource[]): 
     }
     out += `};\n`;
     if (ns) out += `\n} // namespace ${ns}\n`;
+    if (flavour) {   // a vendor flavour: its header, its start-up call, the device's interrupt count
+        out = out.replace(`// TODO: the vendor's device header (CMSIS), e.g. #include "stm32f4xx.h"`, flavour.include)
+                 .replace('static void init() { /* TODO: vendor start-up (HAL/SDK init), clock tree, then each peripheral below */ }',
+                          `static void init() {\n        ${flavour.init}\n        // TODO: the clock tree, then each peripheral below\n    }`);
+        if (flavour.irqCount) {
+            out = out.replace(/static constexpr size_t irq_count = 240;\s*\/\/ TODO: the device's number of interrupts \(sizes the vector table\)/,
+                              `static constexpr size_t irq_count = ${flavour.irqCount};                       // the device's number of interrupts (from its header)`);
+        }
+    }
     return out;
 }
 
@@ -852,7 +1196,10 @@ export interface AppProblem {
 const COMPOSITE_KINDS = ['application', 'subsystem'];
 const SERVICE_KINDS = ['spsc', 'mpsc', 'dma'];
 
-export function checkAppModel(app: any, models: AppModelInfo[]): AppProblem[] {
+// What the provider found on disk for the Target's paths (targetPaths): exists, and the linker script's text
+export interface TargetFiles { [path: string]: { exists: boolean; content?: string } }
+
+export function checkAppModel(app: any, models: AppModelInfo[], files?: TargetFiles): AppProblem[] {
     const problems: AppProblem[] = [];
     const components: any[] = Array.isArray(app.components) ? app.components : [];
     const connections: any[] = Array.isArray(app.connections) ? app.connections : [];
@@ -906,6 +1253,9 @@ export function checkAppModel(app: any, models: AppModelInfo[]): AppProblem[] {
         }
         if (c.kind === 'periodic' && !(Number(c.period_ms) > 0)) error(`${c.name}: the period must be at least 1 ms`, where);
         if (c.kind === 'interrupt') {
+            if (c.commands && !features.commands) {
+                error(`Interrupt ${c.name} feeds the PC commands, but Commands (FA_TRACE_COMMANDS) is off`, where);
+            }
             if (!c.irq) warning(`Interrupt ${c.name}: no interrupt chosen (the board's Irq:: name)`, where);
             const maxSyscall = Number(settings.MaxSyscallPriority ?? 5);
             if (Number(c.pri) < maxSyscall) {
@@ -980,6 +1330,28 @@ export function checkAppModel(app: any, models: AppModelInfo[]): AppProblem[] {
                   'it allows exactly one; use an MPSC service', { component: c.id });
         }
     }
+    // ---- The target (the board's build decisions) ----
+    const t = targetOf(app);
+    const targetUsed = Object.keys(t).some(k => k !== 'core' && (t as any)[k] !== undefined && (t as any)[k] !== '' &&
+                                                 !(Array.isArray((t as any)[k]) && (t as any)[k].length === 0));
+    if (t.core && !TARGET_CORES[t.core]) {
+        error(`Target: core ${t.core} is not supported (FreeActors needs an ARMv7-M or ARMv8-M Mainline core: ${Object.values(TARGET_CORES).map(x => x.label).join(', ')})`);
+    } else if (!t.core && targetUsed) {
+        warning('Target: choose the core, or Export Application writes no firmware build');
+    }
+    if (t.core && !(t.linker_script || '').trim()) warning('Target: no linker script (the firmware cannot link)');
+    if (files) {
+        for (const p of targetPaths(app)) {
+            if (files[p] && !files[p]!.exists) warning(`Target: ${p} not found`);
+        }
+        const ld = (t.linker_script || '').trim();
+        const script = ld ? files[ld] : undefined;
+        if (features.health && script && script.exists && script.content !== undefined && !/\.noinit\b/.test(script.content)) {
+            error(`Target: the linker script ${ld} has no .noinit section: the health monitor keeps its fault record there ` +
+                  'across resets (add: .noinit (NOLOAD) : { *(.noinit*) } > RAM)');
+        }
+    }
+
     // Actors nothing posts to (they may still run on their own timers)
     for (const c of components.filter(x => x.kind === 'actor')) {
         if (!connections.some(x => x.to === c.id)) {
@@ -1021,6 +1393,19 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     // Writes the tool-owned application files (generateAppFiles) next to the model; refused while it has errors
+    // The Target's files as the checks need them: whether each exists, and the linker script's text
+    private async targetFiles(app: any, folderUri: vscode.Uri): Promise<TargetFiles> {
+        const files: TargetFiles = {};
+        const linker = (targetOf(app).linker_script || '').trim();
+        for (const p of targetPaths(app)) {
+            const uri = /^(\/|[A-Za-z]:[\\/])/.test(p) ? vscode.Uri.file(p) : vscode.Uri.joinPath(folderUri, p);
+            const content = p === linker ? await readFileIfExists(uri) : undefined;
+            const exists = content !== undefined || await fileExists(uri);
+            files[p] = content !== undefined ? { exists, content } : { exists };
+        }
+        return files;
+    }
+
     // The state machines next to the application, read from open documents when open (unsaved edits count)
     private async modelsIn(folderUri: vscode.Uri): Promise<AppModelInfo[]> {
         const found: AppModelInfo[] = [];
@@ -1068,7 +1453,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             vscode.window.showErrorMessage(`❌ Export failed: the application model is not valid JSON (${e.message})`);
             return;
         }
-        const errors = checkAppModel(app, models).filter(p => p.severity === 'error');
+        const errors = checkAppModel(app, models, await this.targetFiles(app, folderUri)).filter(p => p.severity === 'error');
         if (errors.length > 0) {
             vscode.window.showErrorMessage(`❌ Export refused: ${errors.length} error(s) in the application, e.g. "${errors[0]!.message}". ` +
                                            'See the Problems list in the editor.');
@@ -1122,6 +1507,36 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         for (const [file, content] of Object.entries(files)) {
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
         }
+        // The firmware build, when the board's Target names a core (section 7.5)
+        let firmwareNote = '';
+        if (targetOf(app).core) {
+            await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(folderUri, 'cmake'));
+            for (const [file, content] of Object.entries(generateFirmwareFiles(app))) {
+                const uri = vscode.Uri.joinPath(folderUri, file);
+                if (file === 'CMakePresets.json') {
+                    const existing = await readFileIfExists(uri);
+                    let ours = existing === undefined;
+                    try { ours = ours || Boolean(JSON.parse(existing!).vendor?.freeactors); } catch { /* not JSON: yours */ }
+                    if (!ours) { firmwareNote += ' CMakePresets.json is yours, so it was left as is: it needs a "firmware" preset with the toolchain file cmake/arm-none-eabi.cmake.'; continue; }
+                }
+                await vscode.workspace.fs.writeFile(uri, stringToUint8Array(content));
+            }
+            const userConfig = vscode.Uri.joinPath(folderUri, FREERTOS_USER_CONFIG_FILENAME);
+            if (!(await fileExists(userConfig))) {
+                await vscode.workspace.fs.writeFile(userConfig, stringToUint8Array(generateFreeRTOSUserConfigStub(app)));
+                created.push(FREERTOS_USER_CONFIG_FILENAME);
+            }
+            const cmakeUri = vscode.Uri.joinPath(folderUri, 'CMakeLists.txt');
+            const cmake = await readFileIfExists(cmakeUri);
+            if (cmake === undefined) {
+                await vscode.workspace.fs.writeFile(cmakeUri, stringToUint8Array(generateCMakeListsString(JSON.stringify({ name: app.name }))));
+            } else if (!cmake.includes(FIRMWARE_CMAKE_FILENAME)) {
+                firmwareNote += ` To build the firmware, add after project(...) in CMakeLists.txt: ` +
+                    `if(CMAKE_CROSSCOMPILING) include(\${CMAKE_CURRENT_SOURCE_DIR}/${FIRMWARE_CMAKE_FILENAME}) return() endif()`;
+            }
+            firmwareNote = ` Firmware build: cmake --preset firmware && cmake --build --preset firmware${(targetOf(app).flash || '').trim() ? ' --target flash' : ''}.` + firmwareNote;
+        }
+
         // The board, when it lives next to the application: what the requirements gained since is appended
         let boardNote = '';
         const boardUri = this.boardUri(app, folderUri);
@@ -1137,7 +1552,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         }
         vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}` +
             (exported.length > 0 ? `, and the state machines ${exported.join(', ')}.` : '.') +
-            (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') + boardNote +
+            (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') + boardNote + firmwareNote +
             (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
     }
 
@@ -1165,6 +1580,52 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         return vscode.Uri.joinPath(folderUri, header);
     }
 
+    // The vendor flavour's additions to the board blueprint (its device header read from the SDK, if there)
+    private async boardFlavour(app: any, folderUri: vscode.Uri): Promise<BoardFlavour | undefined> {
+        const t = targetOf(app);
+        if (t.flavour !== 'stm32f4-hal') return undefined;
+        const header = vscode.Uri.joinPath(folderUri, (t.sdk || 'third_party/st').trim(), 'cmsis_device_f4', 'Include', `${(t.part || 'STM32F446xx').trim().toLowerCase()}.h`);
+        return boardFlavourOf(app, await readFileIfExists(header));
+    }
+
+    // Apply flavour: the Target's fields from the vendor's SDK layout, and the vendor-side files created if missing
+    private async applyFlavour(document: vscode.TextDocument, folderUri: vscode.Uri) {
+        const app = JSON.parse(document.getText());
+        const t = targetOf(app);
+        if (t.flavour !== 'stm32f4-hal') {
+            vscode.window.showErrorMessage('❌ Choose a vendor flavour first (Target section).');
+            return;
+        }
+        const flavour = stm32f4HalFlavour(app);
+        await editJsonDocument(document.uri, a => { a.board = a.board || {}; a.board.target = flavour.target; return true; });
+        const created: string[] = [], notes: string[] = [];
+        for (const [file, content] of Object.entries(flavour.create)) {
+            const uri = vscode.Uri.joinPath(folderUri, file);
+            if (await fileExists(uri)) continue;
+            await vscode.workspace.fs.writeFile(uri, stringToUint8Array(content));
+            created.push(file);
+        }
+        for (const [file, from] of Object.entries(flavour.copy)) {
+            const uri = vscode.Uri.joinPath(folderUri, file);
+            if (await fileExists(uri)) continue;
+            const template = await readFileIfExists(vscode.Uri.joinPath(folderUri, from));
+            if (template === undefined) { notes.push(`${file} not created: ${from} not found (the SDK below)`); continue; }
+            await vscode.workspace.fs.writeFile(uri, stringToUint8Array(template));
+            created.push(`${file} (from ST's template)`);
+        }
+        const sdk = flavour.target.sdk!;
+        const missing: string[] = [];
+        for (const repo of STM32F4_SDK_REPOSITORIES) {
+            if (!(await fileExists(vscode.Uri.joinPath(folderUri, sdk, repo)))) missing.push(repo);
+        }
+        if (missing.length > 0) {
+            notes.push(`Get ST's SDK into ${sdk}: ` + missing.map(r => `git clone --depth 1 https://github.com/STMicroelectronics/${r} ${sdk}/${r}`).join('; ') +
+                       ' (then Apply flavour again for the HAL configuration)');
+        }
+        vscode.window.showInformationMessage(`🧩 ${FLAVOURS[t.flavour]} for ${flavour.target.part}: the Target is filled in.` +
+            (created.length > 0 ? ` Created for you: ${created.join(', ')}.` : '') + (notes.length > 0 ? ` ${notes.join('. ')}.` : ''));
+    }
+
     // Generate Board: a compiling board skeleton from all the requirements; if the board exists, only what is missing
     private async generateBoard(document: vscode.TextDocument, folderUri: vscode.Uri, models: AppModelInfo[]) {
         let app: any;
@@ -1183,7 +1644,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         const existing = await readFileIfExists(boardUri);
         let message: string;
         if (existing === undefined) {
-            await vscode.workspace.fs.writeFile(boardUri, stringToUint8Array(generateBoardBlueprint(app, sources)));
+            await vscode.workspace.fs.writeFile(boardUri, stringToUint8Array(generateBoardBlueprint(app, sources, await this.boardFlavour(app, folderUri))));
             message = `🛠️ Board ${app.board.header} created from the requirements of ${sources.map(s => s.owner).join(', ') || 'no module yet'}: fill in the TODOs.`;
         } else {
             const { updated, added } = appendMissingBoardMembers(existing, app, sources);
@@ -1243,7 +1704,8 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             const models = await scanModels();
             let problems: AppProblem[] = [];
             try {
-                problems = checkAppModel(JSON.parse(document.getText()), models);
+                const app = JSON.parse(document.getText());
+                problems = checkAppModel(app, models, await this.targetFiles(app, folderUri));
             } catch (e: any) {
                 problems = [{ severity: 'error', message: `Not a valid application model (JSON): ${e.message}` }];
             }
@@ -1304,6 +1766,10 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                 }
                 case 'exportApplication': {
                     await this.exportApplication(document, folderUri, await scanModels());
+                    return;
+                }
+                case 'applyFlavour': {
+                    try { await this.applyFlavour(document, folderUri); } catch (e: any) { vscode.window.showErrorMessage(`❌ ${e.message}`); }
                     return;
                 }
                 case 'generateBoard': {
@@ -2887,6 +3353,15 @@ export function generateCMakeListsString(jsonText: string): string {
     out += `set(CMAKE_CXX_STANDARD_REQUIRED ON)\n`;
     out += `set(CMAKE_CXX_EXTENSIONS OFF)\n`;
     out += `set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # build/compile_commands.json: code completion (clangd)\n\n`;
+
+    out += `# Cross-compiling (the "firmware" preset): the firmware, from the application's Target, instead of the host targets\n`;
+    out += `if(CMAKE_CROSSCOMPILING)\n`;
+    out += `    if(NOT EXISTS \${CMAKE_CURRENT_SOURCE_DIR}/${FIRMWARE_CMAKE_FILENAME})\n`;
+    out += `        message(FATAL_ERROR "No firmware build yet: describe the board's Target in the application diagram, then Export Application")\n`;
+    out += `    endif()\n`;
+    out += `    include(\${CMAKE_CURRENT_SOURCE_DIR}/${FIRMWARE_CMAKE_FILENAME})\n`;
+    out += `    return()\n`;
+    out += `endif()\n\n`;
 
     out += `include_directories(\n`;
     out += `    \${CMAKE_CURRENT_SOURCE_DIR}\n`;

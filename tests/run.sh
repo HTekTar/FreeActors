@@ -321,6 +321,39 @@ vector_table_checks() {
     done
 }
 
+# A firmware project from its application alone (tests/fixtures/target, drawn top-down with the board's Target):
+# Export Application and Generate Board through the editors' providers, then the generated CMake presets must
+# configure, compile and link it as is, for each supported core
+target_build_checks() {
+    local core dir
+    if ! command -v cmake > /dev/null; then echo "SKIP  target build: cmake not found"; return; fi
+    for core in cortex-m4f cortex-m3 cortex-m4 cortex-m7 cortex-m33; do
+        dir="$OUT/target_$core"
+        node "$ROOT/tests/target_build_test.js" "$dir" "$core" || { status=1; continue; }
+        if (cd "$dir" && cmake --preset firmware > configure.log 2>&1 && cmake --build --preset firmware > build.log 2>&1); then
+            echo "PASS  target build ($core): configures, compiles and links with the generated build and board ($(grep -o 'FLASH: *[0-9]* B' "$dir/build.log" | tr -s ' '))"
+        else
+            echo "FAIL  target build ($core) (log: tests/build/target_$core/build.log)"; grep -m 5 -E 'error|Error' "$dir/configure.log" "$dir/build.log"; status=1
+        fi
+    done
+}
+
+# The STM32F4 + HAL flavour from an empty folder: Apply flavour, Export Application, Generate Board through the
+# providers, then the generated build with ST's startup, system file and HAL. Needs STM32_SDK_PATH: a folder with
+# ST's repositories cmsis_core, cmsis_device_f4 and stm32f4xx_hal_driver (github.com/STMicroelectronics)
+flavour_checks() {
+    local dir="$OUT/flavour"
+    if [ -z "${STM32_SDK_PATH:-}" ] || [ ! -d "$STM32_SDK_PATH/stm32f4xx_hal_driver" ]; then
+        echo "SKIP  flavour build: set STM32_SDK_PATH to a folder with cmsis_core, cmsis_device_f4, stm32f4xx_hal_driver"; return
+    fi
+    node "$ROOT/tests/flavour_test.js" "$dir" "$STM32_SDK_PATH" || { status=1; return; }
+    if (cd "$dir" && cmake --preset firmware > configure.log 2>&1 && cmake --build --preset firmware > build.log 2>&1); then
+        echo "PASS  flavour build (STM32F4 + HAL): configures, compiles and links with ST's files and the generated board ($(grep -o 'FLASH: *[0-9]* B' "$dir/build.log" | tr -s ' '))"
+    else
+        echo "FAIL  flavour build (log: tests/build/flavour/build.log)"; grep -m 5 -E 'error|Error' "$dir/configure.log" "$dir/build.log"; status=1
+    fi
+}
+
 if ! command -v arm-none-eabi-g++ > /dev/null; then
     echo "SKIP  target compile: arm-none-eabi-g++ not found"
 elif [ -z "${FREERTOS_KERNEL_PATH:-}" ] || [ ! -f "$FREERTOS_KERNEL_PATH/include/FreeRTOS.h" ]; then
@@ -333,6 +366,8 @@ else
     target_compile m4-fpu-trace-commands-health ARM_CM4F -mfpu=fpv4-sp-d16 -mfloat-abi=hard -DFA_TRACE -DFA_TRACE_COMMANDS -DFA_HEALTH -DFA_DEBUG_COMMANDS
     vector_table_checks
     app_generation_checks
+    target_build_checks
+    flavour_checks
 fi
 
 # Runtime integration: a real Fa::Application on the FreeRTOS POSIX port (tasks = Linux threads, real tick).

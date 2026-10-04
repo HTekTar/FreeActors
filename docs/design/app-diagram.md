@@ -1,6 +1,6 @@
 # Application diagram — design
 
-Status: **agreed in discussion (2026-10-03)**: decisions in section 10. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1). Phases 2 to 4 (model, editor on the shared `media/canvas.js`, checks, generation including the board blueprint) implemented for 0.0.9; Timebomb is generated from its application model and verified on the board. Next: phase 5, top-down design, one source of truth for events and the target (section 7, agreed 2026-10-04).
+Status: **agreed in discussion (2026-10-03, phase 5 on 2026-10-04)**: decisions in section 10. Done in 0.0.8: event payloads (phase 1) and interrupt modules with the generated vector table (section 4.1). Phases 2 to 4 (model, editor on the shared `media/canvas.js`, checks, generation including the board blueprint) implemented for 0.0.9; Timebomb is generated from its application model and verified on the board. Phase 5 (top-down design, one source of truth for events, the target with the STM32F4 + HAL flavour; section 7) implemented; its acceptance test, Timebomb recreated top-down on the board, is next.
 Scope: FreeActors v1.x — a component-level model of the whole application, drawn in VS Code, from which the framework wiring is generated and checked; later the place where the running system is shown live.
 
 ## Goals
@@ -236,7 +236,7 @@ An event belongs to the state machine that receives it, so its namespace is that
 
 ### 7.4 Item types: owned by the receiving service
 
-The same rule for items: built-in types (`uint16_t`) need no home, but a type named on a connection into a service (`LogLine` into an MPSC service) is **declared by that service**: its module file gets `struct LogLine` in the service's namespace, created once when a connection names a type that does not exist yet, its fields left to the user. Producers include the service's module file.
+The same rule for items: built-in types (`uint16_t`) need no home, but a type named on a service (`LogLine` on an MPSC service) is **declared by that service**: its module file (created once) gets `struct LogLine` in `namespace App`, its fields left to the user. Producers include the service's module file; an interrupt pushing it from its acknowledge function names it in its requirements by a forward declaration.
 
 ### 7.5 The target
 
@@ -244,19 +244,23 @@ Decisions belong in the diagram; vendor content does not. The board's **Target**
 
 | Item | In the designer | File, owner |
 |---|---|---|
-| Core | Cortex-M3 / M4 / M4F / M7 / M33 | drives `-mcpu`, the FPU flags and the FreeRTOS port (`ARM_CM3`, `ARM_CM4F`, `ARM_CM7`, ...) |
+| Core | Cortex-M3 / M4 / M4F / M7 / M33 | drives `-mcpu`, the FPU flags and the FreeRTOS port (`ARM_CM3`, `ARM_CM4F`, `ARM_CM33_NTZ`); M7 uses `ARM_CM4F` (except r0p1 parts) |
 | CMake presets | — | `CMakePresets.json` (`host`, `firmware`), tool; the user's own presets go in CMake's `CMakeUserPresets.json` |
 | Toolchain | its folder, if `arm-none-eabi-gcc` is not on PATH | `cmake/arm-none-eabi.cmake`, tool |
 | Firmware target | vendor sources, include folders, defines (`STM32F446xx USE_HAL_DRIVER`), startup file, flash command template (`openocd -f board/st_nucleo_f4.cfg -c "program {elf} verify reset exit"`) | `freeactors_firmware.cmake`, tool, included by `CMakeLists.txt` like `freeactors_tests.cmake` (a hint if an existing one does not) |
 | FreeRTOS kernel | its folder (default `$env{FREERTOS_KERNEL_PATH}`) | used by the firmware target |
-| `FreeRTOSConfig.h` | tick rate; the device header (for `__NVIC_PRIO_BITS`) | tool: `configMAX_PRIORITIES` from the highest priority in the diagram, the hooks and static allocation FreeActors needs, stack overflow checking, `configASSERT`; it includes the user-owned `freertos_config_user.h` (created once) first, for overrides |
+| `FreeRTOSConfig.h` | tick rate; the NVIC priority bits (`__NVIC_PRIO_BITS`: 4 on STM32, Kinetis, SAM4; 3 on nRF52, TM4C) | tool: `configMAX_PRIORITIES` from the highest priority in the diagram, the hooks and static allocation FreeActors needs, stack overflow checking, `configASSERT`; it includes the user-owned `freertos_config_user.h` (created once) first, for overrides |
 | Linker script | its path | the user's or the vendor's; checked, not written |
 | HAL / SDK configuration | its folder | the vendor's template |
 | Startup and system files | their paths | the vendor's |
 
-**Checks** (section 3, Problems panel): a linker script without a `.noinit` section while the health monitor is on; a FreeRTOS, SDK or source path that does not exist; a core without an ARMv7-M NVIC and VTOR while the application has interrupt modules.
+**Checks** (section 3, Problems panel): a linker script without a `.noinit` section while the health monitor is on (error); a Target source, startup file or linker script that does not exist (warning: the SDK may come later); a core FreeActors does not support (only ARMv7-M and ARMv8-M Mainline cores are offered).
 
-**Vendor flavours** fill these fields: *STM32F4 + HAL, STM32F446ZE* sets the HAL sources, the startup file for the part, the HAL configuration template and the OpenOCD board file. The fields are generic, checked against nRF52 (nrfx), TM4C (TivaWare), Kinetis (MCUXpresso) and SAM4 (ASF): every SDK comes down to sources, include folders, defines, a linker script, a startup file and a flash command (OpenOCD, pyOCD, J-Link, probe-rs, nrfjprog).
+**Any start-up code links**: FreeActors' vector table names the core exception handlers (`HardFault_Handler`, ...) by their CMSIS names; the framework gives them weak defaults (a loop for the debugger), so a vendor's or the user's definitions replace them and a start-up file without them still links.
+
+**Interrupts feeding the PC commands**: an interrupt module has a property *Feeds the PC commands* (the built-in command service is no diagram component); its handler `IsrCtx::command_rx(Hw::<irq>_ack())` and its `size_t` acknowledge requirement are generated.
+
+**Vendor flavours** fill these fields from three more (the part, the SDK folder, flash and RAM sizes) with **Apply flavour**, and create the vendor-side files that are missing (yours afterwards). *STM32F4 + HAL* (SDK folder: ST's repositories `cmsis_core`, `cmsis_device_f4`, `stm32f4xx_hal_driver`) sets the core, the startup and system files for the part, the HAL sources and include folders, the defines (`STM32F446xx USE_HAL_DRIVER`) and an OpenOCD flash command; it creates the linker script (with `.noinit`) from the sizes, the HAL configuration from ST's template and the board's HAL tick glue (`<board>.cpp`); Generate Board then starts the board with the HAL's header and `HAL_Init()`, and reads the interrupt count from the part's device header. The fields are generic, checked against nRF52 (nrfx), TM4C (TivaWare), Kinetis (MCUXpresso) and SAM4 (ASF): every SDK comes down to sources, include folders, defines, a linker script, a startup file and a flash command (OpenOCD, pyOCD, J-Link, probe-rs, nrfjprog).
 
 ## 8. Phases
 

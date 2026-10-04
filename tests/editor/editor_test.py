@@ -288,6 +288,29 @@ check("an actor's properties list its events, renamed through the extension; a c
       r.get('sent') == [{'type': 'renameSignal', 'model': 'timebomb.hsm.json', 'from': 'Tick', 'to': 'Beat'}] and
       r.get('events') == ['ButtonPressed', 'Defuse'] and r.get('label') == 'New events (comma-separated)', json.dumps(r))
 
+# The board's Target and the settings in the sidebar: saved under board.target and settings
+r = run('app', app, '''
+const set = (id, v) => { const i = document.getElementById(id); i.value = v; i.dispatchEvent(new Event('change')); };
+const hiddenBefore = document.getElementById('flavour-fields').style.display === 'none';
+set('target-core', 'cortex-m4f');
+set('target-sources', 'bsp_nucleo.cpp\\nsdk/hal.c\\n');
+set('target-tick', '500');
+set('target-flavour', 'stm32f4-hal');
+const shownAfter = document.getElementById('flavour-fields').style.display !== 'none';
+document.getElementById('apply-flavour-btn').click();
+set('setting-HealthCheckMs', '50');
+set('setting-HealthCheckMs', '');
+set('setting-MaxTimers', '8');
+const edit = window.__edits.filter(m => m.type === 'documentEdit').pop();
+const saved = edit ? JSON.parse(edit.jsonText) : {};
+report({ target: saved.board && saved.board.target, settings: saved.settings, hiddenBefore, shownAfter,
+         applied: window.__edits.some(m => m.type === 'applyFlavour') });''', 'app_target')
+check("the Target and settings in the sidebar: saved under board.target (lines as lists) and settings; the flavour's fields and Apply",
+      r is not None and (r.get('target') or {}).get('core') == 'cortex-m4f' and (r.get('target') or {}).get('sources') == ['bsp_nucleo.cpp', 'sdk/hal.c'] and
+      (r.get('target') or {}).get('tick_hz') == 500 and (r.get('target') or {}).get('flavour') == 'stm32f4-hal' and
+      r.get('settings') == {'MaxTimers': 8} and r.get('hiddenBefore') is True and r.get('shownAfter') is True and r.get('applied') is True,
+      json.dumps(r))
+
 r = run('app', app, '''
 document.getElementById('export-app-btn').click();
 document.getElementById('generate-board-btn').click();

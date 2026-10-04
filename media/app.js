@@ -41,7 +41,8 @@ const DEFAULTS = {
 const PROPERTIES = {
     actor:     [['priority', 'Priority', 'number'], ['queue', 'Queue length', 'number'], ['stack', 'Stack (words)', 'number']],
     periodic:  [['period_ms', 'Period (ms)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
-    interrupt: [['irq', 'Interrupt (board Irq:: name)', 'text'], ['pri', 'NVIC priority (PRI)', 'number']],
+    interrupt: [['irq', 'Interrupt (board Irq:: name)', 'text'], ['pri', 'NVIC priority (PRI)', 'number'],
+                ['commands', 'Feeds the PC commands (FA_TRACE_COMMANDS)', 'checkbox']],
     spsc:      [['item', 'Item type', 'text'], ['size', 'Buffer (items)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
     mpsc:      [['item', 'Item type', 'text'], ['size', 'Buffer (items)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
     dma:       [['element', 'Element type', 'text'], ['size', 'Buffer (elements)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
@@ -68,6 +69,7 @@ const canvas = FaCanvas.create({
 document.getElementById('reset-view-btn').addEventListener('click', () => canvas.resetView());
 document.getElementById('export-app-btn').addEventListener('click', () => vscode.postMessage({ type: 'exportApplication' }));
 document.getElementById('generate-board-btn').addEventListener('click', () => vscode.postMessage({ type: 'generateBoard' }));
+document.getElementById('apply-flavour-btn').addEventListener('click', () => vscode.postMessage({ type: 'applyFlavour' }));
 
 // ---- Model ---------------------------------------------------------------------------------------------
 
@@ -99,7 +101,7 @@ function summaryOf(c) {
     } else if (c.kind === 'periodic') {
         lines.push(`⏱ every ${c.period_ms} ms · prio ${c.priority}`);
     } else if (c.kind === 'interrupt') {
-        lines.push(`⚡ ${c.irq ? 'Irq::' + c.irq : 'interrupt not set'} · PRI ${c.pri}`);
+        lines.push(`⚡ ${c.irq ? 'Irq::' + c.irq : 'interrupt not set'} · PRI ${c.pri}${c.commands ? ' · PC commands' : ''}`);
     } else if (c.kind === 'spsc' || c.kind === 'mpsc') {
         lines.push(`${c.item || 'item type not set'} × ${c.size}`);
     } else if (c.kind === 'dma') {
@@ -250,6 +252,40 @@ function renderSidebar() {
     });
     bindText('app-board-type', () => app.board.type, v => { app.board.type = v; });
     bindText('app-board-header', () => app.board.header, v => { app.board.header = v; });
+    // The board's Target (its build decisions) and the application's settings
+    const target = app.board.target || {};   // created when a field is first set
+    const bindTarget = (id, key, kind) => {
+        const input = document.getElementById(id);
+        const value = target[key];
+        input.value = value === undefined ? '' : kind === 'lines' ? value.join('\n') : value;
+        input.onchange = () => {
+            const v = input.value.trim();
+            if (v === '') delete target[key];
+            else target[key] = kind === 'number' ? Number(v) : kind === 'lines' ? v.split('\n').map(s => s.trim()).filter(Boolean) : v;
+            if (Object.keys(target).length > 0) app.board.target = target; else delete app.board.target;
+            commit(); renderSidebar();
+        };
+    };
+    bindTarget('target-core', 'core'); bindTarget('target-prio-bits', 'nvic_prio_bits', 'number'); bindTarget('target-tick', 'tick_hz', 'number');
+    bindTarget('target-linker', 'linker_script'); bindTarget('target-startup', 'startup');
+    bindTarget('target-sources', 'sources', 'lines'); bindTarget('target-includes', 'includes', 'lines'); bindTarget('target-defines', 'defines', 'lines');
+    bindTarget('target-freertos', 'freertos'); bindTarget('target-toolchain', 'toolchain'); bindTarget('target-flash', 'flash');
+    bindTarget('target-flavour', 'flavour'); bindTarget('target-part', 'part'); bindTarget('target-sdk', 'sdk');
+    bindTarget('target-flash-kb', 'flash_kb', 'number'); bindTarget('target-ram-kb', 'ram_kb', 'number');
+    document.getElementById('flavour-fields').style.display = target.flavour ? 'flex' : 'none';
+    document.getElementById('flavour-hint').textContent = target.flavour === 'stm32f4-hal'
+        ? `Needs ST's repositories cmsis_core, cmsis_device_f4 and stm32f4xx_hal_driver (github.com/STMicroelectronics) in the SDK folder. ` +
+          'Apply fills in the fields below and creates the linker script, the HAL configuration and the HAL tick glue if missing.' : '';
+    if (target.core) document.getElementById('target-section').open = true;
+    app.settings = app.settings || {};
+    ['HealthCheckMs', 'WatchdogTimeoutMs', 'MaxTimers', 'MaxSyscallPriority'].forEach(key => {
+        const input = document.getElementById('setting-' + key);
+        input.value = app.settings[key] === undefined ? '' : app.settings[key];
+        input.onchange = () => {
+            if (input.value.trim() === '') delete app.settings[key]; else app.settings[key] = Number(input.value);
+            commit();
+        };
+    });
     bindCheck('feat-trace', 'trace');
     bindCheck('feat-commands', 'commands');
     bindCheck('feat-health', 'health');
@@ -267,7 +303,14 @@ function renderSidebar() {
     const field = (label, value, type, onChange) => {
         const row = document.createElement('label'); row.className = 'prop-row';
         row.appendChild(document.createTextNode(label));
-        const input = document.createElement('input'); input.type = type; input.value = value === undefined ? '' : value;
+        const input = document.createElement('input'); input.type = type;
+        if (type === 'checkbox') {
+            row.className = 'check-row'; input.checked = Boolean(value);
+            input.onchange = () => { onChange(input.checked); commit(); render(); };
+            row.insertBefore(input, row.firstChild); props.appendChild(row);
+            return;
+        }
+        input.value = value === undefined ? '' : value;
         input.onchange = () => { onChange(type === 'number' ? Number(input.value) : input.value.trim()); commit(); render(); };
         row.appendChild(input); props.appendChild(row);
     };

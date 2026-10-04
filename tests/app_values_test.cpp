@@ -22,3 +22,5 @@ static_assert(App::Traits::HealthCheckMs == 50 && App::Traits::MaxTimers == 8, "
 static_assert(App::Application::actor_count == 1 && App::Application::interrupt_count == 3, "the modules of the diagram");
 static_assert(std::is_same_v<App::Application::spsc_services_for<uint16_t>::FirstType, App::Samples<TestBoard, Ctx>>,
               "the SPSC service owns the diagram's item type");
+static_assert(std::is_same_v<App::Application::services_for<App::LogLine>::FirstType, App::Log<TestBoard, Ctx>>,
+              "the MPSC service owns its own item type, declared in its module file (log_module.hpp)");
