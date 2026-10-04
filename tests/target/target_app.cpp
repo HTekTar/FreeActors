@@ -117,6 +117,12 @@ struct AppTraits : Fa::DefaultAppTraits {
 
 using App = Fa::Application<AppTraits, Timebomb::Actor, TimebombButton, SampleSink, CommandRx, CommandRxIsr, AdcIsr>;   // + trace with FA_TRACE, + commands with FA_TRACE_COMMANDS, + health with FA_HEALTH
 
+#if defined(FA_NO_VECTOR_TABLE) && defined(FA_TEST_BIND)
+// The vector table is the vendor's: each interrupt module bound to its vector by name
+FA_BIND_ISR(USART3_IRQHandler, App, CommandRxIsr)
+FA_BIND_ISR(ADC_IRQHandler, App, AdcIsr)
+#endif
+
 
 #ifdef FA_TRACE_COMMANDS
 extern "C" void UART4_IRQHandler(void) {

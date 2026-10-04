@@ -196,6 +196,38 @@ vector_table_checks() {
         echo "FAIL  vector table: section, alignment or slots not as expected (object: tests/build/target_m4-fpu-trace-commands-health.o)"
         status=1
     fi
+    # FA_NO_VECTOR_TABLE: the vendor's table stays; FA_BIND_ISR defines the handlers by vector name, an
+    # unbound module is an undefined reference naming it; no table is built
+    local fallback="$OUT/no_vector_table" syms
+    mkdir -p "$fallback"
+    nvt_compile() {
+        arm-none-eabi-g++ -std=c++17 -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard -Os -fno-exceptions -fno-rtti \
+            -DFA_NO_VECTOR_TABLE "$@" -I"$ROOT/tests/target" -I"$FREERTOS_KERNEL_PATH/include" \
+            -I"$FREERTOS_KERNEL_PATH/portable/GCC/ARM_CM4F" -I"$OUT" -I"$ROOT/tests/fixtures" -I"$ROOT/freeactors_lib" \
+            -c "$ROOT/tests/target/target_app.cpp" 2>> "$fallback/build.log"
+    }
+    if nvt_compile -DFA_TEST_BIND -o "$fallback/bound.o" && nvt_compile -o "$fallback/unbound.o"; then
+        syms=$(arm-none-eabi-nm -C "$fallback/bound.o")
+        if echo "$syms" | grep -q " T USART3_IRQHandler" && echo "$syms" | grep -q " T ADC_IRQHandler" &&
+           ! arm-none-eabi-objdump -h "$fallback/bound.o" | grep -q VectorTable &&
+           [ "$(arm-none-eabi-nm -C "$fallback/unbound.o" | grep -c " U .*interrupt_module_bound_by_FA_BIND_ISR")" -eq 2 ]; then
+            echo "PASS  FA_NO_VECTOR_TABLE: no table; FA_BIND_ISR defines USART3_IRQHandler and ADC_IRQHandler; unbound modules fail to link, named"
+        else
+            echo "FAIL  FA_NO_VECTOR_TABLE: bindings or link-time check not as expected (objects: tests/build/no_vector_table/)"; status=1
+        fi
+    else
+        echo "FAIL  FA_NO_VECTOR_TABLE builds do not compile (log: tests/build/no_vector_table/build.log)"; status=1
+    fi
+    if arm-none-eabi-g++ -std=c++17 -mcpu=cortex-m0 -mthumb -fno-exceptions -fno-rtti -fsyntax-only \
+           -I"$ROOT/tests/target" -I"$FREERTOS_KERNEL_PATH/include" -I"$FREERTOS_KERNEL_PATH/portable/GCC/ARM_CM0" \
+           -I"$OUT" -I"$ROOT/tests/fixtures" -I"$ROOT/freeactors_lib" "$ROOT/tests/target/target_app.cpp" 2> "$OUT/cortex_m0.log"; then
+        echo "FAIL  interrupt modules compiled for a Cortex-M0"; status=1
+    elif grep -q "Interrupt modules need a Cortex-M with ARMv7-M or later" "$OUT/cortex_m0.log"; then
+        echo "PASS  interrupt modules on a Cortex-M0 rejected: 'Interrupt modules need a Cortex-M with ARMv7-M or later'"
+    else
+        echo "FAIL  Cortex-M0 build failed without the ARMv7-M message (log: tests/build/cortex_m0.log)"; status=1
+    fi
+
     local flag expected
     for case in "FA_TEST_BAD_PRIORITY|PRI is more urgent than configMAX_SYSCALL_INTERRUPT_PRIORITY" \
                 "FA_TEST_DUPLICATE_IRQ|Two interrupt modules use the same IRQNum"; do

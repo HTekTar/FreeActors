@@ -721,6 +721,9 @@ private:
                 "The board must define static constexpr void const* initial_stack: the initial stack pointer from "
                 "the linker script (e.g. &_estack), which FreeRTOS reads through the vector table at start-up");
             detail::install_vector_table(detail::VectorTable<Hw, 16 + Hw::irq_count, Is...>::table.data());
+#elif defined(FA_CORTEX_M_NVIC)
+            // FA_NO_VECTOR_TABLE: every module must be bound with FA_BIND_ISR (else: undefined reference)
+            (detail::require_binding<Is>(), ...);
 #endif
         }
     }
