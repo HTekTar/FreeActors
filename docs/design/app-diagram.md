@@ -216,7 +216,7 @@ What the user writes by hand comes down to the behaviour, the board's vendor cod
 | renames a signal, in either editor | **renamed on every connection**, in every `*.app.json` of the folder | **renamed in the signal list and in every transition** (`ButtonPressed/act`) |
 | removes an event from a connection | removed from that connection | **kept**: a timer, the PC or another sender may still use it |
 | deletes a signal in the HSM editor | **removed from every connection** carrying it (a connection left without events is removed), with a note naming what changed | — |
-| renames a state machine | the actors using it follow | the machine's name is its event namespace (7.3), renamed with it |
+| renames a state machine (**later**: the HSM editor has no rename yet, and it renames a namespace and every generated file name) | the actors using it follow | the machine's name is its event namespace (7.3), renamed with it |
 
 **Renames reach the C++**: the struct in the user-owned `<name>_events.hpp` is renamed, keeping its fields. The user's own uses of the name (`Ctx::post(Timebomb::ButtonPressed{})` in a module) are renamed through clangd's Rename Symbol when clangd runs; otherwise the compiler points each one out.
 

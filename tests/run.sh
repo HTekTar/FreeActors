@@ -180,6 +180,10 @@ fi
 # Application checks (checkAppModel): the fixture is clean, each rule's variation is reported
 node "$ROOT/tests/app_check_test.js" || status=1
 
+# The editors' providers end to end over real files (tests/fake_vscode.js): top-down creation of state machines,
+# one source of truth for events across *.app.json and *.hsm.json
+node "$ROOT/tests/provider_test.js" "$OUT/provider" || status=1
+
 # Editors: the real web views (media/) headless in Chrome, driven by scripted mouse events, checked through the DOM
 chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
 if [ -z "$chrome" ]; then

@@ -94,7 +94,7 @@ function summaryOf(c) {
     const lines = [];
     if (c.kind === 'actor') {
         const m = modelOf(c);
-        lines.push(c.model ? `📝 ${c.model}${m ? '' : ' (not found)'}` : '📝 no state machine');
+        lines.push(c.model ? `📝 ${c.model}${m ? '' : ' (not found)'}` : '📝 no state machine yet (double-click to create)');
         lines.push(`prio ${c.priority} · queue ${c.queue} · stack ${c.stack}`);
     } else if (c.kind === 'periodic') {
         lines.push(`⏱ every ${c.period_ms} ms · prio ${c.priority}`);
@@ -145,8 +145,10 @@ function render() {
             const rect = menuBtn.getBoundingClientRect();
             contextMenu.style.left = rect.left + 'px'; contextMenu.style.top = rect.bottom + 'px';
             document.getElementById('menu-add-inside').style.display = isComposite(c) ? 'block' : 'none';
-            document.getElementById('menu-open-model').style.display = codeFileOf(c) ? 'block' : 'none';
-            document.getElementById('menu-open-model').textContent = c.kind === 'actor' ? '📝 Open State Machine' : '📝 Open Code';
+            const creates = c.kind === 'actor' && !c.model;
+            document.getElementById('menu-open-model').style.display = codeFileOf(c) || creates ? 'block' : 'none';
+            document.getElementById('menu-open-model').textContent =
+                creates ? '✨ Create State Machine' : c.kind === 'actor' ? '📝 Open State Machine' : '📝 Open Code';
             document.getElementById('menu-delete').style.display = c.kind === 'application' ? 'none' : 'block';
             document.getElementById('menu-connect').style.display = isComposite(c) ? 'none' : 'block';
             contextMenu.style.display = 'flex';
@@ -157,8 +159,7 @@ function render() {
         });
         el.addEventListener('dblclick', (e) => {
             e.stopPropagation();
-            const file = codeFileOf(c);
-            if (file) vscode.postMessage({ type: 'openFile', file });
+            openOrCreate(c);
         });
 
         canvas.attachDragResize({
@@ -280,8 +281,43 @@ function renderSidebar() {
         select.value = c.model || '';
         select.onchange = () => { c.model = select.value; commit(); render(); };
         row.appendChild(select); props.appendChild(row);
+        const m = modelOf(c);
+        if (m) props.appendChild(signalList(c, m));
     }
     (PROPERTIES[c.kind] || []).forEach(([key, label, type]) => field(label, c[key], type, v => { c[key] = v; }));
+}
+
+// An actor's events (its state machine's signals), each renamed everywhere by the extension: in the state machine,
+// in every application's connections, in the event struct (one source of truth)
+function signalList(c, m) {
+    const box = document.createElement('div');
+    box.className = 'prop-row';
+    box.appendChild(document.createTextNode('Events it receives (rename: ✎)'));
+    const list = document.createElement('div'); list.className = 'signal-list';
+    m.signals.forEach(s => {
+        const item = document.createElement('div'); item.className = 'signal-item';
+        const label = document.createElement('span'); label.textContent = s;
+        const btn = document.createElement('button'); btn.textContent = '✎'; btn.title = `Rename ${s} everywhere`;
+        btn.setAttribute('data-rename', s);
+        btn.onclick = () => {
+            const input = document.createElement('input'); input.type = 'text'; input.value = s;
+            const done = (commitIt) => {
+                const to = input.value.trim();
+                if (commitIt && to && to !== s) {
+                    if (!/^[A-Za-z_]\w*$/.test(to)) { input.style.borderColor = 'var(--vscode-errorForeground, #f48771)'; return; }
+                    vscode.postMessage({ type: 'renameSignal', model: c.model, from: s, to });
+                }
+                renderSidebar();
+            };
+            input.onkeydown = (k) => { if (k.key === 'Enter') done(true); else if (k.key === 'Escape') done(false); };
+            input.onchange = () => done(true);
+            item.replaceChild(input, label); input.focus(); input.select();
+        };
+        item.appendChild(label); item.appendChild(btn); list.appendChild(item);
+    });
+    if (m.signals.length === 0) list.innerHTML = '<div class="hint-text">None yet: connect a component and type its events.</div>';
+    box.appendChild(list);
+    return box;
 }
 
 function select(id) {
@@ -381,10 +417,14 @@ document.getElementById('btn-submit-component').addEventListener('click', () => 
 
 document.addEventListener('click', () => { contextMenu.style.display = 'none'; });
 document.getElementById('menu-add-inside').addEventListener('click', () => openComponentModal(menuComponentId));
-document.getElementById('menu-open-model').addEventListener('click', () => {
-    const c = byId(menuComponentId);
-    if (c && codeFileOf(c)) vscode.postMessage({ type: 'openFile', file: codeFileOf(c) });
-});
+document.getElementById('menu-open-model').addEventListener('click', () => { const c = byId(menuComponentId); if (c) openOrCreate(c); });
+
+// Opens a component's code; an actor drawn without a state machine gets one (top-down): <Name>.hsm.json with the
+// events sent to it, created and linked by the extension
+function openOrCreate(c) {
+    if (c.kind === 'actor' && !c.model) vscode.postMessage({ type: 'createStateMachine', id: c.id });
+    else if (codeFileOf(c)) vscode.postMessage({ type: 'openFile', file: codeFileOf(c) });
+}
 document.getElementById('menu-delete').addEventListener('click', () => {
     const c = byId(menuComponentId);
     if (!c) return;
@@ -457,7 +497,9 @@ function openConnectionModal() {
     const signals = m ? m.signals : [];
     document.getElementById('events-checklist').innerHTML = signals.map(s =>
         `<label class="check-row"><input type="checkbox" value="${escapeHtml(s)}"> ${escapeHtml(s)}</label>`).join('');
-    document.getElementById('row-events-text').style.display = signals.length > 0 ? 'none' : 'flex';
+    // new events can always be typed: they become signals of the receiving state machine
+    document.getElementById('row-events-text').style.display = 'flex';
+    document.getElementById('label-events-text').textContent = signals.length > 0 ? 'New events (comma-separated)' : 'Events (comma-separated)';
     updateConnectionModal();
     connectionModal.style.display = 'flex';
 }
@@ -475,7 +517,7 @@ document.getElementById('btn-submit-connection').addEventListener('click', () =>
     if (kind === 'event') {
         const checked = [...document.querySelectorAll('#events-checklist input:checked')].map(i => i.value);
         const typed = document.getElementById('input-events').value.split(',').map(s => s.trim()).filter(Boolean);
-        conn.events = checked.length > 0 ? checked : typed;
+        conn.events = [...new Set(checked.concat(typed))];
     } else if (kind === 'item') {
         conn.item = document.getElementById('input-item').value.trim();
     }

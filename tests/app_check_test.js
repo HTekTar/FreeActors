@@ -25,9 +25,9 @@ let failures = 0;
 const variant = (change) => { const app = JSON.parse(JSON.stringify(base)); change(app); return app; };
 const comp = (app, name) => app.components.find(c => c.name === name);
 
-function expect(name, app, text, where) {
+function expect(name, app, text, where, severity = 'error') {
     const problems = ext.checkAppModel(app, models);
-    const hit = problems.find(p => p.message.includes(text) && (!where || p.component === where || p.connection === where));
+    const hit = problems.find(p => p.message.includes(text) && p.severity === severity && (!where || p.component === where || p.connection === where));
     const ok = Boolean(hit);
     console.log(`${ok ? 'PASS' : 'FAIL'}  app check: ${name}${ok ? '' : ` — got ${JSON.stringify(problems.map(p => p.message))}`}`);
     if (!ok) failures++;
@@ -40,12 +40,15 @@ function expect(name, app, text, where) {
     if (!ok) failures++;
 }
 
-expect('an event the receiving state machine does not have', variant(a => { a.connections[0].events = ['Explode']; }),
-       "has no signal Explode", 'L_1');
+expect('an event the receiving state machine does not have yet (a warning: Export Application adds it)',
+       variant(a => { a.connections[0].events = ['Explode']; }), "has no signal Explode yet", 'L_1', 'warning');
+expect('an event name that is not a C++ identifier', variant(a => { a.connections[0].events = ['Explode now']; }),
+       '"Explode now" is not a C++ identifier', 'L_1');
 expect('events sent to a service instead of an actor', variant(a => { a.connections[0].to = 'C_6'; }),
        'events go to actors', 'L_1');
-expect('an actor without a state machine', variant(a => { delete a.components.find(c => c.id === 'C_2').model; }),
-       'Actor Timebomb has no state machine', 'C_2');
+expect('an actor without a state machine (top-down: a warning, Export Application creates it)',
+       variant(a => { delete a.components.find(c => c.id === 'C_2').model; }),
+       'Actor Timebomb has no state machine yet: Export Application creates Timebomb.hsm.json', 'C_2', 'warning');
 expect('a state machine file that does not exist', variant(a => { a.components.find(c => c.id === 'C_2').model = 'missing.hsm.json'; }),
        'state machine missing.hsm.json not found', 'C_2');
 expect('one state machine used by two actors (one instance per machine in v1)', variant(a => {
@@ -79,6 +82,6 @@ expect('two components with the same name', variant(a => { comp(a, 'ButtonPoller
 expect('a name that is not a C++ identifier', variant(a => { comp(a, 'ButtonPoller').name = 'Button Poller'; }),
        'is not a C++ identifier', 'C_1');
 expect('an actor nothing sends events to (a warning)', variant(a => { a.connections = a.connections.filter(c => c.to !== 'C_2'); }),
-       'receives no events from any component', 'C_2');
+       'receives no events from any component', 'C_2', 'warning');
 
 process.exit(failures === 0 ? 0 : 1);

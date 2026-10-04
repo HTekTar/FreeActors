@@ -33,6 +33,111 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
     }
 }
 
+// ---- Edits across files (signal sync, top-down creation) --------------------------------------------------
+
+function isOpenInTab(uri: vscode.Uri): boolean {
+    return vscode.window.tabGroups.all.some(g => g.tabs.some(t => {
+        const input = t.input as any;
+        return input && input.uri && input.uri.toString() === uri.toString();
+    }));
+}
+
+// Applies a workspace edit; files it changed that are not open in a tab are saved, so no change is left unsaved
+// out of sight (an open one stays unsaved in its editor, where the user sees it)
+async function applyAndSave(edit: vscode.WorkspaceEdit): Promise<boolean> {
+    if (edit.size === 0) return false;
+    if (!(await vscode.workspace.applyEdit(edit))) return false;
+    for (const [uri] of edit.entries()) {
+        if (!isOpenInTab(uri)) {
+            const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
+            if (doc && doc.isDirty) await doc.save();
+        }
+    }
+    return true;
+}
+
+// Changes a JSON document (a *.hsm.json or *.app.json) as an edit to its text, so an open editor follows at once.
+// mutate returns true if it changed the object. The text is written as the editors write it (2-space JSON).
+async function editJsonDocument(uri: vscode.Uri, mutate: (json: any) => boolean): Promise<boolean> {
+    const doc = await vscode.workspace.openTextDocument(uri);
+    let json: any;
+    try { json = JSON.parse(doc.getText()); } catch { return false; }
+    if (!mutate(json)) return false;
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(uri, new vscode.Range(0, 0, doc.lineCount, 0), JSON.stringify(json, null, 2));
+    return applyAndSave(edit);
+}
+
+async function appFilesIn(folderUri: vscode.Uri): Promise<vscode.Uri[]> {
+    return (await vscode.workspace.fs.readDirectory(folderUri))
+        .filter(([name, type]) => type === vscode.FileType.File && name.endsWith('.app.json'))
+        .map(([name]) => vscode.Uri.joinPath(folderUri, name));
+}
+
+// Renames the event struct in the user's events header: through the language server's rename (clangd) when one
+// runs, which also renames the uses in the user's code; else in the header only (the compiler shows the uses)
+async function renameEventStructInCode(folderUri: vscode.Uri, machine: string, from: string, to: string): Promise<string> {
+    const uri = vscode.Uri.joinPath(folderUri, `${machine.toLowerCase()}_events.hpp`);
+    const text = await readFileIfExists(uri);
+    if (text === undefined) return '';
+    const m = new RegExp(`\\bstruct\\s+${from}\\s*[{;:]`).exec(text);
+    if (!m) return '';
+    try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const position = doc.positionAt(m.index + m[0].indexOf(from));
+        const edit = await vscode.commands.executeCommand<vscode.WorkspaceEdit | undefined>('vscode.executeDocumentRenameProvider', uri, position, to);
+        if (edit && edit.size > 0 && await applyAndSave(edit)) {
+            return `struct ${machine}::${from} renamed in your code (${edit.size} file${edit.size === 1 ? '' : 's'})`;
+        }
+    } catch { /* no rename provider (clangd not running): the header only */ }
+    const edit = new vscode.WorkspaceEdit();
+    const doc = await vscode.workspace.openTextDocument(uri);
+    edit.replace(uri, new vscode.Range(0, 0, doc.lineCount, 0), renameEventStruct(doc.getText(), from, to));
+    await applyAndSave(edit);
+    return `struct ${from} renamed in ${machine.toLowerCase()}_events.hpp (other uses in your code: the compiler points them out)`;
+}
+
+// A signal renamed in one model: the model, every application in the folder, the events struct. Returns a note.
+async function renameSignalEverywhere(folderUri: vscode.Uri, modelFile: string, from: string, to: string): Promise<string> {
+    if (!IDENTIFIER.test(to)) throw new Error(`"${to}" is not a C++ identifier (an event is a struct)`);
+    const modelUri = vscode.Uri.joinPath(folderUri, modelFile);
+    const hsm = JSON.parse((await vscode.workspace.openTextDocument(modelUri)).getText());
+    if (Array.isArray(hsm.signals) && hsm.signals.includes(to)) throw new Error(`${modelFile} already has a signal ${to}`);
+    const changed: string[] = [];
+    for (const appUri of await appFilesIn(folderUri)) {
+        if (await editJsonDocument(appUri, app => renameSignalInApp(app, modelFile, from, to))) changed.push(appUri.path.split('/').pop()!);
+    }
+    const code = await renameEventStructInCode(folderUri, machineNameOf(hsm), from, to);
+    if (await editJsonDocument(modelUri, m => renameSignalInModel(m, from, to))) changed.unshift(modelFile);
+    return `Renamed ${from} to ${to} in ${changed.join(', ')}${code ? `; ${code}` : ''}.`;
+}
+
+// A signal deleted from a model: removed from the connections of every application in the folder. Returns a note.
+async function removeSignalEverywhere(folderUri: vscode.Uri, modelFile: string, signal: string): Promise<string | undefined> {
+    const notes: string[] = [];
+    for (const appUri of await appFilesIn(folderUri)) {
+        let names: string[] = [];
+        await editJsonDocument(appUri, app => (names = removeSignalFromApp(app, modelFile, signal)).length > 0);
+        if (names.length > 0) notes.push(`${appUri.path.split('/').pop()} (${names.join(', ')})`);
+    }
+    return notes.length > 0 ? `${signal} deleted: removed from the connections in ${notes.join(', ')}.` : undefined;
+}
+
+// Signals the application sends that its models lack: added to the models. Returns a note, or undefined.
+async function addSentSignalsToModels(folderUri: vscode.Uri, app: any, models: AppModelInfo[]): Promise<string | undefined> {
+    const notes: string[] = [];
+    for (const [file, signals] of Object.entries(signalsMissingFromModels(app, models))) {
+        const added = await editJsonDocument(vscode.Uri.joinPath(folderUri, file), hsm => {
+            hsm.signals = Array.isArray(hsm.signals) ? hsm.signals : [];
+            const add = signals.filter(s => !hsm.signals.includes(s));
+            hsm.signals.push(...add);
+            return add.length > 0;
+        });
+        if (added) notes.push(`${signals.join(', ')} to ${file}`);
+    }
+    return notes.length > 0 ? `Added ${notes.join('; ')} (the application sends them).` : undefined;
+}
+
 // freeactors_lib headers copied into every exported project's freeactors/ folder
 export const FRAMEWORK_FILES = [
     'fa_app.hpp',
@@ -123,6 +228,83 @@ export function describeHsmModel(file: string, jsonText: string): AppModelInfo |
     } catch (e) {
         return undefined;
     }
+}
+
+// ==========================================================================
+// SIGNALS: ONE SOURCE OF TRUTH (docs/design/app-diagram.md section 7.2). The receiving state machine owns its
+// signals; the events on connections in *.app.json refer to them. These pure functions apply one change to one
+// model or application; FreeActorsAppEditorProvider / FreeActorsEditorProvider apply them across the files.
+// ==========================================================================
+
+const IDENTIFIER = /^[A-Za-z_]\w*$/;
+
+// The signal part of a transition's or internal event's "Signal/action" text (internal events may carry a '·')
+function renameSignalIn(text: string, from: string, to: string): string {
+    const m = /^(\s*·?\s*)([A-Za-z_]\w*)(.*)$/s.exec(text);
+    return m && m[2] === from ? `${m[1]}${to}${m[3]}` : text;
+}
+
+// The model with the signal renamed in its signal list, transitions and internal events; false if absent
+export function renameSignalInModel(hsm: any, from: string, to: string): boolean {
+    if (!Array.isArray(hsm.signals) || !hsm.signals.includes(from)) return false;
+    hsm.signals = hsm.signals.map((s: string) => (s === from ? to : s));
+    for (const s of (hsm.states || []) as any[]) {
+        for (const t of (s.transitions || []) as any[]) if (typeof t.event === 'string') t.event = renameSignalIn(t.event, from, to);
+        if (Array.isArray(s.local_events)) s.local_events = s.local_events.map((e: any) => (typeof e === 'string' ? renameSignalIn(e, from, to) : e));
+    }
+    return true;
+}
+
+// The file Export Application creates for an actor drawn without a state machine (top-down design)
+export function plannedModelFile(actorName: string): string {
+    return `${actorName}.hsm.json`;
+}
+
+// Event connections into the actors using the model (by file name)
+function eventConnectionsInto(app: any, modelFile: string): any[] {
+    const actors = new Set(((app.components || []) as any[]).filter(c => c.kind === 'actor' && c.model === modelFile).map(c => c.id));
+    return ((app.connections || []) as any[]).filter(x => x.kind === 'event' && actors.has(x.to) && Array.isArray(x.events));
+}
+
+// The application with the signal renamed on every connection into the model's actors; true if anything changed
+export function renameSignalInApp(app: any, modelFile: string, from: string, to: string): boolean {
+    let changed = false;
+    for (const conn of eventConnectionsInto(app, modelFile)) {
+        if (conn.events.includes(from)) { conn.events = conn.events.map((e: string) => (e === from ? to : e)); changed = true; }
+    }
+    return changed;
+}
+
+// The application without the signal on connections into the model's actors; a connection left without events
+// is removed. Returns the names of the connections changed ("ButtonPoller → Timebomb")
+export function removeSignalFromApp(app: any, modelFile: string, signal: string): string[] {
+    const names: string[] = [];
+    const emptied = new Set<string>();
+    const nameOf = (id: string) => (((app.components || []) as any[]).find(c => c.id === id) || { name: id }).name;
+    for (const conn of eventConnectionsInto(app, modelFile)) {
+        if (!conn.events.includes(signal)) continue;
+        conn.events = conn.events.filter((e: string) => e !== signal);
+        names.push(`${nameOf(conn.from)} → ${nameOf(conn.to)}`);
+        if (conn.events.length === 0) emptied.add(conn.id);
+    }
+    app.connections = ((app.connections || []) as any[]).filter(x => !emptied.has(x.id));
+    return names;
+}
+
+// The signals the application sends to each model that the model does not have yet: { model file: [signals] }
+export function signalsMissingFromModels(app: any, models: AppModelInfo[]): { [file: string]: string[] } {
+    const missing: { [file: string]: string[] } = {};
+    for (const m of models) {
+        const sent = eventConnectionsInto(app, m.file).flatMap(x => x.events as string[]);
+        const add = [...new Set(sent)].filter(s => IDENTIFIER.test(s) && !m.signals.includes(s));
+        if (add.length > 0) missing[m.file] = add;
+    }
+    return missing;
+}
+
+// The events header (user-owned) with the struct renamed, fields kept; unchanged if the struct is not there
+export function renameEventStruct(eventsText: string, from: string, to: string): string {
+    return eventsText.replace(new RegExp(`(\\bstruct\\s+)${from}(\\s*[{;:])`), `$1${to}$2`);
 }
 
 // The application-wide hardware contract: the board against every module's requirements at once
@@ -712,7 +894,10 @@ export function checkAppModel(app: any, models: AppModelInfo[]): AppProblem[] {
         }
         if (c.kind === 'actor') {
             if (!c.model) {
-                error(`Actor ${c.name} has no state machine: choose its *.hsm.json`, where);
+                // Top-down: the machine is created by Export Application (or Create State Machine) as <Name>.hsm.json
+                const planned = plannedModelFile(c.name);
+                warning(`Actor ${c.name} has no state machine yet: Export Application creates ${planned} with the events sent to it`, where);
+                if (models.some(m => m.file === planned)) modelUsers.set(planned, [...(modelUsers.get(planned) || []), c.name]);
             } else if (!models.some(m => m.file === c.model)) {
                 error(`Actor ${c.name}: state machine ${c.model} not found next to the application, or not a valid model`, where);
             } else {
@@ -770,11 +955,11 @@ export function checkAppModel(app: any, models: AppModelInfo[]): AppProblem[] {
             const model = models.find(m => m.file === to.model);
             const events: string[] = Array.isArray(conn.events) ? conn.events : [];
             if (events.length === 0) error(`${from.name} → ${to.name}: no events chosen`, where);
-            if (model) {
-                for (const e of events) {
-                    if (!model.signals.includes(e)) {
-                        error(`${from.name} → ${to.name}: ${to.name}'s state machine (${model.file}) has no signal ${e}`, where);
-                    }
+            for (const e of events) {
+                if (!IDENTIFIER.test(e)) error(`${from.name} → ${to.name}: "${e}" is not a C++ identifier (an event is a struct)`, where);
+                else if (model && !model.signals.includes(e)) {
+                    warning(`${from.name} → ${to.name}: ${to.name}'s state machine (${model.file}) has no signal ${e} yet: ` +
+                            'Export Application adds it', where);
                 }
             }
         } else if (conn.kind === 'item') {
@@ -836,6 +1021,45 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     // Writes the tool-owned application files (generateAppFiles) next to the model; refused while it has errors
+    // The state machines next to the application, read from open documents when open (unsaved edits count)
+    private async modelsIn(folderUri: vscode.Uri): Promise<AppModelInfo[]> {
+        const found: AppModelInfo[] = [];
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(folderUri)) {
+            if (type !== vscode.FileType.File || !name.endsWith('.hsm.json')) continue;
+            const info = describeHsmModel(name, (await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folderUri, name))).getText());
+            if (info) found.push(info);
+        }
+        return found.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    // Top-down: the state machine of an actor drawn without one, <Name>.hsm.json with the signals the application
+    // sends it (an existing file of that name is linked and given the missing signals), linked in the application.
+    // Returns the file name, or undefined if the actor already has a state machine.
+    private async createStateMachine(document: vscode.TextDocument, folderUri: vscode.Uri, id: string): Promise<string | undefined> {
+        const app = JSON.parse(document.getText());
+        const actor = ((app.components || []) as any[]).find(c => c.id === id && c.kind === 'actor');
+        if (!actor) throw new Error('Create State Machine: not an actor');
+        if (actor.model) return undefined;
+        const file = plannedModelFile(actor.name);
+        const users = ((app.components || []) as any[]).filter(c => c.kind === 'actor' && c.model === file);
+        if (users.length > 0) throw new Error(`${file} is already the state machine of ${users[0].name}: one instance per state machine`);
+        const uri = vscode.Uri.joinPath(folderUri, file);
+        const sent = [...new Set(((app.connections || []) as any[])
+            .filter(x => x.kind === 'event' && x.to === id && Array.isArray(x.events)).flatMap(x => x.events as string[]))]
+            .filter(s => IDENTIFIER.test(s));
+        if (!(await fileExists(uri))) {
+            await vscode.workspace.fs.writeFile(uri, stringToUint8Array(JSON.stringify(defaultHsmModel(actor.name, sent), null, 2)));
+        }
+        await editJsonDocument(document.uri, a => {
+            const c = ((a.components || []) as any[]).find(x => x.id === id);
+            if (!c || c.model) return false;
+            c.model = file;
+            return true;
+        });
+        await addSentSignalsToModels(folderUri, JSON.parse(document.getText()), await this.modelsIn(folderUri));
+        return file;
+    }
+
     private async exportApplication(document: vscode.TextDocument, folderUri: vscode.Uri, models: AppModelInfo[]) {
         let app: any;
         try {
@@ -850,8 +1074,29 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                                            'See the Problems list in the editor.');
             return;
         }
-        // Modules: requirements and module file created once (yours); contract and TestBsp regenerated
+        // State machines: created for actors drawn without one (top-down), given the signals the application sends,
+        // and exported, so the whole project is up to date after one click
         const created: string[] = [];
+        for (const c of ((app.components || []) as any[]).filter(c => c.kind === 'actor' && !c.model)) {
+            const file = await this.createStateMachine(document, folderUri, c.id);
+            if (file) created.push(file);
+        }
+        try { app = JSON.parse(document.getText()); } catch { /* unchanged */ }
+        await addSentSignalsToModels(folderUri, app, models);
+        models = await this.modelsIn(folderUri);
+        const exported: string[] = [];
+        for (const c of ((app.components || []) as any[]).filter(c => c.kind === 'actor' && c.model)) {
+            const uri = vscode.Uri.joinPath(folderUri, c.model);
+            try {
+                const result = await exportStateMachine(this.context, folderUri, (await vscode.workspace.openTextDocument(uri)).getText());
+                exported.push(result.name);
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`❌ Export of ${c.model} failed: ${e.message}`);
+                return;
+            }
+        }
+        await copyFrameworkFilesToWorkspace(this.context, folderUri);   // also without actors: modules need it
+        // Modules: requirements and module file created once (yours); contract and TestBsp regenerated
         for (const c of (app.components || []) as any[]) {
             if (!['periodic', 'interrupt', 'spsc', 'mpsc', 'dma'].includes(c.kind)) continue;
             const lower = String(c.name).toLowerCase();
@@ -873,16 +1118,6 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             }
         }
         const { sources, missingActors } = await this.requirementSources(app, folderUri, models);
-        // Actors too: their requirements may have changed since their state machine was exported
-        for (const c of (app.components || []) as any[]) {
-            const source = c.kind === 'actor' && sources.find(s => s.owner === (models.find(m => m.file === c.model) || {}).name);
-            if (!source) continue;
-            const lower = source.owner.toLowerCase();
-            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_hw_contract.hpp`),
-                                                stringToUint8Array(generateCpHwContractString(source.owner, source.content)));
-            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_test_bsp.hpp`),
-                                                stringToUint8Array(generateCppTestBspString(source.owner, source.content)));
-        }
         const files = generateAppFiles(app, models, sources.map(s => s.owner));
         for (const [file, content] of Object.entries(files)) {
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
@@ -900,7 +1135,8 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         } else if (boardUri) {
             boardNote = ` The board ${app.board.header} does not exist yet: Generate Board creates it.`;
         }
-        vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}.` +
+        vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}` +
+            (exported.length > 0 ? `, and the state machines ${exported.join(', ')}.` : '.') +
             (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') + boardNote +
             (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
     }
@@ -994,7 +1230,9 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             const found: AppModelInfo[] = [];
             for (const [name, type] of await vscode.workspace.fs.readDirectory(folderUri)) {
                 if (type !== vscode.FileType.File || !name.endsWith('.hsm.json')) continue;
-                const text = uint8ArrayToString(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folderUri, name)));
+                const uri = vscode.Uri.joinPath(folderUri, name);
+                const open = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
+                const text = open ? open.getText() : uint8ArrayToString(await vscode.workspace.fs.readFile(uri));   // unsaved edits count
                 const info = describeHsmModel(name, text);
                 if (info) found.push(info);
             }
@@ -1017,7 +1255,10 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             vscode.workspace.onDidChangeTextDocument(e => {
                 if (e.document.uri.toString() === document.uri.toString()) update();
             }),
-            // a state machine saved next to the application: its signals may have changed
+            // a state machine next to the application changed (edited, or saved): its signals may have changed
+            vscode.workspace.onDidChangeTextDocument(e => {
+                if (e.document.uri.fsPath.endsWith('.hsm.json')) update();
+            }),
             vscode.workspace.onDidSaveTextDocument(d => {
                 if (d.uri.fsPath.endsWith('.hsm.json')) update();
             }),
@@ -1037,6 +1278,28 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                     const edit = new vscode.WorkspaceEdit();
                     edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), message.jsonText);
                     await vscode.workspace.applyEdit(edit);
+                    // events typed on a connection become signals of the receiving machine (one source of truth)
+                    try {
+                        const note = await addSentSignalsToModels(folderUri, JSON.parse(message.jsonText), await scanModels());
+                        if (note) vscode.window.showInformationMessage(note);
+                    } catch { /* not valid JSON: the checks report it */ }
+                    return;
+                }
+                case 'createStateMachine': {
+                    try {
+                        const file = await this.createStateMachine(document, folderUri, String(message.id));
+                        if (file) await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.joinPath(folderUri, file), 'freeactors.hsmEditor');
+                    } catch (e: any) {
+                        vscode.window.showErrorMessage(`❌ ${e.message}`);
+                    }
+                    return;
+                }
+                case 'renameSignal': {
+                    try {
+                        vscode.window.showInformationMessage(await renameSignalEverywhere(folderUri, String(message.model), String(message.from), String(message.to)));
+                    } catch (e: any) {
+                        vscode.window.showErrorMessage(`❌ Rename refused: ${e.message}`);
+                    }
                     return;
                 }
                 case 'exportApplication': {
@@ -2894,6 +3157,130 @@ export function generateTestsCMakeString(jsonText: string): string {
     return out;
 }
 
+// A new state machine: the ROOT state and the given signals (the HSM editor's skeleton for an empty file, and the
+// machine Export Application creates for an actor drawn without one)
+export function defaultHsmModel(name: string, signals: string[]): object {
+    return {
+        name,
+        signals: [...signals],
+        guards: [],
+        actions: [],
+        states: [
+            { id: "STATE_ROOT", name: "ROOT", x: 50, y: 50, width: 700, height: 500, entry: "entry_ROOT()", exit: "exit_ROOT()" }
+        ]
+    };
+}
+
+export interface StateMachineExport { name: string; message: string; hint?: string; }
+
+// Export of one state machine (the HSM editor's Export, and Export Application for every actor): the tool-owned
+// files rewritten, the user-owned ones created once or patched. Throws on an invalid model, before writing anything.
+async function exportStateMachine(context: vscode.ExtensionContext, folderUri: vscode.Uri, jsonText: string): Promise<StateMachineExport> {
+    validateHsmModel(jsonText);
+    let hsmName = "ActorMachine";
+    try {
+        const parsed = JSON.parse(jsonText);
+        if (parsed.name) hsmName = parsed.name.replace(/[^a-zA-Z0-9_]/g, "");
+    } catch (e) {}
+    const lower = hsmName.toLowerCase();
+    const at = (file: string) => vscode.Uri.joinPath(folderUri, file);
+    const write = (file: string, content: string) => vscode.workspace.fs.writeFile(at(file), stringToUint8Array(content));
+    const eventsFilename = `${lower}_events.hpp`;
+    const blueprintFilename = `${lower}_hsm.hpp`;
+    const requirementsFilename = hwRequirementsFile(lower);
+    const hwContractFilename = `${lower}_hw_contract.hpp`;
+    const actorHeaderFilename = `${lower}_actor.hpp`;
+
+    // Hardware requirements (user-owned). Before 0.0.9 they were <name>_bsp_policy.hpp: renamed once, unchanged
+    let renamedNote = '';
+    if (!(await fileExists(at(requirementsFilename))) && (await fileExists(at(legacyHwRequirementsFile(lower))))) {
+        await vscode.workspace.fs.rename(at(legacyHwRequirementsFile(lower)), at(requirementsFilename));
+        renamedNote = ` Renamed ${legacyHwRequirementsFile(lower)} to ${requirementsFilename} (same content).`;
+    }
+    const existingRequirements = await readFileIfExists(at(requirementsFilename));
+    const requirementsExisted = existingRequirements !== undefined;
+    const requirements = existingRequirements ?? generateCppHwRequirementsStub(hsmName);
+    if (!requirementsExisted) await write(requirementsFilename, requirements);
+
+    // Event structs (user-owned): created once; new signals appended; a pre-0.0.8 header converted once
+    const existingEvents = await readFileIfExists(at(eventsFilename));
+    let eventsNote = '';
+    let eventsContent: string;
+    if (existingEvents === undefined) {
+        eventsContent = generateCppEventsStub(jsonText);
+        await write(eventsFilename, eventsContent);
+    } else {
+        const eventsPatch = patchExistingEventsHeader(existingEvents, jsonText);
+        eventsContent = eventsPatch.updatedContent;
+        if (eventsPatch.updatedContent !== existingEvents) await write(eventsFilename, eventsPatch.updatedContent);
+        if (eventsPatch.converted) {
+            eventsNote = ` '${eventsFilename}' is now yours to edit: add fields to your events there.`;
+        } else if (eventsPatch.added.length > 0) {
+            eventsNote = ` Added ${eventsPatch.added.join(', ')} to '${eventsFilename}'.`;
+        }
+    }
+
+    // Tool-owned: the event list, the blueprint, the hardware contract
+    await write(`${lower}_event_list.hpp`, generateCppEventListString(jsonText, eventsContent));
+    await write(blueprintFilename, generateCppBlueprintString(jsonText));
+    await write(hwContractFilename, generateCpHwContractString(hsmName, requirements));
+
+    // Actor header (user-owned): created if missing, else the missing handlers appended
+    const existingActorText = await readFileIfExists(at(actorHeaderFilename));
+    const actorExisted = existingActorText !== undefined;
+    let addedMethodsCount = 0;
+    if (actorExisted) {
+        const patchResult = patchExistingActorHeader(existingActorText, jsonText);
+        if (patchResult.updatedContent !== existingActorText) await write(actorHeaderFilename, patchResult.updatedContent);
+        addedMethodsCount = patchResult.addedCount;
+    } else {
+        await write(actorHeaderFilename, generateCppConcreteHeaderStub(jsonText));
+    }
+
+    // Host simulator and project files, created once
+    if (!(await fileExists(at('main.cpp')))) await write('main.cpp', generateCppCliSimulatorString(jsonText));
+    if (!(await fileExists(at('CMakeLists.txt')))) await write('CMakeLists.txt', generateCMakeListsString(jsonText));
+    if (!(await fileExists(at(CLANGD_FILENAME)))) await write(CLANGD_FILENAME, generateClangdConfigString());
+
+    // Host tests: the sources are created once (user-owned); the CMake include is tool-owned
+    const testsDirUri = at('tests');
+    const testStubs: [string, () => string][] = [
+        [`${lower}_model_test.cpp`, () => generateCppModelTestStub(jsonText)],
+        [`${lower}_actor_test.cpp`, () => generateCppActorTestStub(jsonText)],
+    ];
+    const createdTests: string[] = [];
+    for (const [filename, generate] of testStubs) {
+        const uri = vscode.Uri.joinPath(testsDirUri, filename);
+        if (!(await fileExists(uri))) {
+            await vscode.workspace.fs.createDirectory(testsDirUri);
+            await vscode.workspace.fs.writeFile(uri, stringToUint8Array(generate()));
+            createdTests.push(`tests/${filename}`);
+        }
+    }
+    await write(TESTS_CMAKE_FILENAME, generateTestsCMakeString(jsonText));
+    await write(`${lower}_test_bsp.hpp`, generateCppTestBspString(hsmName, requirements));
+    await write(`${lower}_trace.json`, generateTraceDictionaryString(jsonText, eventsContent));
+
+    await copyFrameworkFilesToWorkspace(context, folderUri);
+
+    // Projects created before test support have a CMakeLists.txt without the include
+    const cmakeText = await readFileIfExists(at('CMakeLists.txt'));
+    const hint = cmakeText !== undefined && !cmakeText.includes(TESTS_CMAKE_FILENAME)
+        ? `🧪 Host tests are ready${createdTests.length > 0 ? ` (${createdTests.join(', ')})` : ''}. ` +
+          `To build them, add this line to CMakeLists.txt: include(\${CMAKE_CURRENT_SOURCE_DIR}/${TESTS_CMAKE_FILENAME})`
+        : undefined;
+
+    let message: string;
+    if (!actorExisted || !requirementsExisted) {
+        message = `🚀 Export complete! Generated '${blueprintFilename}', '${hwContractFilename}', and starter '${actorHeaderFilename}'.`;
+    } else if (addedMethodsCount > 0) {
+        message = `✨ Preserved custom code & appended ${addedMethodsCount} newly discovered HSM method(s) to '${actorHeaderFilename}'!${eventsNote}${renamedNote}`;
+    } else {
+        message = `🔄 Synchronized '${blueprintFilename}' and '${hwContractFilename}'. Custom code untouched.${eventsNote}${renamedNote}`;
+    }
+    return hint === undefined ? { name: hsmName, message } : { name: hsmName, message, hint };
+}
+
 class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
 
     public static register(context: vscode.ExtensionContext): vscode.Disposable {
@@ -2927,25 +3314,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
             const baseName = firstSegment.replace(/[^a-zA-Z0-9_]/g, "") || "ActorMachine";
             const sanitizedName = baseName.charAt(0).toUpperCase() + baseName.slice(1);
             
-            const defaultSkeleton = {
-                name: sanitizedName,
-                signals: [],
-                guards: [],
-                actions: [],
-                states: [
-                    {
-                        id: "STATE_ROOT",
-                        name: "ROOT",
-                        x: 50,
-                        y: 50,
-                        width: 700,
-                        height: 500,
-                        entry: "entry_ROOT()",
-                        exit: "exit_ROOT()"
-                    }
-                ]
-            };
-            
+            const defaultSkeleton = defaultHsmModel(sanitizedName, []);
             await this.updateTextDocument(document, JSON.stringify(defaultSkeleton, null, 2));
         }
 
@@ -2976,168 +3345,33 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                 case 'documentEdit':
                     this.updateTextDocument(document, messageEvent.jsonText);
                     return;
-                
-                    case 'exportCppBlueprint': {
-                        const jsonText = document.getText();
-                        let hsmName = "ActorMachine";
-                        try {
-                            const parsed = JSON.parse(jsonText);
-                            if (parsed.name) hsmName = parsed.name.replace(/[^a-zA-Z0-9_]/g, "");
-                        } catch (e) {}
-    
-                        const lowerHsmName = hsmName.toLowerCase();
-                        const eventsFilename = `${lowerHsmName}_events.hpp`;
-                        const blueprintFilename = `${lowerHsmName}_hsm.hpp`;
-                        const bspPolicyFilename = hwRequirementsFile(lowerHsmName);
-                        const hwContractFilename = `${lowerHsmName}_hw_contract.hpp`;
-                        const actorHeaderFilename = `${lowerHsmName}_actor.hpp`;
-                        const mainFilename = `main.cpp`;
-                        const cmakeFilename = `CMakeLists.txt`;
-    
-                        const folderUri = vscode.Uri.joinPath(document.uri, '..');
-                        const eventsUri = vscode.Uri.joinPath(folderUri, eventsFilename);
-                        const blueprintUri = vscode.Uri.joinPath(folderUri, blueprintFilename);
-                        const bspPolicyUri = vscode.Uri.joinPath(folderUri, bspPolicyFilename);
-                        const hwContractUri = vscode.Uri.joinPath(folderUri, hwContractFilename);
-                        const actorHeaderUri = vscode.Uri.joinPath(folderUri, actorHeaderFilename);
-                        const mainUri = vscode.Uri.joinPath(folderUri, mainFilename);
-                        const cmakeUri = vscode.Uri.joinPath(folderUri, cmakeFilename);
-    
-                        try {
-                            // 0. Reject invalid models before anything is written
-                            validateHsmModel(jsonText);
-
-                            // 1. Read or generate starter BSP Policy header (User-owned)
-                            // Before 0.0.9 the requirements were <name>_bsp_policy.hpp: renamed once, content unchanged
-                            const legacyRequirementsUri = vscode.Uri.joinPath(folderUri, legacyHwRequirementsFile(lowerHsmName));
-                            let renamedNote = '';
-                            if (!(await fileExists(bspPolicyUri)) && (await fileExists(legacyRequirementsUri))) {
-                                await vscode.workspace.fs.rename(legacyRequirementsUri, bspPolicyUri);
-                                renamedNote = ` Renamed ${legacyHwRequirementsFile(lowerHsmName)} to ${bspPolicyFilename} (same content).`;
-                            }
-                            const existingBsp = await readFileIfExists(bspPolicyUri);
-                            const bspExists = existingBsp !== undefined;
-                            let bspContent = existingBsp ?? "";
-                            if (!bspExists) {
-                                bspContent = generateCppHwRequirementsStub(hsmName);
-                                await vscode.workspace.fs.writeFile(bspPolicyUri, stringToUint8Array(bspContent));
-                            }
-    
-                            // 2a. Event structs (user-owned): create once; append new signals; convert a pre-0.0.8 header once
-                            const existingEvents = await readFileIfExists(eventsUri);
-                            let eventsNote = '';
-                            let eventsContent: string;
-                            if (existingEvents === undefined) {
-                                eventsContent = generateCppEventsStub(jsonText);
-                                await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(eventsContent));
-                            } else {
-                                const eventsPatch = patchExistingEventsHeader(existingEvents, jsonText);
-                                eventsContent = eventsPatch.updatedContent;
-                                if (eventsPatch.updatedContent !== existingEvents) {
-                                    await vscode.workspace.fs.writeFile(eventsUri, stringToUint8Array(eventsPatch.updatedContent));
-                                }
-                                if (eventsPatch.converted) {
-                                    eventsNote = ` '${eventsFilename}' is now yours to edit: add fields to your events there.`;
-                                } else if (eventsPatch.added.length > 0) {
-                                    eventsNote = ` Added ${eventsPatch.added.join(', ')} to '${eventsFilename}'.`;
-                                }
-                            }
-
-                            // 2b. Overwrite the event list, HSM Blueprint & HwContract (100% Tool-owned)
-                            await vscode.workspace.fs.writeFile(
-                                vscode.Uri.joinPath(folderUri, `${lowerHsmName}_event_list.hpp`),
-                                stringToUint8Array(generateCppEventListString(jsonText, eventsContent)));
-
-                            const cppBlueprint = generateCppBlueprintString(jsonText);
-                            await vscode.workspace.fs.writeFile(blueprintUri, stringToUint8Array(cppBlueprint));
-    
-                            const cppHwContract = generateCpHwContractString(hsmName, bspContent);
-                            await vscode.workspace.fs.writeFile(hwContractUri, stringToUint8Array(cppHwContract));
-    
-                            // 3. Actor Header (User-owned): create if missing, or patch missing handlers
-                            const existingActorText = await readFileIfExists(actorHeaderUri);
-                            const actorExists = existingActorText !== undefined;
-                            let addedMethodsCount = 0;
-                            if (actorExists) {
-                                const patchResult = patchExistingActorHeader(existingActorText, jsonText);
-                                if (patchResult.updatedContent !== existingActorText) {
-                                    await vscode.workspace.fs.writeFile(actorHeaderUri, stringToUint8Array(patchResult.updatedContent));
-                                }
-                                addedMethodsCount = patchResult.addedCount;
-                            } else {
-                                const freshActorHeader = generateCppConcreteHeaderStub(jsonText);
-                                await vscode.workspace.fs.writeFile(actorHeaderUri, stringToUint8Array(freshActorHeader));
-                            }
-
-                            // 4. Host Simulator stubs
-                            if (!(await fileExists(mainUri))) {
-                                await vscode.workspace.fs.writeFile(mainUri, stringToUint8Array(generateCppCliSimulatorString(jsonText)));
-                            }
-                            if (!(await fileExists(cmakeUri))) {
-                                await vscode.workspace.fs.writeFile(cmakeUri, stringToUint8Array(generateCMakeListsString(jsonText)));
-                            }
-                            const clangdUri = vscode.Uri.joinPath(folderUri, CLANGD_FILENAME);
-                            if (!(await fileExists(clangdUri))) {
-                                await vscode.workspace.fs.writeFile(clangdUri, stringToUint8Array(generateClangdConfigString()));
-                            }
-    
-                            // 5. Host tests: test sources are created once (user-owned); the CMake include is tool-owned
-                            const testsDirUri = vscode.Uri.joinPath(folderUri, 'tests');
-                            const modelTestFilename = `${lowerHsmName}_model_test.cpp`;
-                            const actorTestFilename = `${lowerHsmName}_actor_test.cpp`;
-                            const testStubs: [string, () => string][] = [
-                                [modelTestFilename, () => generateCppModelTestStub(jsonText)],
-                                [actorTestFilename, () => generateCppActorTestStub(jsonText)],
-                            ];
-                            const createdTests: string[] = [];
-                            for (const [filename, generate] of testStubs) {
-                                const uri = vscode.Uri.joinPath(testsDirUri, filename);
-                                if (!(await fileExists(uri))) {
-                                    await vscode.workspace.fs.createDirectory(testsDirUri);
-                                    await vscode.workspace.fs.writeFile(uri, stringToUint8Array(generate()));
-                                    createdTests.push(`tests/${filename}`);
-                                }
-                            }
-                            await vscode.workspace.fs.writeFile(
-                                vscode.Uri.joinPath(folderUri, TESTS_CMAKE_FILENAME),
-                                stringToUint8Array(generateTestsCMakeString(jsonText)));
-                            await vscode.workspace.fs.writeFile(
-                                vscode.Uri.joinPath(folderUri, `${lowerHsmName}_test_bsp.hpp`),
-                                stringToUint8Array(generateCppTestBspString(hsmName, bspContent)));
-                            await vscode.workspace.fs.writeFile(
-                                vscode.Uri.joinPath(folderUri, `${lowerHsmName}_trace.json`),
-                                stringToUint8Array(generateTraceDictionaryString(jsonText, eventsContent)));
-
-                            await copyFrameworkFilesToWorkspace(this.context, folderUri);
-
-                            // Projects created before test support have a CMakeLists.txt without the include
-                            const cmakeText = await readFileIfExists(cmakeUri);
-                            if (cmakeText !== undefined && !cmakeText.includes(TESTS_CMAKE_FILENAME)) {
-                                vscode.window.showInformationMessage(
-                                    `🧪 Host tests are ready${createdTests.length > 0 ? ` (${createdTests.join(', ')})` : ''}. ` +
-                                    `To build them, add this line to CMakeLists.txt: include(\${CMAKE_CURRENT_SOURCE_DIR}/${TESTS_CMAKE_FILENAME})`
-                                );
-                            }
-    
-                            // 6. User Feedback
-                            if (!actorExists || !bspExists) {
-                                vscode.window.showInformationMessage(
-                                    `🚀 Export complete! Generated '${blueprintFilename}', '${hwContractFilename}', and starter '${actorHeaderFilename}'.`
-                                );
-                            } else if (addedMethodsCount > 0) {
-                                vscode.window.showInformationMessage(
-                                    `✨ Preserved custom code & appended ${addedMethodsCount} newly discovered HSM method(s) to '${actorHeaderFilename}'!${eventsNote}${renamedNote}`
-                                );
-                            } else {
-                                vscode.window.showInformationMessage(
-                                    `🔄 Synchronized '${blueprintFilename}' and '${hwContractFilename}'. Custom code untouched.${eventsNote}${renamedNote}`
-                                );
-                            }
-                        } catch (err: any) {
-                            vscode.window.showErrorMessage(`❌ Export failed: ${err.message}`);
-                        }
-                        return;
+                // One source of truth for events (section 7.2 of docs/design/app-diagram.md): the applications follow
+                case 'renameSignal': {
+                    const folderUri = vscode.Uri.joinPath(document.uri, '..');
+                    try {
+                        vscode.window.showInformationMessage(await renameSignalEverywhere(folderUri, document.uri.path.split('/').pop()!,
+                                                                                         String(messageEvent.from), String(messageEvent.to)));
+                    } catch (e: any) {
+                        vscode.window.showErrorMessage(`❌ Rename refused: ${e.message}`);
                     }
+                    return;
+                }
+                case 'signalDeleted': {
+                    const note = await removeSignalEverywhere(vscode.Uri.joinPath(document.uri, '..'), document.uri.path.split('/').pop()!,
+                                                              String(messageEvent.name));
+                    if (note) vscode.window.showInformationMessage(note);
+                    return;
+                }
+                case 'exportCppBlueprint': {
+                    try {
+                        const result = await exportStateMachine(this.context, vscode.Uri.joinPath(document.uri, '..'), document.getText());
+                        if (result.hint) vscode.window.showInformationMessage(result.hint);
+                        vscode.window.showInformationMessage(result.message);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`❌ Export failed: ${err.message}`);
+                    }
+                    return;
+                }
             }
         });
 

@@ -122,6 +122,25 @@ report({ highlighted: [...document.querySelectorAll('.link-target-candidate')].m
 check('linking highlights the innermost state under the cursor (BOOM, not ROOT around it)',
       r is not None and r.get('highlighted') == ['node-STATE_5634'], json.dumps(r))
 
+
+# Signals: renamed and deleted through the extension, so the applications follow (one source of truth for events)
+extra = json.load(open(timebomb)); extra['signals'].append('Unused')
+extra_path = os.path.join(out_dir, 'extra.hsm.json'); json.dump(extra, open(extra_path, 'w'))
+r = run('hsm', extra_path, '''
+const rename = document.querySelector('#list-signals [data-rename="Tick"]');
+rename.click();
+const input = document.querySelector('#list-signals .rename-input');
+input.value = 'Beat';
+input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+const unused = [...document.querySelectorAll('#list-signals .registry-item')].find(i => i.textContent.includes('Unused'));
+unused.querySelector('button[data-item="Unused"]').click();
+const edit = window.__edits.filter(m => m.type === 'documentEdit').pop();
+report({ sent: window.__edits.filter(m => m.type !== 'documentEdit'),
+         saved: edit ? JSON.parse(edit.jsonText).signals : null });''', 'hsm_signals')
+check('signals in the HSM editor: rename asks the extension (everywhere); deleting an unused one saves it and tells the extension',
+      r is not None and {'type': 'renameSignal', 'from': 'Tick', 'to': 'Beat'} in r.get('sent', []) and
+      {'type': 'signalDeleted', 'name': 'Unused'} in r.get('sent', []) and 'Unused' not in (r.get('saved') or ['Unused']), json.dumps(r))
+
 # ---- Application editor -----------------------------------------------------------------------------------
 
 r = run('app', app, '''
@@ -215,6 +234,59 @@ report({ accepted, actor: (saved.find(c => c.kind === 'actor') || {}).name, coun
 check('a new application: the actor may share the application\'s name; new boxes land inside their parent, not overlapping',
       r is not None and r.get('accepted') is True and r.get('actor') == 'Timebomb' and r.get('count') == 7 and
       r.get('outside') == [] and r.get('overlapping') == [], json.dumps(r))
+
+# Top-down: an actor drawn without a state machine; connecting to it takes typed events; double-click creates it
+topdown = os.path.join(out_dir, 'topdown.app.json')
+json.dump({'name': 'Topdown', 'board': {}, 'features': {}, 'settings': {}, 'connections': [], 'components': [
+    {'id': 'APP', 'kind': 'application', 'name': 'Topdown', 'x': 40, 'y': 40, 'width': 980, 'height': 600},
+    {'id': 'C_1', 'kind': 'periodic', 'name': 'Poller', 'parent': 'APP', 'period_ms': 5, 'priority': 3, 'stack': 128, 'x': 70, 'y': 110, 'width': 250, 'height': 96},
+    {'id': 'C_2', 'kind': 'actor', 'name': 'Bomb', 'parent': 'APP', 'priority': 2, 'queue': 8, 'stack': 128, 'x': 400, 'y': 110, 'width': 250, 'height': 96}]},
+    open(topdown, 'w'))
+r = run('app', topdown, '''
+fire(node('C_1').querySelector('.hamburger-btn'), 'click', 0, 0);
+document.getElementById('menu-connect').click();
+const [x, y] = centerOf(node('C_2'));
+fire(window, 'mousemove', x, y);
+fire(node('C_2'), 'click', x, y);
+const typedVisible = document.getElementById('row-events-text').style.display !== 'none';
+document.getElementById('input-events').value = 'Pressed, Released';
+document.getElementById('btn-submit-connection').click();
+const edit = window.__edits.filter(m => m.type === 'documentEdit').pop();
+node('C_2').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+fire(node('C_2').querySelector('.hamburger-btn'), 'click', 0, 0);
+report({ typedVisible, events: edit ? JSON.parse(edit.jsonText).connections[0].events : null,
+         menu: document.getElementById('menu-open-model').textContent,
+         summary: node('C_2').querySelector('.fa-summary').textContent,
+         sent: window.__edits.filter(m => m.type === 'createStateMachine') });''', 'app_topdown', FIXTURES)
+check('top-down: events typed into an actor without a state machine; double-click (or the menu) creates its state machine',
+      r is not None and r.get('typedVisible') is True and r.get('events') == ['Pressed', 'Released'] and
+      r.get('menu') == '✨ Create State Machine' and 'no state machine yet' in r.get('summary', '') and
+      r.get('sent') == [{'type': 'createStateMachine', 'id': 'C_2'}], json.dumps(r))
+
+# An actor's events in its properties, renamed through the extension; a connection takes checked and new events
+r = run('app', app, '''
+node('C_2').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+const listed = [...document.querySelectorAll('#selection-props .signal-item span')].map(s => s.textContent);
+document.querySelector('#selection-props [data-rename="Tick"]').click();
+const input = document.querySelector('#selection-props .signal-item input');
+input.value = 'Beat';
+input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+fire(node('C_1').querySelector('.hamburger-btn'), 'click', 0, 0);
+document.getElementById('menu-connect').click();
+const [x, y] = centerOf(node('C_2'));
+fire(window, 'mousemove', x, y);
+fire(node('C_2'), 'click', x, y);
+document.querySelector('#events-checklist input[value="ButtonPressed"]').checked = true;
+document.getElementById('input-events').value = 'Defuse';
+document.getElementById('btn-submit-connection').click();
+const edit = window.__edits.filter(m => m.type === 'documentEdit').pop();
+const conns = edit ? JSON.parse(edit.jsonText).connections : [];
+report({ listed, sent: window.__edits.filter(m => m.type === 'renameSignal'), events: conns[conns.length - 1].events,
+         label: document.getElementById('label-events-text').textContent });''', 'app_signals')
+check("an actor's properties list its events, renamed through the extension; a connection takes checked and new events",
+      r is not None and r.get('listed') == ['Tick', 'ButtonPressed'] and
+      r.get('sent') == [{'type': 'renameSignal', 'model': 'timebomb.hsm.json', 'from': 'Tick', 'to': 'Beat'}] and
+      r.get('events') == ['ButtonPressed', 'Defuse'] and r.get('label') == 'New events (comma-separated)', json.dumps(r))
 
 r = run('app', app, '''
 document.getElementById('export-app-btn').click();

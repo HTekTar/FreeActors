@@ -221,8 +221,36 @@ function populateRegistryList(elementId, itemsList, typeKey, refMap, iconPrefix)
                 currentHsmData[typeKey] = currentHsmData[typeKey].filter(i => i !== item);
                 commitHsmChange();
                 renderSidebarRegistry();
+                // the applications drop it from their connections (one source of truth for events)
+                if (typeKey === 'signals') vscode.postMessage({ type: 'signalDeleted', name: item });
             });
             itemEl.appendChild(delBtn);
+        }
+        // Signals are renamed everywhere by the extension: here, in the applications' connections, in the event struct
+        if (typeKey === 'signals') {
+            const renameBtn = document.createElement('button');
+            renameBtn.innerText = '✎';
+            renameBtn.title = 'Rename (also in the applications and the event struct)';
+            renameBtn.className = 'rename-btn';
+            renameBtn.setAttribute('data-rename', item);
+            renameBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const input = document.createElement('input');
+                input.type = 'text'; input.value = item; input.className = 'rename-input';
+                const done = (commit) => {
+                    const to = input.value.trim();
+                    if (commit && to && to !== item) {
+                        if (!/^[A-Za-z_]\w*$/.test(to)) { input.style.borderColor = 'var(--vscode-errorForeground, #f48771)'; return; }
+                        vscode.postMessage({ type: 'renameSignal', from: item, to });
+                    }
+                    renderSidebarRegistry();
+                };
+                input.addEventListener('keydown', (k) => { if (k.key === 'Enter') done(true); else if (k.key === 'Escape') done(false); });
+                input.addEventListener('change', () => done(true));
+                itemEl.replaceChild(input, textSpan);
+                input.focus(); input.select();
+            });
+            itemEl.insertBefore(renameBtn, itemEl.children[1] || null);
         }
         
         container.appendChild(itemEl);

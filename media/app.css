@@ -44,3 +44,11 @@
 .problem.warning { border-left-color: var(--vscode-editorWarning-foreground, #cca700); }
 .problem:hover { background: var(--vscode-list-activeSelectionBackground, #04395e); }
 .problems-ok { font-size: 0.82em; color: var(--vscode-charts-green, #89d185); }
+
+/* An actor's events, renamed in place */
+.signal-list { display: flex; flex-direction: column; gap: 2px; }
+.signal-item { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 6px; border-radius: 3px;
+               background: var(--vscode-list-hoverBackground, #2a2d2e); font-size: 0.95em; }
+.signal-item button { background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.6; cursor: pointer; padding: 0 4px; }
+.signal-item button:hover { opacity: 1; }
+.signal-item input { flex: 1; min-width: 0; }

@@ -38,6 +38,9 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 }
 .registry-item button { background: transparent; padding: 0 4px; color: var(--vscode-errorForeground, #f48771); }
 .registry-item button:hover { background: rgba(255,0,0,0.1); }
+.registry-item .rename-btn { color: var(--vscode-foreground); opacity: 0.6; margin-left: auto; }
+.registry-item .rename-btn:hover { opacity: 1; background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.1)); }
+.registry-item .rename-input { flex: 1; min-width: 0; font: inherit; }
 #canvas-container {
     flex: 1; position: relative; overflow: hidden;
     background-image: radial-gradient(var(--vscode-panel-border, #444) 1px, transparent 1px);
