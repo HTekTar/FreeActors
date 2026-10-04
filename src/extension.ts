@@ -527,6 +527,13 @@ function memberLines(m: BoardMember): string {
     return (by.length > 0 ? `    // required by ${by.join(', ')}\n` : '') + `    ${m.code}\n`;
 }
 
+// A member added to an existing board: its requirement comment, if any, becomes the TODO's text
+function markAdded(code: string): string {
+    const at = code.indexOf('   // ');
+    return at < 0 ? `    ${code}   // TODO (added by export)`
+                  : `    ${code.slice(0, at)}   // TODO (added by export): ${code.slice(at + 6)}`;
+}
+
 // placeholder: a distinct number per interrupt (two modules on one interrupt would not compile)
 function irqLine(i: { name: string; owners: string[] }, placeholder: number): string {
     return `        static constexpr int ${i.name} = ${placeholder};   // TODO: the device's IRQn_Type, e.g. USART3_IRQn (required by ${i.owners.join(', ')})\n`;
@@ -615,8 +622,16 @@ export function appendMissingBoardMembers(content: string, app: any, sources: Re
         added.push(...missingIrqs.map(i => `Irq::${i.name}`));
     }
     for (const m of missingMembers) {
-        insert += memberLines(m).replace(`    ${m.code}`, `    ${m.code}   // TODO (added by export)`);
+        const lines = memberLines(m).replace(`    ${m.code}`, markAdded(m.code));
         added.push(m.key);
+        // At the end of its section while the board still has the blueprint's banner; else in one block at the end
+        const banner = updated.indexOf(`    // ${m.section}\n`);
+        const bannerEnd = banner < 0 ? -1 : updated.indexOf('// ====', banner + m.section.length + 8);
+        if (bannerEnd < 0) { insert += lines; continue; }
+        let at = updated.indexOf('\n    // ====', bannerEnd);   // the next section's banner
+        if (at < 0) { insert += lines; continue; }
+        while (at > 0 && updated[at - 1] === '\n' && updated[at - 2] === '\n') at--;   // before the blank line
+        updated = updated.slice(0, at) + lines + updated.slice(at);
     }
     if (insert) {
         const reStart = new RegExp(`struct\\s+${name}\\s*\\{`).exec(updated)!;
@@ -858,6 +873,16 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             }
         }
         const { sources, missingActors } = await this.requirementSources(app, folderUri, models);
+        // Actors too: their requirements may have changed since their state machine was exported
+        for (const c of (app.components || []) as any[]) {
+            const source = c.kind === 'actor' && sources.find(s => s.owner === (models.find(m => m.file === c.model) || {}).name);
+            if (!source) continue;
+            const lower = source.owner.toLowerCase();
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_hw_contract.hpp`),
+                                                stringToUint8Array(generateCpHwContractString(source.owner, source.content)));
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_test_bsp.hpp`),
+                                                stringToUint8Array(generateCppTestBspString(source.owner, source.content)));
+        }
         const files = generateAppFiles(app, models, sources.map(s => s.owner));
         for (const [file, content] of Object.entries(files)) {
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
@@ -1516,6 +1541,7 @@ export function generateCpHwContractString(machineName: string, requirementsCont
 
     out += `#include "${hwRequirementsFile(lowerMachineName)}"\n`;
     out += `#include "fa_util.hpp"\n`;
+    out += `#include <type_traits>\n`;
     out += `#include <utility>\n\n`;
 
     out += `namespace ${machineName} {\n\n`;
@@ -1525,7 +1551,17 @@ export function generateCpHwContractString(machineName: string, requirementsCont
 
     bspMethods.forEach((m, idx) => {
         const declvalArgs = m.argTypes.map(t => `std::declval<${t}>()`).join(', ');
-        out += `    template <typename T> using fn_${m.name}_${idx} = decltype(T::${m.name}(${declvalArgs}));\n`;
+        const fn = `fn_${m.name}_${idx}`;
+        out += `    template <typename T> using ${fn} = decltype(T::${m.name}(${declvalArgs}));\n`;
+        // the return type as declared (a board returning bool for a size_t would otherwise pass by conversion)
+        out += `    template <typename T> static constexpr bool returns_${m.name}_${idx}() {\n`;
+        out += `        if constexpr (Fa::is_detected_v<${fn}, T>) {\n`;
+        out += `            using Required = ${fn}<HwRequirements>;\n`;
+        out += `            return std::is_void_v<Required> || std::is_same_v<std::decay_t<${fn}<T>>, std::decay_t<Required>>;\n`;
+        out += `        } else {\n`;
+        out += `            return true;   // reported as missing\n`;
+        out += `        }\n`;
+        out += `    }\n`;
     });
     irqs.forEach(name => {
         out += `    template <typename T> using irq_${name} = decltype(static_cast<int>(T::Irq::${name}));\n`;
@@ -1539,6 +1575,8 @@ export function generateCpHwContractString(machineName: string, requirementsCont
         bspMethods.forEach((m, idx) => {
             out += `        static_assert(Fa::is_detected_v<fn_${m.name}_${idx}, HwPolicy>,\n`;
             out += `            "[${machineName} Contract Violation] the board must define: static ${m.returnType} ${m.name}(${m.rawArgs})");\n`;
+            out += `        static_assert(returns_${m.name}_${idx}<HwPolicy>(),\n`;
+            out += `            "[${machineName} Contract Violation] the board's ${m.name} must return ${m.returnType}, as required: static ${m.returnType} ${m.name}(${m.rawArgs})");\n`;
         });
         irqs.forEach(name => {
             out += `        static_assert(Fa::is_detected_v<irq_${name}, HwPolicy>,\n`;

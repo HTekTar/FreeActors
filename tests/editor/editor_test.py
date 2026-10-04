@@ -182,6 +182,40 @@ check('adding a component: an invalid name is refused; an interrupt module is ad
       (r.get('added') or {}).get('x', 0) + (r.get('added') or {}).get('width', 0) <= 80 + 900,      # inside Comms (x 80, width 900)
       json.dumps(r))
 
+# A new application (as the extension creates for an empty Timebomb.app.json), built up in the dialog: the actor
+# may take the application's name (the name the dialog suggests from the state machine), and every new box lands
+# inside its parent without overlapping a sibling, the parents growing as needed
+fresh = os.path.join(out_dir, 'fresh.app.json')
+json.dump({'name': 'Timebomb', 'board': {}, 'features': {}, 'settings': {}, 'connections': [],
+           'components': [{'id': 'APP', 'kind': 'application', 'name': 'Timebomb', 'x': 40, 'y': 40, 'width': 980, 'height': 600}]},
+          open(fresh, 'w'))
+r = run('app', fresh, '''
+function add(kind, name, parent, model) {
+  document.getElementById('add-component-btn').click();
+  document.getElementById('input-kind').value = kind;
+  document.getElementById('input-kind').dispatchEvent(new Event('change'));
+  if (model) { document.getElementById('input-model').value = model; document.getElementById('input-model').dispatchEvent(new Event('change')); }
+  if (name) document.getElementById('input-name').value = name;
+  document.getElementById('input-parent').value = parent;
+  document.getElementById('btn-submit-component').click();
+  return document.getElementById('hint-name').style.display !== 'block';
+}
+const accepted = add('actor', '', 'APP', 'timebomb.hsm.json');           // name suggested from the model: Timebomb
+add('periodic', 'ButtonPoller', 'APP');
+add('subsystem', 'Commands', 'APP');
+const sub = JSON.parse(window.__edits.filter(m => m.type === 'documentEdit').pop().jsonText).components.find(c => c.name === 'Commands').id;
+['A', 'B', 'C'].forEach(n => add('interrupt', 'Irq' + n, sub));
+const saved = JSON.parse(window.__edits.filter(m => m.type === 'documentEdit').pop().jsonText).components;
+const byId = (id) => saved.find(c => c.id === id);
+const outside = saved.filter(c => c.parent).filter(c => { const p = byId(c.parent);
+  return c.x < p.x || c.y < p.y || c.x + c.width > p.x + p.width || c.y + c.height > p.y + p.height; }).map(c => c.name);
+const overlapping = saved.filter(a => saved.some(b => a !== b && a.parent === b.parent && a.parent &&
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height)).map(c => c.name);
+report({ accepted, actor: (saved.find(c => c.kind === 'actor') || {}).name, count: saved.length, outside, overlapping });''', 'app_fresh', FIXTURES)
+check('a new application: the actor may share the application\'s name; new boxes land inside their parent, not overlapping',
+      r is not None and r.get('accepted') is True and r.get('actor') == 'Timebomb' and r.get('count') == 7 and
+      r.get('outside') == [] and r.get('overlapping') == [], json.dumps(r))
+
 r = run('app', app, '''
 document.getElementById('export-app-btn').click();
 document.getElementById('generate-board-btn').click();

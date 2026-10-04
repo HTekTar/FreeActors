@@ -324,6 +324,32 @@ document.getElementById('input-model').addEventListener('change', () => {
 });
 document.getElementById('add-component-btn').addEventListener('click', () => openComponentModal(null));
 document.getElementById('btn-cancel-component').addEventListener('click', () => { componentModal.style.display = 'none'; });
+// The first spot inside the parent (row by row, left to right) where a new box overlaps none of its siblings;
+// below them all if none is free within the parent's width
+const GAP = 20;
+function freeSpotIn(parent, width, height) {
+    const siblings = app.components.filter(c => c.parent === (parent ? parent.id : undefined) && c !== parent);
+    const left = parent ? parent.x + 30 : 70, top = parent ? parent.y + 70 : 110;
+    const right = Math.max(left + width, parent ? parent.x + parent.width - 30 : left + 1000);
+    const free = (x, y) => siblings.every(s => x + width + GAP <= s.x || s.x + (s.width || 200) + GAP <= x ||
+                                               y + height + GAP <= s.y || s.y + (s.height || 90) + GAP <= y);
+    const bottom = siblings.reduce((b, s) => Math.max(b, s.y + (s.height || 90) + GAP), top);
+    for (let y = top; y <= bottom; y += 10) {
+        for (let x = left; x + width <= right; x += 10) {
+            if (free(x, y)) return { x, y };
+        }
+    }
+    return { x: left, y: bottom };
+}
+
+// Grows the parent (and its parents) so the box fits inside with a margin
+function growToContain(parent, box) {
+    for (let p = parent, inner = box; p; inner = p, p = p.parent ? byId(p.parent) : null) {
+        p.width = Math.max(p.width || 200, inner.x + (inner.width || 200) + 30 - p.x);
+        p.height = Math.max(p.height || 90, inner.y + (inner.height || 90) + 30 - p.y);
+    }
+}
+
 document.getElementById('btn-submit-component').addEventListener('click', () => {
     const kind = document.getElementById('input-kind').value;
     const name = document.getElementById('input-name').value.trim();
@@ -332,21 +358,18 @@ document.getElementById('btn-submit-component').addEventListener('click', () => 
         hint.innerText = 'A name is a C++ identifier: letters, digits and _ (not starting with a digit).';
         hint.style.display = 'block'; return;
     }
-    if (app.components.some(c => c.name === name)) {
+    // the application itself may share a name (Timebomb in Timebomb.app.json): it is no C++ type (as in checkAppModel)
+    if (app.components.some(c => c.name === name && c.kind !== 'application')) {
         hint.innerText = `There is already a component named ${name}.`;
         hint.style.display = 'block'; return;
     }
     const parent = byId(document.getElementById('input-parent').value);
-    const siblings = app.components.filter(c => c.parent === (parent && parent.id)).length;
     const width = kind === 'subsystem' ? 520 : 250, height = kind === 'subsystem' ? 260 : 96;
-    // Next free slot in a grid inside the parent, wrapping at its width
-    const columns = Math.max(1, Math.floor(((parent ? parent.width : 1000) - 60) / (width + 20)));
+    const { x, y } = freeSpotIn(parent, width, height);
     const component = Object.assign({
-        id: newId('C'), kind, name, parent: parent ? parent.id : undefined,
-        x: (parent ? parent.x : 40) + 30 + (siblings % columns) * (width + 20),
-        y: (parent ? parent.y : 40) + 70 + Math.floor(siblings / columns) * (height + 30),
-        width, height,
+        id: newId('C'), kind, name, parent: parent ? parent.id : undefined, x, y, width, height,
     }, JSON.parse(JSON.stringify(DEFAULTS[kind] || {})));
+    growToContain(parent, component);
     if (kind === 'actor') component.model = document.getElementById('input-model').value;
     app.components.push(component);
     componentModal.style.display = 'none';

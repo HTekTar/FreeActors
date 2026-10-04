@@ -25,7 +25,11 @@ struct Board {
 #endif
         static constexpr IRQn_Type command_rx_uart = USART3_IRQn;
     };
+#ifndef WRONG_RETURN
     static size_t command_rx_dma_ack() { return 0; }
+#else
+    static bool command_rx_dma_ack() { return false; }   // the stub's bool kept: converts to size_t, so only the return check sees it
+#endif
 #ifndef MISSING_ACK
     static size_t command_rx_uart_ack() { return 0; }
 #endif

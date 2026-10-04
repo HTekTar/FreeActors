@@ -41,10 +41,16 @@ const handWritten = board.replace('static bool read_button() { return {}; /* TOD
                          .replace(/\s*static constexpr int rx = 2;[^\n]*/, '');
 const grown = sources.concat([{ owner: 'Display', content: 'namespace Display { struct HwRequirements { static void show(uint8_t digit); // 7-segment\n struct Irq { static const int vsync; }; }; }' }]);
 const { updated, added } = ext.appendMissingBoardMembers(handWritten, app, grown);
-check('a later export appends what is missing (a new function, interrupts), marked, and keeps the hand-written code',
+check('a later export adds what is missing (a function into its section, interrupts into Irq), marked, and keeps the hand-written code',
       JSON.stringify(added.sort()) === JSON.stringify(['Irq::rx', 'Irq::vsync', 'show'].sort()) &&
       updated.includes('return (GPIOC_IDR & 0x2000) != 0; }   // mine') &&
-      /static void show\(uint8_t digit\) \{ \(void\)digit; \/\* TODO \*\/ \}   \/\/ 7-segment   \/\/ TODO \(added by export\)/.test(updated) &&
+      // in the DRIVERS section (the blueprint's banner is still there), before TRACE, its comment in the TODO
+      /\/\/ DRIVERS[\s\S]*static void show\(uint8_t digit\) \{ \(void\)digit; \/\* TODO \*\/ \}   \/\/ TODO \(added by export\): 7-segment\n\n[\s\S]*\/\/ TRACE/.test(updated) &&
+      !updated.includes('Added by export') &&
       /struct Irq \{[^}]*static constexpr int vsync = 20\d;   \/\/ TODO \(added by export\)/.test(updated), updated);
+const plain = 'namespace Board {\nstruct Generated {\n    static void init() {}\n};\n}\n';
+const fromPlain = ext.appendMissingBoardMembers(plain, app, sources).updated;
+check('a board without the blueprint\'s sections gets the missing members in one marked block at its end',
+      /static void init\(\) \{\}\n\n    \/\/ ---- Added by export[^\n]*\n[\s\S]*static bool read_button\(\)[\s\S]*\n\};\n\}/.test(fromPlain), fromPlain);
 check('appending again changes nothing', ext.appendMissingBoardMembers(updated, app, grown).updated === updated, '');
 process.exit(failures ? 1 : 0);

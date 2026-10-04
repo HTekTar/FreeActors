@@ -77,6 +77,7 @@ if (args[0] === '--project') {
         [ext.TESTS_CMAKE_FILENAME]: ext.generateTestsCMakeString(jsonText),
         [`tests/${lowerName}_model_test.cpp`]: ext.generateCppModelTestStub(jsonText),
         [`tests/${lowerName}_actor_test.cpp`]: ext.generateCppActorTestStub(jsonText),
+        [`${lowerName}_trace.json`]: ext.generateTraceDictionaryString(jsonText, headers.events),
     };
     for (const [suffix, content] of Object.entries(headers)) {
         files[`${lowerName}_${suffix}.hpp`] = content;

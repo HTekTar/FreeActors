@@ -118,7 +118,8 @@ if node "$ROOT/tests/requirements/gen_requirements.js" "$req"; then
     build_and_run requirements_test "$ROOT/tests/requirements/requirements_test.cpp"
     OUT="$OUT_SAVED"
     for case in "MISSING_IRQ|CommandRxIsr Contract Violation\] the board must define its interrupt: struct Irq { static constexpr IRQn_Type command_rx_dma" \
-                "MISSING_ACK|CommandRxIsr Contract Violation\] the board must define: static size_t command_rx_uart_ack()"; do
+                "MISSING_ACK|CommandRxIsr Contract Violation\] the board must define: static size_t command_rx_uart_ack()" \
+                "WRONG_RETURN|CommandRxIsr Contract Violation\] the board's command_rx_dma_ack must return size_t"; do
         flag="${case%%|*}"; expected="${case#*|}"
         if g++ -std=c++17 -fsyntax-only -D"$flag" -I"$req" -I"$ROOT/freeactors_lib" "$ROOT/tests/requirements/requirements_test.cpp" 2> "$req/$flag.log"; then
             echo "FAIL  requirements: a board with $flag compiled"; status=1
