@@ -228,6 +228,14 @@ app_generation_checks() {
             echo "FAIL  app generation: $f does not compile (log: tests/build/app/${f%.cpp}.log)"; grep -m 5 error "$app/${f%.cpp}.log"; status=1
         fi
     done
+    # The board blueprint: generated from the requirements, the same application must compile against it as is
+    node "$ROOT/tests/board_test.js" "$app" || status=1
+    if arm-none-eabi-g++ "${flags[@]}" -I"$app/on_board" -c "$app/on_board/minimal_app.cpp" -o "$app/on_board/minimal_app.o" 2> "$app/on_board/app.log"; then
+        echo "PASS  app generation: the application compiles against its generated board blueprint"
+    else
+        echo "FAIL  app generation: the application against the generated board (log: tests/build/app/on_board/app.log)"
+        grep -m 5 error "$app/on_board/app.log"; status=1
+    fi
     if arm-none-eabi-g++ "${flags[@]}" -fsyntax-only "$ROOT/tests/app_values_test.cpp" 2> "$app/values.log"; then
         echo "PASS  app generation: the diagram's features, task settings, period, interrupt priority and settings reach the code"
     else

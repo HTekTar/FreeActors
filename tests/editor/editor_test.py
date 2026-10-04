@@ -184,8 +184,10 @@ check('adding a component: an invalid name is refused; an interrupt module is ad
 
 r = run('app', app, '''
 document.getElementById('export-app-btn').click();
+document.getElementById('generate-board-btn').click();
 report({ sent: window.__edits.map(m => m.type) });''', 'app_export')
-check('Export Application asks the extension to export', r is not None and 'exportApplication' in r.get('sent', []), json.dumps(r))
+check('Export Application and Generate Board ask the extension',
+      r is not None and 'exportApplication' in r.get('sent', []) and 'generateBoard' in r.get('sent', []), json.dumps(r))
 
 r = run('app', app, '''
 node('C_1').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));

@@ -67,6 +67,7 @@ const canvas = FaCanvas.create({
 });
 document.getElementById('reset-view-btn').addEventListener('click', () => canvas.resetView());
 document.getElementById('export-app-btn').addEventListener('click', () => vscode.postMessage({ type: 'exportApplication' }));
+document.getElementById('generate-board-btn').addEventListener('click', () => vscode.postMessage({ type: 'generateBoard' }));
 
 // ---- Model ---------------------------------------------------------------------------------------------
 

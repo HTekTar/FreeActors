@@ -446,6 +446,190 @@ const KIND_TITLES: { [k: string]: string } = {
     periodic: 'Periodic module', interrupt: 'Interrupt module', spsc: 'SPSC service', mpsc: 'MPSC service', dma: 'DMA ring service',
 };
 
+// ---- Board blueprint (user-owned board file: created once, missing members appended on later exports) -----
+
+export interface RequirementSource { owner: string; content: string; }
+
+interface BoardMember { key: string; code: string; owners: string[]; section: string; }
+
+// The comment written next to a declaration in a requirements file, e.g. "LD2: armed / ticking"
+function requirementComment(content: string, name: string): string {
+    const m = new RegExp(`\\b${name}\\s*\\([^)]*\\)\\s*;\\s*//\\s*(.*)$`, 'm').exec(content);
+    return m && m[1] ? m[1].trim() : '';
+}
+
+function stubBody(returnType: string, params: string): string {
+    const names = params.split(',').map(p => p.trim().split(/\s+/).pop() || '').filter(n => /^[A-Za-z_]\w*$/.test(n));
+    const unused = names.length > 0 ? names.map(n => `(void)${n}; `).join('') : '';
+    return returnType === 'void' ? `{ ${unused}/* TODO */ }` : `{ ${unused}return {}; /* TODO */ }`;
+}
+
+// Everything the application's board must provide: the modules' requirements and the enabled features' functions
+function boardMembers(app: any, sources: RequirementSource[]): { members: BoardMember[]; irqs: { name: string; owners: string[] }[] } {
+    const members: BoardMember[] = [];
+    const add = (key: string, code: string, owner: string, section: string) => {
+        const existing = members.find(m => m.key === key);
+        if (existing) { if (!existing.owners.includes(owner)) existing.owners.push(owner); return; }
+        members.push({ key, code, owners: [owner], section });
+    };
+    const features = app.features || {};
+    add('init', 'static void init() { /* TODO: vendor start-up (HAL/SDK init), clock tree, then each peripheral below */ }',
+        'FreeActors', 'START-UP');
+    for (const s of sources) {
+        for (const m of parseHwRequirementsHeader(s.content)) {
+            if (m.name === 'init') continue;
+            const comment = requirementComment(s.content, m.name);
+            add(m.name, `static ${m.returnType} ${m.name}(${m.rawArgs}) ${stubBody(m.returnType, m.rawArgs)}${comment ? `   // ${comment}` : ''}`,
+                s.owner, 'DRIVERS');
+        }
+    }
+    if (features.trace) {
+        add('trace_write', 'static void trace_write(uint8_t const* data, size_t n) noexcept { (void)data; (void)n; /* TODO: send the bytes (UART, RTT); may block */ }', 'trace', 'TRACE (FA_TRACE)');
+        add('trace_timestamp', 'static uint32_t trace_timestamp() noexcept { return 0; /* TODO: e.g. Fa::CortexM::CycleCounter::now() */ }', 'trace', 'TRACE (FA_TRACE)');
+        add('trace_timestamp_hz', 'static uint32_t trace_timestamp_hz() noexcept { return 1; /* TODO: the timestamp clock, e.g. SystemCoreClock */ }', 'trace', 'TRACE (FA_TRACE)');
+    }
+    if (features.commands) {
+        add('rx_stream_start', 'static void rx_stream_start(uint8_t* buffer, size_t n) noexcept { (void)buffer; (void)n; /* TODO: circular receive DMA into buffer; its interrupt modules call IsrCtx::command_rx(position) */ }',
+            'commands', 'COMMANDS (FA_TRACE_COMMANDS)');
+    }
+    if (features.health) {
+        add('watchdog_start', 'static void watchdog_start(uint32_t timeout_ms) noexcept { (void)timeout_ms; /* TODO: start the hardware watchdog (it cannot be stopped) */ }', 'health', 'WATCHDOG (FA_HEALTH)');
+        add('watchdog_kick', 'static void watchdog_kick() noexcept { /* TODO: feed the watchdog */ }', 'health', 'WATCHDOG (FA_HEALTH)');
+        add('reset_cause', 'static Fa::ResetCause reset_cause() noexcept { return Fa::ResetCause::Unknown; /* TODO: from the reset flags, read once in init() */ }', 'health', 'WATCHDOG (FA_HEALTH)');
+    }
+    if (features.debug_commands) {
+        add('reset', 'static void reset() noexcept { /* TODO: e.g. Fa::CortexM::system_reset(); */ }', 'debug commands', 'RESET (FA_DEBUG_COMMANDS)');
+    }
+    const irqs: { name: string; owners: string[] }[] = [];
+    for (const s of sources) {
+        for (const name of parseIrqRequirements(s.content)) {
+            const existing = irqs.find(i => i.name === name);
+            if (existing) existing.owners.push(s.owner); else irqs.push({ name, owners: [s.owner] });
+        }
+    }
+    return { members, irqs };
+}
+
+const SECTION_GUIDANCE: { [s: string]: string } = {
+    'START-UP': 'Called first by app_start(), before any task: the vendor\'s start-up and the peripherals used below.',
+    'INTERRUPTS': 'Which interrupt delivers each source the application needs (CMSIS IRQn_Type from the device header).\n' +
+                  '// Only the number: FreeActors installs the handler, sets the priority (chosen by the interrupt module) and enables it.\n' +
+                  '// Configure each peripheral in init(); acknowledge each interrupt in its *_ack function (clear the flag).',
+    'DRIVERS': 'What the modules require (their *_hw_requirements.hpp), checked at compile time by the contracts.',
+    'TRACE (FA_TRACE)': 'The trace transport, called from the trace task (lowest priority).',
+    'COMMANDS (FA_TRACE_COMMANDS)': 'Command input from the PC: start continuous reception into the given buffer.',
+    'WATCHDOG (FA_HEALTH)': 'The hardware watchdog, fed by the health monitor only while every task is healthy.',
+    'RESET (FA_DEBUG_COMMANDS)': 'The RESET command from the PC.',
+};
+
+function memberLines(m: BoardMember): string {
+    const by = m.owners.filter(o => !['FreeActors', 'trace', 'commands', 'health', 'debug commands'].includes(o));
+    return (by.length > 0 ? `    // required by ${by.join(', ')}\n` : '') + `    ${m.code}\n`;
+}
+
+// placeholder: a distinct number per interrupt (two modules on one interrupt would not compile)
+function irqLine(i: { name: string; owners: string[] }, placeholder: number): string {
+    return `        static constexpr int ${i.name} = ${placeholder};   // TODO: the device's IRQn_Type, e.g. USART3_IRQn (required by ${i.owners.join(', ')})\n`;
+}
+
+// The board's struct name and namespace from AppTraits::Platform, e.g. Board::NucleoF446ZE
+function boardTypeParts(app: any): { ns: string | undefined; name: string } {
+    const parts = String((app.board && app.board.type) || 'Board::MyBoard').split('::');
+    return { name: parts.pop() || 'MyBoard', ns: parts.length > 0 ? parts.join('::') : undefined };
+}
+
+export function generateBoardBlueprint(app: any, sources: RequirementSource[]): string {
+    const { members, irqs } = boardMembers(app, sources);
+    const { ns, name } = boardTypeParts(app);
+    const features = app.features || {};
+    let out = `// ==========================================================================\n`;
+    out += `// BOARD ${name} for the ${app.name} application\n`;
+    out += `// Created by FreeActors from what the application requires; this file is yours to complete.\n`;
+    out += `// Every member is a stub that compiles: replace each TODO with the vendor-specific code.\n`;
+    out += `// When the application needs more later, Export Application appends the missing members, marked\n`;
+    out += `// "TODO (added by export)"; it never changes what is here.\n`;
+    out += `// ==========================================================================\n\n`;
+    out += `#pragma once\n\n#include <cstddef>\n#include <cstdint>\n`;
+    if (features.health) out += `#include "fa_health.hpp"   // Fa::ResetCause\n`;
+    out += `// TODO: the vendor's device header (CMSIS), e.g. #include "stm32f4xx.h"\n\n`;
+    if (irqs.length > 0) out += `extern "C" uint32_t _estack;   // top of the main stack, from the linker script (CMSIS scripts: __StackTop)\n\n`;
+    if (ns) out += `namespace ${ns} {\n\n`;
+    out += `struct ${name} {\n`;
+    const sections = ['START-UP', ...(irqs.length > 0 ? ['INTERRUPTS'] : []), 'DRIVERS', 'TRACE (FA_TRACE)',
+                      'COMMANDS (FA_TRACE_COMMANDS)', 'WATCHDOG (FA_HEALTH)', 'RESET (FA_DEBUG_COMMANDS)'];
+    for (const section of sections) {
+        const inSection = members.filter(m => m.section === section);
+        if (section !== 'INTERRUPTS' && inSection.length === 0) continue;
+        out += `    // ======================================================================\n`;
+        out += `    // ${section}\n    // ${SECTION_GUIDANCE[section]!.split('\n').join('\n    ')}\n`;
+        out += `    // ======================================================================\n`;
+        if (section === 'INTERRUPTS') {
+            out += `    struct Irq {\n${irqs.map((i, n) => irqLine(i, n)).join('')}    };\n`;
+            out += `    static constexpr size_t irq_count = 240;                      // TODO: the device's number of interrupts (sizes the vector table)\n`;
+            out += `    static constexpr void const* initial_stack = &_estack;        // entry 0 of the vector table (FreeRTOS reads it)\n\n`;
+        } else {
+            out += inSection.map(memberLines).join('') + `\n`;
+        }
+    }
+    out += `};\n`;
+    if (ns) out += `\n} // namespace ${ns}\n`;
+    return out;
+}
+
+// A later export: appends to an existing board file what the application now requires and it lacks
+export function appendMissingBoardMembers(content: string, app: any, sources: RequirementSource[]): { updated: string; added: string[] } {
+    const { members, irqs } = boardMembers(app, sources);
+    const { name } = boardTypeParts(app);
+    const added: string[] = [];
+    let updated = content;
+    const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+    // Missing interrupts go into the existing struct Irq (or a new one)
+    const missingIrqs = irqs.filter(i => !new RegExp(`\\b${i.name}\\b`).test(code((/struct\s+Irq\s*\{[^}]*\}/.exec(code(updated)) || [''])[0])));
+    const missingMembers = members.filter(m => !new RegExp(`\\b${m.key}\\s*\\(`).test(code(updated)));
+    if (missingIrqs.length === 0 && missingMembers.length === 0) return { updated, added };
+
+    const structStart = new RegExp(`struct\\s+${name}\\s*\\{`).exec(updated);
+    if (!structStart) return { updated, added };
+    // the struct's closing brace: brace matching from its opening
+    let depth = 0, end = -1;
+    for (let i = structStart.index + structStart[0].length - 1; i < updated.length; i++) {
+        if (updated[i] === '{') depth++;
+        else if (updated[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end < 0) return { updated, added };
+
+    let insert = '';
+    if (missingIrqs.length > 0) {
+        const irqBlock = /struct\s+Irq\s*\{/.exec(updated);
+        if (irqBlock && irqBlock.index < end) {
+            const close = updated.indexOf('}', irqBlock.index);
+            const lineStart = updated.lastIndexOf('\n', close) + 1;     // before the closing line's indentation
+            const lines = missingIrqs.map((i, n) => irqLine(i, 200 + n).replace('// TODO:', '// TODO (added by export):')).join('');
+            updated = updated.slice(0, lineStart) + lines + updated.slice(lineStart);
+        } else {
+            insert += `    struct Irq {   // TODO (added by export): the interrupts the application's modules handle\n${missingIrqs.map((i, n) => irqLine(i, 200 + n)).join('')}    };\n`;
+            if (!/\birq_count\b/.test(code(updated))) insert += `    static constexpr size_t irq_count = 240;   // TODO (added by export): the device's number of interrupts\n`;
+            if (!/\binitial_stack\b/.test(code(updated))) insert += `    static constexpr void const* initial_stack = nullptr;   // TODO (added by export): &_estack (the linker script's top of stack)\n`;
+        }
+        added.push(...missingIrqs.map(i => `Irq::${i.name}`));
+    }
+    for (const m of missingMembers) {
+        insert += memberLines(m).replace(`    ${m.code}`, `    ${m.code}   // TODO (added by export)`);
+        added.push(m.key);
+    }
+    if (insert) {
+        const reStart = new RegExp(`struct\\s+${name}\\s*\\{`).exec(updated)!;
+        depth = 0; end = -1;
+        for (let i = reStart.index + reStart[0].length - 1; i < updated.length; i++) {
+            if (updated[i] === '{') depth++;
+            else if (updated[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+        }
+        updated = updated.slice(0, end) + `\n    // ---- Added by export: the application now requires these ----\n` + insert + updated.slice(end);
+    }
+    return { updated, added };
+}
+
 // All tool-owned files of an application. requirementOwners: namespaces whose <owner>_hw_requirements.hpp exists
 export function generateAppFiles(app: any, models: AppModelInfo[], requirementOwners: string[]): { [file: string]: string } {
     return {
@@ -673,25 +857,82 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                 created.push(moduleFileName(c.name));
             }
         }
-        // Every component whose requirements file exists takes part in the application-wide hardware contract
-        const owners: string[] = [];
+        const { sources, missingActors } = await this.requirementSources(app, folderUri, models);
+        const files = generateAppFiles(app, models, sources.map(s => s.owner));
+        for (const [file, content] of Object.entries(files)) {
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
+        }
+        // The board, when it lives next to the application: what the requirements gained since is appended
+        let boardNote = '';
+        const boardUri = this.boardUri(app, folderUri);
+        const board = boardUri && await readFileIfExists(boardUri);
+        if (boardUri && board !== undefined) {
+            const { updated, added } = appendMissingBoardMembers(board, app, sources);
+            if (added.length > 0) {
+                await vscode.workspace.fs.writeFile(boardUri, stringToUint8Array(updated));
+                boardNote = ` Added to the board ${app.board.header}, for you to implement: ${added.join(', ')}.`;
+            }
+        } else if (boardUri) {
+            boardNote = ` The board ${app.board.header} does not exist yet: Generate Board creates it.`;
+        }
+        vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}.` +
+            (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') + boardNote +
+            (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
+    }
+
+    // Every component whose requirements file exists takes part in the application-wide hardware contract and the board
+    private async requirementSources(app: any, folderUri: vscode.Uri, models: AppModelInfo[]) {
+        const sources: RequirementSource[] = [];
         const missingActors: string[] = [];
         for (const c of (app.components || []) as any[]) {
             if (c.kind === 'application' || c.kind === 'subsystem') continue;
             const owner = c.kind === 'actor' ? (models.find(m => m.file === c.model) || { name: c.name }).name : c.name;
-            if (await fileExists(vscode.Uri.joinPath(folderUri, hwRequirementsFile(owner.toLowerCase())))) {
-                owners.push(owner);
+            const content = await readFileIfExists(vscode.Uri.joinPath(folderUri, hwRequirementsFile(owner.toLowerCase())));
+            if (content !== undefined) {
+                sources.push({ owner, content });
             } else if (c.kind === 'actor') {
                 missingActors.push(c.model);
             }
         }
-        const files = generateAppFiles(app, models, owners);
-        for (const [file, content] of Object.entries(files)) {
-            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
+        return { sources, missingActors };
+    }
+
+    // The board header, relative to the application file; undefined when the board type or header is not set
+    private boardUri(app: any, folderUri: vscode.Uri): vscode.Uri | undefined {
+        const header = String(app?.board?.header || '').trim();
+        if (!header || !String(app?.board?.type || '').trim()) return undefined;
+        return vscode.Uri.joinPath(folderUri, header);
+    }
+
+    // Generate Board: a compiling board skeleton from all the requirements; if the board exists, only what is missing
+    private async generateBoard(document: vscode.TextDocument, folderUri: vscode.Uri, models: AppModelInfo[]) {
+        let app: any;
+        try {
+            app = JSON.parse(document.getText());
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`❌ The application model is not valid JSON (${e.message})`);
+            return;
         }
-        vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}.` +
-            (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') +
-            (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
+        const boardUri = this.boardUri(app, folderUri);
+        if (!boardUri) {
+            vscode.window.showErrorMessage('❌ Set the board type (e.g. Board::MyBoard) and header (e.g. bsp_my_board.hpp) first.');
+            return;
+        }
+        const { sources, missingActors } = await this.requirementSources(app, folderUri, models);
+        const existing = await readFileIfExists(boardUri);
+        let message: string;
+        if (existing === undefined) {
+            await vscode.workspace.fs.writeFile(boardUri, stringToUint8Array(generateBoardBlueprint(app, sources)));
+            message = `🛠️ Board ${app.board.header} created from the requirements of ${sources.map(s => s.owner).join(', ') || 'no module yet'}: fill in the TODOs.`;
+        } else {
+            const { updated, added } = appendMissingBoardMembers(existing, app, sources);
+            if (added.length > 0) await vscode.workspace.fs.writeFile(boardUri, stringToUint8Array(updated));
+            message = added.length > 0 ? `🛠️ Added to the board ${app.board.header}: ${added.join(', ')}.`
+                                       : `✅ The board ${app.board.header} already has everything the application requires.`;
+        }
+        if (missingActors.length > 0) message += ` Not included (export these state machines first): ${missingActors.join(', ')}.`;
+        vscode.window.showInformationMessage(message);
+        await vscode.window.showTextDocument(boardUri);
     }
 
     public async resolveCustomTextEditor(
@@ -775,6 +1016,10 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                 }
                 case 'exportApplication': {
                     await this.exportApplication(document, folderUri, await scanModels());
+                    return;
+                }
+                case 'generateBoard': {
+                    await this.generateBoard(document, folderUri, await scanModels());
                     return;
                 }
                 case 'openFile': {
