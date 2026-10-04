@@ -34,7 +34,11 @@ const legacy = ext.generateCppConcreteHeaderStub(jsonText)
 check('the legacy actor has no API block, and has user code using this->',
       !legacy.includes(ext.ACTOR_API_MARKER) && legacy.includes('this->cancel(Tick{}); }   // user code from before'));
 
-const once = ext.patchExistingActorHeader(legacy, jsonText).updatedContent;
+const legacyInclude = legacy.split('#include "timebomb_hw_requirements.hpp"').join('#include "timebomb_bsp_policy.hpp"');
+check('the legacy actor includes the pre-0.0.9 requirements file', legacyInclude.includes('#include "timebomb_bsp_policy.hpp"'));
+const once = ext.patchExistingActorHeader(legacyInclude, jsonText).updatedContent;
+check('the include is rewritten to the renamed requirements file (timebomb_hw_requirements.hpp)',
+      once.includes('#include "timebomb_hw_requirements.hpp"') && !once.includes('bsp_policy'));
 const occurrences = once.split(ext.ACTOR_API_MARKER).length - 1;
 check('the API block is added exactly once', occurrences === 1 && once.includes(block));
 check('it goes right after public:', once.includes('public:\n' + block));

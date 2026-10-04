@@ -19,7 +19,7 @@ extern "C" uint32_t _estack;   // defined by the linker script
 // Interrupt numbers as a CMSIS device header would declare them
 enum IRQn_Type : int { ADC_IRQn = 18, USART3_IRQn = 39, DMA1_Stream1_IRQn = 12 };
 
-// Stand-in board providing Timebomb's hardware requirements (tests/fixtures/timebomb.bsp_policy.hpp).
+// Stand-in board providing Timebomb's hardware requirements (tests/fixtures/timebomb.hw_requirements.hpp).
 struct TargetBoard {
     // Interrupts: which interrupt delivers each source (FreeActors installs the handlers)
     struct Irq {

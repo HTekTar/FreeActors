@@ -730,7 +730,7 @@ interface BspMethodSignature {
     argTypes: string[];
 }
 
-function parseBspPolicyHeader(fileContent: string): BspMethodSignature[] {
+function parseHwRequirementsHeader(fileContent: string): BspMethodSignature[] {
     const signatures: BspMethodSignature[] = [];
 
     // 1. Strip block comments (/* ... */) and single-line comments (// ...)
@@ -769,13 +769,18 @@ function parseBspPolicyHeader(fileContent: string): BspMethodSignature[] {
     return signatures;
 }
 
-export function generateCppBspPolicyStarterStub(machineName: string): string {
+// A machine's hardware requirements: what it needs from any board (declarations only). Before 0.0.9 the file
+// was called <name>_bsp_policy.hpp; export renames an existing one once.
+export const hwRequirementsFile = (lowerName: string) => `${lowerName}_hw_requirements.hpp`;
+export const legacyHwRequirementsFile = (lowerName: string) => `${lowerName}_bsp_policy.hpp`;
+
+export function generateCppHwRequirementsStub(machineName: string): string {
     const lower = machineName.toLowerCase();
     let out = `// ==========================================================================\n`;
     out += `// HARDWARE REQUIREMENTS - ${machineName} actor\n`;
     out += `// Created once by FreeActors; this file is yours to edit.\n`;
     out += `//\n`;
-    out += `// Declare here the static driver functions the ${machineName} actor calls through HwPolicy.\n`;
+    out += `// Declare here the static driver functions the ${machineName} actor calls as Hw::name(...).\n`;
     out += `// This file only lists requirements - do not implement them here:\n`;
     out += `//   - your board file implements them (e.g. struct MyBoard { static void set_led(bool on) {...} };)\n`;
     out += `//     and the application selects the board once: AppTraits::Platform = MyBoard\n`;
@@ -797,10 +802,10 @@ export function generateCppBspPolicyStarterStub(machineName: string): string {
     return out;
 }
 
-export function generateCpHwContractString(machineName: string, bspPolicyContent: string): string {
+export function generateCpHwContractString(machineName: string, requirementsContent: string): string {
     const upperMachineName = machineName.toUpperCase();
     const lowerMachineName = machineName.toLowerCase();
-    const bspMethods = parseBspPolicyHeader(bspPolicyContent);
+    const bspMethods = parseHwRequirementsHeader(requirementsContent);
 
     let out = `// ==========================================================================\n`;
     out += `// AUTO-GENERATED HARDWARE POLICY CONTRACT - DO NOT HAND-EDIT\n`;
@@ -811,7 +816,7 @@ export function generateCpHwContractString(machineName: string, bspPolicyContent
     out += `#ifndef ${upperMachineName}_HW_CONTRACT_HPP\n`;
     out += `#define ${upperMachineName}_HW_CONTRACT_HPP\n\n`;
 
-    out += `#include "${lowerMachineName}_bsp_policy.hpp"\n`;
+    out += `#include "${hwRequirementsFile(lowerMachineName)}"\n`;
     out += `#include "fa_util.hpp"\n`;
     out += `#include <utility>\n\n`;
 
@@ -828,7 +833,7 @@ export function generateCpHwContractString(machineName: string, bspPolicyContent
     out += `\npublic:\n`;
     out += `    static constexpr bool verify() {\n`;
     if (bspMethods.length === 0) {
-        out += `        // No static driver prototypes declared in ${lowerMachineName}_bsp_policy.hpp\n`;
+        out += `        // No static driver prototypes declared in ${hwRequirementsFile(lowerMachineName)}\n`;
     } else {
         bspMethods.forEach((m, idx) => {
             out += `        static_assert(Fa::is_detected_v<fn_${m.name}_${idx}, HwPolicy>,\n`;
@@ -1459,6 +1464,12 @@ export function patchExistingActorHeader(
     let updatedContent = existingContent;
     let addedCount = 0;
 
+    // 0. The requirements file was renamed in 0.0.9 (<name>_bsp_policy.hpp -> <name>_hw_requirements.hpp)
+    {
+        const lower = machineName.toLowerCase();
+        updatedContent = updatedContent.split(`#include "${legacyHwRequirementsFile(lower)}"`).join(`#include "${hwRequirementsFile(lower)}"`);
+    }
+
     // 1. Modernize legacy base class names
     if (updatedContent.includes('Fa::ActiveObject')) {
         updatedContent = updatedContent.replace(/Fa::ActiveObject/g, 'Fa::Hsm');
@@ -1664,7 +1675,7 @@ export function generateCppConcreteHeaderStub(jsonText: string): string {
 
     out += `#include "${lowerMachineName}_events.hpp"\n`;
     out += `#include "${lowerMachineName}_hsm.hpp"\n`;
-    out += `#include "${lowerMachineName}_bsp_policy.hpp"\n`;
+    out += `#include "${hwRequirementsFile(lowerMachineName)}"\n`;
     out += `#include "${lowerMachineName}_hw_contract.hpp"\n`;
     out += `#include "fa_util.hpp"\n\n`;
 
@@ -2000,16 +2011,16 @@ export function generateCppModelTestStub(jsonText: string): string {
 
 // Tool-owned host test double for the BSP requirements file; rewritten on every export so it always
 // provides exactly the driver functions the hardware contract checks for.
-export function generateCppTestBspString(machineName: string, bspPolicyContent: string): string {
+export function generateCppTestBspString(machineName: string, requirementsContent: string): string {
     const lower = machineName.toLowerCase();
     const upper = machineName.toUpperCase();
-    const bspMethods = parseBspPolicyHeader(bspPolicyContent);
+    const bspMethods = parseHwRequirementsHeader(requirementsContent);
 
     let out = `// ==========================================================================\n`;
     out += `// AUTO-GENERATED HOST TEST DOUBLE - DO NOT HAND-EDIT (rewritten on every export)\n`;
-    out += `// Machine: ${machineName}   Source: ${lower}_bsp_policy.hpp\n`;
+    out += `// Machine: ${machineName}   Source: ${hwRequirementsFile(lower)}\n`;
     out += `//\n`;
-    out += `// TestBsp provides every driver function declared in ${lower}_bsp_policy.hpp:\n`;
+    out += `// TestBsp provides every driver function declared in ${hwRequirementsFile(lower)}:\n`;
     out += `//   - each call is recorded with its arguments in Fa::test::log(), e.g. "set_led(true)"\n`;
     out += `//   - a function returning a value returns <name>_result, which the test sets\n`;
     out += `//   - Fa::test::reset<TestBsp>() clears the log and restores the default results\n`;
@@ -2020,13 +2031,13 @@ export function generateCppTestBspString(machineName: string, bspPolicyContent: 
     out += `#ifndef ${upper}_TEST_BSP_HPP\n`;
     out += `#define ${upper}_TEST_BSP_HPP\n\n`;
     out += `#include <cstdint>\n`;
-    out += `#include "${lower}_bsp_policy.hpp"\n`;
+    out += `#include "${hwRequirementsFile(lower)}"\n`;
     out += `#include "fa_test.hpp"\n\n`;
 
     out += `namespace ${machineName} {\n\n`;
     out += `struct TestBsp {\n`;
     if (bspMethods.length === 0) {
-        out += `    // No driver functions are declared in ${lower}_bsp_policy.hpp yet.\n`;
+        out += `    // No driver functions are declared in ${hwRequirementsFile(lower)} yet.\n`;
     }
     const resettable: string[] = [];
     bspMethods.forEach(m => {
@@ -2221,7 +2232,7 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                         const lowerHsmName = hsmName.toLowerCase();
                         const eventsFilename = `${lowerHsmName}_events.hpp`;
                         const blueprintFilename = `${lowerHsmName}_hsm.hpp`;
-                        const bspPolicyFilename = `${lowerHsmName}_bsp_policy.hpp`;
+                        const bspPolicyFilename = hwRequirementsFile(lowerHsmName);
                         const hwContractFilename = `${lowerHsmName}_hw_contract.hpp`;
                         const actorHeaderFilename = `${lowerHsmName}_actor.hpp`;
                         const mainFilename = `main.cpp`;
@@ -2241,11 +2252,18 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                             validateHsmModel(jsonText);
 
                             // 1. Read or generate starter BSP Policy header (User-owned)
+                            // Before 0.0.9 the requirements were <name>_bsp_policy.hpp: renamed once, content unchanged
+                            const legacyRequirementsUri = vscode.Uri.joinPath(folderUri, legacyHwRequirementsFile(lowerHsmName));
+                            let renamedNote = '';
+                            if (!(await fileExists(bspPolicyUri)) && (await fileExists(legacyRequirementsUri))) {
+                                await vscode.workspace.fs.rename(legacyRequirementsUri, bspPolicyUri);
+                                renamedNote = ` Renamed ${legacyHwRequirementsFile(lowerHsmName)} to ${bspPolicyFilename} (same content).`;
+                            }
                             const existingBsp = await readFileIfExists(bspPolicyUri);
                             const bspExists = existingBsp !== undefined;
                             let bspContent = existingBsp ?? "";
                             if (!bspExists) {
-                                bspContent = generateCppBspPolicyStarterStub(hsmName);
+                                bspContent = generateCppHwRequirementsStub(hsmName);
                                 await vscode.workspace.fs.writeFile(bspPolicyUri, stringToUint8Array(bspContent));
                             }
     
@@ -2352,11 +2370,11 @@ class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {
                                 );
                             } else if (addedMethodsCount > 0) {
                                 vscode.window.showInformationMessage(
-                                    `✨ Preserved custom code & appended ${addedMethodsCount} newly discovered HSM method(s) to '${actorHeaderFilename}'!${eventsNote}`
+                                    `✨ Preserved custom code & appended ${addedMethodsCount} newly discovered HSM method(s) to '${actorHeaderFilename}'!${eventsNote}${renamedNote}`
                                 );
                             } else {
                                 vscode.window.showInformationMessage(
-                                    `🔄 Synchronized '${blueprintFilename}' and '${hwContractFilename}'. Custom code untouched.${eventsNote}`
+                                    `🔄 Synchronized '${blueprintFilename}' and '${hwContractFilename}'. Custom code untouched.${eventsNote}${renamedNote}`
                                 );
                             }
                         } catch (err: any) {

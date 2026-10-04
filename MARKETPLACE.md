@@ -31,7 +31,7 @@ Draw hierarchical state machines in VS Code and turn them into C++17 active obje
    | File | Owner |
    |---|---|
    | `mymachine_events.hpp`, `mymachine_hsm.hpp`, `mymachine_hw_contract.hpp`, `mymachine_test_bsp.hpp`, `mymachine_trace.json`, `freeactors_tests.cmake`, `freeactors/` | generated on every export |
-   | `mymachine_actor.hpp` (guards and actions), `mymachine_bsp_policy.hpp` (hardware requirements), `tests/*.cpp`, `main.cpp`, `CMakeLists.txt` | created once, then yours |
+   | `mymachine_actor.hpp` (guards and actions), `mymachine_hw_requirements.hpp` (hardware requirements), `tests/*.cpp`, `main.cpp`, `CMakeLists.txt` | created once, then yours |
 
 4. Build and run on your PC (needs a C++17 compiler and CMake):
 

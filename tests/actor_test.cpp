@@ -8,7 +8,7 @@
 #include "doctest.h"
 
 #include "timebomb_actor.hpp"            // generated actor stub, as Export writes it for a new project
-#include "timebomb_test_bsp.hpp"         // generated TestBsp for tests/fixtures/timebomb.bsp_policy.hpp
+#include "timebomb_test_bsp.hpp"         // generated TestBsp for tests/fixtures/timebomb.hw_requirements.hpp
 #include "transitionaction_hsm.hpp"
 #include "fa_test.hpp"
 

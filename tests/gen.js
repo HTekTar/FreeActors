@@ -21,7 +21,7 @@ Module._load = function (request, ...rest) {
 
 const ext = require('../out/extension.js');
 
-// A fixture may supply its own BSP policy (<model>.bsp_policy.hpp) in place of the starter stub.
+// A fixture may supply its own hardware requirements (<model>.hw_requirements.hpp) in place of the starter stub.
 // The user-owned events header: a fixture's <model>.events.hpp if present (events with fields), else the stub
 function eventsOf(jsonText, modelPath) {
     const fixture = modelPath.replace(/\.hsm\.json$/, '.events.hpp');
@@ -31,16 +31,16 @@ function eventsOf(jsonText, modelPath) {
 function generate(jsonText, modelPath) {
     ext.validateHsmModel(jsonText);
     const name = JSON.parse(jsonText).name.replace(/[^a-zA-Z0-9_]/g, '');
-    const bspFixture = modelPath.replace(/\.hsm\.json$/, '.bsp_policy.hpp');
+    const bspFixture = modelPath.replace(/\.hsm\.json$/, '.hw_requirements.hpp');
     const bspPolicy = fs.existsSync(bspFixture)
         ? fs.readFileSync(bspFixture, 'utf8')
-        : ext.generateCppBspPolicyStarterStub(name);
+        : ext.generateCppHwRequirementsStub(name);
     const events = eventsOf(jsonText, modelPath);
     return {
         events,
         event_list: ext.generateCppEventListString(jsonText, events),
         hsm: ext.generateCppBlueprintString(jsonText),
-        bsp_policy: bspPolicy,
+        hw_requirements: bspPolicy,
         hw_contract: ext.generateCpHwContractString(name, bspPolicy),
         actor: ext.generateCppConcreteHeaderStub(jsonText),
         test_bsp: ext.generateCppTestBspString(name, bspPolicy),
