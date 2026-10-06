@@ -86,6 +86,7 @@ const workspace = {
         },
         async rename(from, to) { fs.renameSync(from.fsPath, to.fsPath); },
         async createDirectory(uri) { fs.mkdirSync(uri.fsPath, { recursive: true }); },
+        async delete(uri) { if (!fs.existsSync(uri.fsPath)) throw missing(uri); fs.rmSync(uri.fsPath, { recursive: true }); },
     },
     get textDocuments() { return documents; },
     async openTextDocument(uri) {

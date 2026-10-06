@@ -24,6 +24,7 @@ const KINDS = {
     spsc:        { label: 'SPSC service' },
     mpsc:        { label: 'MPSC service' },
     dma:         { label: 'DMA ring' },
+    commands:    { label: 'Built-in' },   // the command service (FA_TRACE_COMMANDS): fed by DMA stream arrows
 };
 
 // Default properties of a new component, by kind (the names become ActorTraits / TimeServiceTraits / module fields)
@@ -41,8 +42,7 @@ const DEFAULTS = {
 const PROPERTIES = {
     actor:     [['priority', 'Priority', 'number'], ['queue', 'Queue length', 'number'], ['stack', 'Stack (words)', 'number']],
     periodic:  [['period_ms', 'Period (ms)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
-    interrupt: [['irq', 'Interrupt (board Irq:: name)', 'text'], ['pri', 'NVIC priority (PRI)', 'number'],
-                ['commands', 'Feeds the PC commands (FA_TRACE_COMMANDS)', 'checkbox']],
+    interrupt: [['irq', 'Interrupt (board Irq:: name)', 'text'], ['pri', 'NVIC priority (PRI)', 'number']],
     spsc:      [['item', 'Item type', 'text'], ['size', 'Buffer (items)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
     mpsc:      [['item', 'Item type', 'text'], ['size', 'Buffer (items)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
     dma:       [['element', 'Element type', 'text'], ['size', 'Buffer (elements)', 'number'], ['priority', 'Priority', 'number'], ['stack', 'Stack (words)', 'number']],
@@ -101,7 +101,10 @@ function summaryOf(c) {
     } else if (c.kind === 'periodic') {
         lines.push(`⏱ every ${c.period_ms} ms · prio ${c.priority}`);
     } else if (c.kind === 'interrupt') {
-        lines.push(`⚡ ${c.irq ? 'Irq::' + c.irq : 'interrupt not set'} · PRI ${c.pri}${c.commands ? ' · PC commands' : ''}`);
+        lines.push(`⚡ ${c.irq ? 'Irq::' + c.irq : 'interrupt not set'} · PRI ${c.pri}`);
+    } else if (c.kind === 'commands') {
+        lines.push('commands from the PC (fa-trace)');
+        lines.push('← DMA streams from the receive interrupts');
     } else if (c.kind === 'spsc' || c.kind === 'mpsc') {
         lines.push(`${c.item || 'item type not set'} × ${c.size}`);
     } else if (c.kind === 'dma') {
@@ -151,8 +154,8 @@ function render() {
             document.getElementById('menu-open-model').style.display = codeFileOf(c) || creates ? 'block' : 'none';
             document.getElementById('menu-open-model').textContent =
                 creates ? '✨ Create State Machine' : c.kind === 'actor' ? '📝 Open State Machine' : '📝 Open Code';
-            document.getElementById('menu-delete').style.display = c.kind === 'application' ? 'none' : 'block';
-            document.getElementById('menu-connect').style.display = isComposite(c) ? 'none' : 'block';
+            document.getElementById('menu-delete').style.display = c.kind === 'application' || c.kind === 'commands' ? 'none' : 'block';
+            document.getElementById('menu-connect').style.display = isComposite(c) || c.kind === 'commands' ? 'none' : 'block';
             contextMenu.style.display = 'flex';
         });
         el.addEventListener('mousedown', (e) => {
@@ -216,10 +219,25 @@ function bindText(id, get, set) {
     input.onchange = () => { set(input.value.trim()); commit(); render(); };
 }
 
-function bindCheck(id, key) {
+function bindCheck(id, key, after) {
     const input = document.getElementById(id);
     input.checked = Boolean(app.features && app.features[key]);
-    input.onchange = () => { app.features = app.features || {}; app.features[key] = input.checked; commit(); };
+    input.onchange = () => { app.features = app.features || {}; app.features[key] = input.checked; if (after) after(); commit(); render(); };
+}
+
+// The built-in command service's box follows the Commands feature (kept while arrows still go to it: the checks
+// then report them); as normalizeAppModel in the extension
+function syncCommandsBox() {
+    const box = app.components.find(c => c.kind === 'commands');
+    if (app.features.commands && !box) {
+        const root = app.components.find(c => c.kind === 'application');
+        const spot = freeSpotIn(root, 250, 96);
+        const added = { id: 'COMMANDS', kind: 'commands', name: 'PC commands', parent: root ? root.id : undefined, x: spot.x, y: spot.y, width: 250, height: 96 };
+        app.components.push(added);
+        growToContain(root, added);
+    } else if (!app.features.commands && box && !app.connections.some(x => x.to === box.id)) {
+        app.components = app.components.filter(c => c !== box);
+    }
 }
 
 function renderProblems() {
@@ -287,7 +305,7 @@ function renderSidebar() {
         };
     });
     bindCheck('feat-trace', 'trace');
-    bindCheck('feat-commands', 'commands');
+    bindCheck('feat-commands', 'commands', syncCommandsBox);
     bindCheck('feat-health', 'health');
     bindCheck('feat-debug', 'debug_commands');
 
@@ -314,6 +332,12 @@ function renderSidebar() {
         input.onchange = () => { onChange(type === 'number' ? Number(input.value) : input.value.trim()); commit(); render(); };
         row.appendChild(input); props.appendChild(row);
     };
+    if (c.kind === 'commands') {
+        props.innerHTML = '<div class="hint-text">Built into the application while Commands (FA_TRACE_COMMANDS) is on. ' +
+            'Connect the command UART\'s receive interrupts to it with DMA streams (e.g. the DMA\'s half/complete and the ' +
+            'UART\'s idle line); their handlers call IsrCtx::command_rx(position).</div>';
+        return;
+    }
     if (c.kind !== 'application') field('Name', c.name, 'text', v => { if (v) c.name = v; });
     if (c.kind === 'actor') {
         const row = document.createElement('label'); row.className = 'prop-row';
@@ -533,7 +557,7 @@ function openConnectionModal() {
     const src = byId(linkSourceId), dst = byId(linkTargetId);
     document.getElementById('connection-title').innerText = `${src.name} → ${dst.name}`;
     const kind = document.getElementById('input-conn-kind');
-    kind.value = dst.kind === 'actor' ? 'event' : dst.kind === 'dma' ? 'stream' : 'item';
+    kind.value = dst.kind === 'actor' ? 'event' : dst.kind === 'dma' || dst.kind === 'commands' ? 'stream' : 'item';
     document.getElementById('input-item').value = dst.item || dst.element || '';
     document.getElementById('input-events').value = '';
     const m = dst.kind === 'actor' ? modelOf(dst) : null;

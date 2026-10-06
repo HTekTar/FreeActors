@@ -17,6 +17,7 @@
 .fa-component.kind-spsc,
 .fa-component.kind-mpsc,
 .fa-component.kind-dma       { border-left: 5px solid var(--vscode-charts-purple, #b180d7); }
+.fa-component.kind-commands  { border-left: 5px solid var(--vscode-charts-orange, #d18616); border-style: dotted; }
 .fa-component.kind-application { border-style: dashed; border-color: var(--vscode-textLink-foreground); background: rgba(255,255,255,0.01); }
 .fa-component.kind-subsystem   { border-style: dashed; background: rgba(255,255,255,0.015); }
 .fa-component.selected { box-shadow: 0 0 0 2px var(--vscode-focusBorder, #007fd4), 0 4px 8px rgba(0,0,0,0.4); }

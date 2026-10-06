@@ -240,7 +240,7 @@ app_generation_checks() {
     if ! node "$ROOT/tests/app_gen_test.js" "$app" || ! node "$ROOT/tests/gen.js" "$ROOT/tests/fixtures/timebomb.hsm.json" "$app"; then
         status=1; return
     fi
-    for f in minimal_app.cpp minimal_main.cpp; do
+    for f in app.cpp app_main.cpp; do
         if arm-none-eabi-g++ "${flags[@]}" -c "$app/$f" -o "$app/${f%.cpp}.o" 2> "$app/${f%.cpp}.log"; then
             echo "PASS  app generation: $f compiles for Cortex-M4"
         else
@@ -249,7 +249,7 @@ app_generation_checks() {
     done
     # The board blueprint: generated from the requirements, the same application must compile against it as is
     node "$ROOT/tests/board_test.js" "$app" || status=1
-    if arm-none-eabi-g++ "${flags[@]}" -I"$app/on_board" -c "$app/on_board/minimal_app.cpp" -o "$app/on_board/minimal_app.o" 2> "$app/on_board/app.log"; then
+    if arm-none-eabi-g++ "${flags[@]}" -I"$app/on_board" -c "$app/on_board/app.cpp" -o "$app/on_board/app.o" 2> "$app/on_board/app.log"; then
         echo "PASS  app generation: the application compiles against its generated board blueprint"
     else
         echo "FAIL  app generation: the application against the generated board (log: tests/build/app/on_board/app.log)"
@@ -260,7 +260,7 @@ app_generation_checks() {
     else
         echo "FAIL  app generation: values from the diagram (log: tests/build/app/values.log)"; grep -m 5 error "$app/values.log"; status=1
     fi
-    if arm-none-eabi-g++ "${flags[@]}" -fsyntax-only -DMISSING_TAP_IRQ "$app/minimal_app.cpp" 2> "$app/missing.log"; then
+    if arm-none-eabi-g++ "${flags[@]}" -fsyntax-only -DMISSING_TAP_IRQ "$app/app.cpp" 2> "$app/missing.log"; then
         echo "FAIL  app generation: a board without the Tap interrupt compiled"; status=1
     elif grep -q "Tap Contract Violation\] the board must define its interrupt" "$app/missing.log"; then
         echo "PASS  app generation: a board without the Tap interrupt fails the application contract, naming the module"

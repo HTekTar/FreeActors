@@ -107,16 +107,16 @@ Not yet: rate and queue-size warnings (they need a rate on each connection).
 
 | File | Owner | Content |
 |---|---|---|
-| `<app>_app.hpp` | tool | includes; `AppTraits` from features and settings; `ActorTraits` / `TimeServiceTraits` specialisations from the box properties; `using Application = Fa::Application<AppTraits, ...>` in diagram order |
-| `<app>_app.cpp` | tool | `vApplicationTickHook`, `vApplicationGetIdleTaskMemory`, `vApplicationStackOverflowHook` (calls an optional board hook), `app_start()` |
+| `app.hpp` | tool | includes; `AppTraits` from features and settings; `ActorTraits` / `TimeServiceTraits` specialisations from the box properties; `using Application = Fa::Application<AppTraits, ...>` in diagram order |
+| `app.cpp` | tool | `vApplicationTickHook`, `vApplicationGetIdleTaskMemory`, `vApplicationStackOverflowHook` (calls an optional board hook), `app_start()` |
 | `app_api.h` | tool | **C API** for code outside FreeActors running in tasks (existing C code, SDK callbacks): `void app_post_button_pressed(void);`, `void app_post_temperature(int16_t celsius);` |
 | `<module>_module.hpp` | user, created once (rewritten from the diagram while unedited: a fingerprint line marks a starter file) | a periodic module, service or interrupt module: the generated shell (template header, `post`/`IsrCtx`, `Hw`, `FA_IDE` block as for actors) with an empty `task()` / `consume_batch()` / `handler()` to fill in |
-| `<app>_on_init.cpp` | user, created once (optional) | `void app_on_init()`: code outside FreeActors started before the scheduler (legacy C tasks, an SDK's stack) |
-| `main.cpp` (firmware) | tool | `int main() { app_start(); }` |
+| `app_on_init.cpp` | user, created once (optional) | `void app_on_init()`: code outside FreeActors started before the scheduler (legacy C tasks, an SDK's stack) |
+| `app_main.cpp` (firmware) | tool | `int main() { app_start(); }` |
 
 **Vendor start-up is the board's**: `Hw::init()` (already called first by `Application::init`) does the vendor's HAL/SDK initialisation and the clock tree; vendor glue such as `HAL_InitTick`/`HAL_GetTick` lives in the board's source. `app_start()` runs `Hw::init()`, the optional `app_on_init()`, installs the vector table, creates the tasks and starts the scheduler.
 
-**Traits move out of the actor header.** Today `ActorTraits` sits at the end of the user-owned actor header. With an application model it is generated in `<app>_app.hpp`; the actor header's block is wrapped in `#ifndef FA_APP_MANAGED` (the patcher does this once), and `<app>_app.hpp` defines `FA_APP_MANAGED` before including the actors. Actors used without an application model keep their defaults.
+**Traits move out of the actor header.** Today `ActorTraits` sits at the end of the user-owned actor header. With an application model it is generated in `app.hpp`; the actor header's block is wrapped in `#ifndef FA_APP_MANAGED` (the patcher does this once), and `app.hpp` defines `FA_APP_MANAGED` before including the actors. Actors used without an application model keep their defaults.
 
 ### 4.1 Interrupts
 
@@ -258,7 +258,11 @@ Decisions belong in the diagram; vendor content does not. The board's **Target**
 
 **Any start-up code links**: FreeActors' vector table names the core exception handlers (`HardFault_Handler`, ...) by their CMSIS names; the framework gives them weak defaults (a loop for the debugger), so a vendor's or the user's definitions replace them and a start-up file without them still links.
 
-**Interrupts feeding the PC commands**: an interrupt module has a property *Feeds the PC commands* (the built-in command service is no diagram component); its handler `IsrCtx::command_rx(Hw::<irq>_ack())` and its `size_t` acknowledge requirement are generated.
+**The PC commands are a box**: while Commands (`FA_TRACE_COMMANDS`) is on, the diagram shows the built-in command service as a fixed box (*PC commands*: moved, not deleted or renamed; no module of the code, `Fa::Application` builds it in). The command UART's receive interrupts feed it with DMA stream arrows, so the diagram shows which interrupts carry the commands (apart from, say, a GPS's into its own DMA ring); their handlers call `IsrCtx::command_rx(Hw::<irq>_ack())`, the actual connection. A pre-0.0.9 interrupt property *commands* becomes such an arrow when the application is opened.
+
+**An interrupt's handler is generated from all its outgoing arrows**: one block per arrow, each with its own acknowledge function; with several arrows (one interrupt line serving two purposes, e.g. DMA channels sharing an interrupt) each block is guarded by a pending check of the board's (`<irq>_<target>_pending()`), so no output is dropped.
+
+**The application's files have fixed names** (`app_config.hpp`, `app.hpp`, `app.cpp`, `app_main.cpp`, `app_hw_contract.hpp`): a folder holds one application (its CMake presets, `FreeRTOSConfig.h` and firmware build are per folder already), so renaming the application never leaves module files including a stale configuration; its name names the firmware (`<name>.elf`). Files of the earlier scheme (`timebomb_config.hpp`, ...) are recognised by their banner on export, removed, and the includes of them in the user's files rewritten.
 
 **Vendor flavours** fill these fields from three more (the part, the SDK folder, flash and RAM sizes) with **Apply flavour**, and create the vendor-side files that are missing (yours afterwards). *STM32F4 + HAL* (SDK folder: ST's repositories `cmsis_core`, `cmsis_device_f4`, `stm32f4xx_hal_driver`) sets the core, the startup and system files for the part, the HAL sources and include folders, the defines (`STM32F446xx USE_HAL_DRIVER`) and an OpenOCD flash command; it creates the linker script (with `.noinit`) from the sizes, the HAL configuration from ST's template and the board's HAL tick glue (`<board>.cpp`); Generate Board then starts the board with the HAL's header and `HAL_Init()`, and reads the interrupt count from the part's device header. The fields are generic, checked against nRF52 (nrfx), TM4C (TivaWare), Kinetis (MCUXpresso) and SAM4 (ASF): every SDK comes down to sources, include folders, defines, a linker script, a startup file and a flash command (OpenOCD, pyOCD, J-Link, probe-rs, nrfjprog).
 
@@ -301,3 +305,5 @@ Each phase ships as a release of the extension.
 4. **Top-down design**: the application can be drawn first; Export Application creates the missing state machines with the signals the diagram sends them (section 7.1).
 5. **One source of truth for events**: the receiving state machine owns its signals, connections refer to them; the tool keeps both consistent, including deleting a signal in the HSM editor, which removes it from the connections (section 7.2). An event's namespace is the receiving machine's name; item types are declared by the receiving service (7.3, 7.4).
 6. **The diagram holds the target's decisions, not vendor content**: core, paths, sources, defines, flash command in the board's Target section; the CMake build and `FreeRTOSConfig.h` are generated; linker script, SDK configuration and startup files stay the vendor's, referenced by path and checked (section 7.5).
+7. **The PC commands are a box with arrows**, not a property of interrupt modules: the diagram shows every data path, and a handler is generated from all its module's arrows (section 7.5).
+8. **The application's generated files have fixed names**: renaming the application is always safe (section 7.5).

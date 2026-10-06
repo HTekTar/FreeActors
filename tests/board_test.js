@@ -26,7 +26,7 @@ const models = [ext.describeHsmModel('timebomb.hsm.json', fs.readFileSync(path.j
 fs.mkdirSync(path.join(dir, 'on_board'), { recursive: true });
 fs.writeFileSync(path.join(dir, 'on_board', 'generated_board.hpp'), board);
 const files = ext.generateAppFiles(app, models, owners);
-for (const file of ['minimal_app.hpp', 'minimal_app.cpp']) fs.writeFileSync(path.join(dir, 'on_board', file), files[file]);   // the rest is the same
+for (const file of ['app.hpp', 'app.cpp']) fs.writeFileSync(path.join(dir, 'on_board', file), files[file]);   // the rest is the same
 check('the blueprint has the modules\' functions, interrupts and the features\' functions, each once',
       ['set_led(bool on)', 'read_button()', 'tap_ack()', 'uint16_t adc_ack()', 'size_t rx_ack()', 'trace_write(', 'watchdog_kick()', 'reset_cause()']
           .every(s => board.includes(s)) && board.split('read_button(').length === 2 &&

@@ -311,6 +311,36 @@ check("the Target and settings in the sidebar: saved under board.target (lines a
       r.get('settings') == {'MaxTimers': 8} and r.get('hiddenBefore') is True and r.get('shownAfter') is True and r.get('applied') is True,
       json.dumps(r))
 
+# The built-in command service: ticking Commands adds its box; interrupts feed it with DMA streams; it cannot be
+# deleted or connected from
+r = run('app', topdown, '''
+const box = () => document.querySelector('.fa-component.kind-commands');
+const before = Boolean(box());
+const commands = document.getElementById('feat-commands'); commands.checked = true; commands.dispatchEvent(new Event('change'));
+const added = Boolean(box());
+document.getElementById('add-component-btn').click();
+document.getElementById('input-kind').value = 'interrupt'; document.getElementById('input-kind').dispatchEvent(new Event('change'));
+document.getElementById('input-name').value = 'CmdRx';
+document.getElementById('input-parent').value = 'APP';
+document.getElementById('btn-submit-component').click();
+const irqNode = [...document.querySelectorAll('.fa-component')].find(n => n.querySelector('.fa-name').textContent === 'CmdRx');
+fire(irqNode.querySelector('.hamburger-btn'), 'click', 0, 0);
+document.getElementById('menu-connect').click();
+const [x, y] = centerOf(box());
+fire(window, 'mousemove', x, y);
+fire(box(), 'click', x, y);
+const kind = document.getElementById('input-conn-kind').value;
+document.getElementById('btn-submit-connection').click();
+fire(box().querySelector('.hamburger-btn'), 'click', 0, 0);
+const menu = { del: document.getElementById('menu-delete').style.display, connect: document.getElementById('menu-connect').style.display };
+const saved = JSON.parse(window.__edits.filter(m => m.type === 'documentEdit').pop().jsonText);
+report({ before, added, kind, menu, conn: saved.connections.find(c => c.to === 'COMMANDS'),
+         box: saved.components.find(c => c.kind === 'commands') });''', 'app_commands', FIXTURES)
+check('ticking Commands adds the built-in PC commands box; an interrupt feeds it with a DMA stream; it cannot be deleted or connected from',
+      r is not None and r.get('before') is False and r.get('added') is True and r.get('kind') == 'stream' and
+      (r.get('conn') or {}).get('kind') == 'stream' and (r.get('box') or {}).get('id') == 'COMMANDS' and
+      (r.get('menu') or {}).get('del') == 'none' and (r.get('menu') or {}).get('connect') == 'none', json.dumps(r))
+
 r = run('app', app, '''
 document.getElementById('export-app-btn').click();
 document.getElementById('generate-board-btn').click();

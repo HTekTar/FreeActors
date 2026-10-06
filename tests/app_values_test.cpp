@@ -1,6 +1,6 @@
 // The values of the Minimal application's diagram (tests/fixtures/app/minimal.app.json) arrive in the generated
 // code: features, task settings, the module order. Compiled only (static_asserts), for Cortex-M4 (run.sh).
-#include "minimal_app.hpp"
+#include "app.hpp"
 #include <type_traits>
 
 using Ctx = App::Application::AppContext;

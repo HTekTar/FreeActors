@@ -656,17 +656,39 @@ export function generateAppHwContractString(appName: string, owners: string[]): 
 
 // ==========================================================================
 // APPLICATION GENERATION (docs/design/app-diagram.md, section 4): tool-owned files from <app>.app.json
-//   <app>_config.hpp    features (FA_TRACE...) and each component's values from the diagram (AppConfig::<Name>)
-//   <app>_app.hpp       the board, actors and modules, AppTraits, task settings, App::Application
-//   <app>_app.cpp       FreeRTOS hooks and app_start()
-//   <app>_main.cpp      int main() { app_start(); }
-//   <app>_app_hw_contract.hpp  the board against every module's hardware requirements
+//   app_config.hpp      features (FA_TRACE...) and each component's values from the diagram (AppConfig::<Name>)
+//   app.hpp             the board, actors and modules, AppTraits, task settings, App::Application
+//   app.cpp             FreeRTOS hooks and app_start()
+//   app_main.cpp        int main() { app_start(); }
+//   app_hw_contract.hpp        the board against every module's hardware requirements
 // ==========================================================================
 const MODULE_KINDS = ['periodic', 'interrupt', 'spsc', 'mpsc', 'dma'];
 const TASK_KINDS = ['periodic', 'spsc', 'mpsc', 'dma'];      // modules with a task of their own
 
-export const appFileName = (app: any, suffix: string) =>
-    `${String(app.name || 'App').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase()}_${suffix}`;
+// The application's generated files have fixed names: a folder holds one application (its CMake presets,
+// FreeRTOSConfig.h and firmware build are per folder too), so renaming the application never leaves module files
+// including a stale configuration. The application's name names the firmware (<name>.elf) only.
+const APP_FILES: { [suffix: string]: string } = {
+    'config.hpp': 'app_config.hpp', 'app.hpp': 'app.hpp', 'app.cpp': 'app.cpp', 'main.cpp': 'app_main.cpp',
+    'app_hw_contract.hpp': 'app_hw_contract.hpp', 'on_init.cpp': 'app_on_init.cpp',
+};
+export const appFileName = (_app: any, suffix: string) => APP_FILES[suffix] ?? `app_${suffix}`;
+
+// Before 0.0.9 they were named after the application (timebomb_config.hpp, ...): such a file is recognised by its
+// generated banner, removed, and the includes of it in the user's files rewritten (legacyAppFiles + export)
+export const LEGACY_APP_FILE = /^\w+_(config\.hpp|app\.hpp|app\.cpp|main\.cpp|app_hw_contract\.hpp)$/;
+export const LEGACY_APP_BANNERS = ['AUTO-GENERATED APPLICATION', "AUTO-GENERATED - DO NOT HAND-EDIT. The firmware's entry point"];
+
+// A user file's includes of a legacy application file, rewritten to the fixed name ("timebomb_config.hpp" -> "app_config.hpp")
+export function rewriteLegacyAppIncludes(content: string, legacy: string[]): string {
+    let out = content;
+    for (const file of legacy) {
+        const suffix = (LEGACY_APP_FILE.exec(file) || [])[1];
+        if (!suffix) continue;
+        out = out.split(`#include "${file}"`).join(`#include "${APP_FILES[suffix]}"`);
+    }
+    return out;
+}
 // ---- Starter files that follow the diagram until edited ----------------------------------------------------
 // A starter file Export Application creates (a module, its requirements) ends with a fingerprint of its content.
 // While the file is unchanged, export rewrites it from the diagram (a property set after the first export reaches
@@ -696,13 +718,48 @@ export function isUntouchedStub(content: string): boolean {
 export const moduleFileName = (name: string) => `${String(name).toLowerCase()}_module.hpp`;
 
 function appComponents(app: any): any[] {
-    return (Array.isArray(app.components) ? app.components : []).filter((c: any) => !COMPOSITE_KINDS.includes(c.kind));
+    return (Array.isArray(app.components) ? app.components : []).filter((c: any) => !COMPOSITE_KINDS.includes(c.kind) && !BUILTIN_KINDS.includes(c.kind));
+}
+
+// The built-in command service in the diagram (FA_TRACE_COMMANDS): a fixed box that receive interrupts feed with
+// DMA stream arrows; it is no module of the code (Fa::Application builds it in), so generators skip it
+export const COMMANDS_ID = 'COMMANDS';
+
+// The model as the editors expect it: the Commands box present while Commands is on (or while arrows still go to
+// it), and the pre-0.0.9 interrupt property commands: true turned into a stream arrow into it. True if changed.
+export function normalizeAppModel(app: any): boolean {
+    let changed = false;
+    app.components = Array.isArray(app.components) ? app.components : [];
+    app.connections = Array.isArray(app.connections) ? app.connections : [];
+    const legacy = app.components.filter((c: any) => c.kind === 'interrupt' && c.commands);
+    const box = app.components.find((c: any) => c.kind === 'commands');
+    const feeds = app.connections.some((x: any) => box && x.to === box.id);
+    if (!box && (app.features?.commands || legacy.length > 0)) {
+        const root = app.components.find((c: any) => c.kind === 'application');
+        const x = root ? root.x + Math.max(30, (root.width || 980) - 280) : 700, y = root ? root.y + 70 : 110;
+        app.components.push({ id: COMMANDS_ID, kind: 'commands', name: 'PC commands', parent: root ? root.id : undefined, x, y, width: 250, height: 96 });
+        changed = true;
+    } else if (box && !app.features?.commands && !feeds && legacy.length === 0) {
+        app.components = app.components.filter((c: any) => c !== box);
+        return true;
+    }
+    const target = app.components.find((c: any) => c.kind === 'commands');
+    for (const c of legacy) {
+        if (!app.connections.some((x: any) => x.from === c.id && x.to === target.id)) {
+            let n = app.connections.length + 1;
+            while (app.connections.some((x: any) => x.id === `L_${n}`)) n++;
+            app.connections.push({ id: `L_${n}`, from: c.id, to: target.id, kind: 'stream' });
+        }
+        delete c.commands;
+        changed = true;
+    }
+    return changed;
 }
 
 export function generateAppConfigString(app: any): string {
     const features = app.features || {};
     let out = `// ==========================================================================\n`;
-    out += `// AUTO-GENERATED APPLICATION CONFIGURATION - DO NOT HAND-EDIT (from ${appFileName(app, '').slice(0, -1)}.app.json)\n`;
+    out += `// AUTO-GENERATED APPLICATION CONFIGURATION - DO NOT HAND-EDIT (from ${app.name}.app.json)\n`;
     out += `// The features and every component's values as set in the application diagram. Module files read their\n`;
     out += `// values from here (e.g. AppConfig::ButtonPoller::period_ms), so a change in the diagram reaches the code.\n`;
     out += `// Include this file before any FreeActors header (the features below switch framework code).\n`;
@@ -846,34 +903,59 @@ export function generateAppMainString(app: any): string {
 // ---- Module skeletons (user-owned, created once) ----------------------------------------------------------
 
 // What an interrupt module's outgoing connection asks of its acknowledge function
+// What an interrupt module's handler does, from its outgoing arrows (one block per arrow): the board functions it
+// needs (an acknowledge function per arrow; with several arrows, also a pending check per arrow: a shared
+// interrupt), the handler's body and the headers it needs
+interface InterruptAck { name: string; returnType: string; comment: string; }
 function interruptAck(app: any, c: any, models: AppModelInfo[]):
-        { returnType: string; handler: string; includes: string[] } {
-    const conns = (app.connections || []).filter((x: any) => x.from === c.id);
+        { acks: InterruptAck[]; handler: string; includes: string[] } {
     const byId = (id: string) => (app.components || []).find((x: any) => x.id === id);
-    const ack = `${c.irq || 'irq'}_ack`;
-    if (c.commands) {   // receives the PC's commands for the built-in command service (FA_TRACE_COMMANDS)
-        return { returnType: 'size_t', includes: [],
-                 handler: `        IsrCtx::command_rx(Hw::${ack}());                 // where the receive DMA has written up to\n` };
+    const conns = ((app.connections || []) as any[]).filter(x => x.from === c.id && byId(x.to));
+    const irq = c.irq || 'irq';
+    const several = conns.length > 1;
+    const slug = (target: any) => String(target.kind === 'commands' ? 'commands' : target.name).toLowerCase();
+    const acks: InterruptAck[] = [];
+    const includes: string[] = [];
+    let handler = '';
+    for (const conn of conns) {
+        const target = byId(conn.to);
+        const ack = several ? `${irq}_${slug(target)}_ack` : `${irq}_ack`;
+        let body: string;
+        if (conn.kind === 'stream' && target.kind === 'commands') {
+            acks.push({ name: ack, returnType: 'size_t', comment: 'acknowledge the interrupt (clear its flag) and return the receive DMA\'s write position (PC commands)' });
+            body = `IsrCtx::command_rx(Hw::${ack}());                 // where the receive DMA has written up to\n`;
+        } else if (conn.kind === 'stream') {
+            includes.push(moduleFileName(target.name));   // the ring's template, named below
+            acks.push({ name: ack, returnType: 'size_t', comment: 'acknowledge the interrupt (clear its flag) and return the DMA write position' });
+            body = `IsrCtx::template stream<${target.name}>(Hw::${ack}());   // where the DMA has written up to\n`;
+        } else if (conn.kind === 'item') {
+            const item = conn.item || target.item || 'uint32_t';
+            if (!isBuiltinItemType(item)) includes.push(moduleFileName(target.name));
+            acks.push({ name: ack, returnType: isBuiltinItemType(item) ? item : `App::${item}`, comment: 'acknowledge the interrupt (clear its flag) and return the item' });
+            body = `IsrCtx::push(Hw::${ack}());                       // the item, to ${target.name}\n`;
+        } else if (conn.kind === 'event' && target.kind === 'actor') {
+            const machine = (models.find(m => m.file === target.model) || { name: target.name }).name;
+            includes.push(`${machine.toLowerCase()}_events.hpp`);
+            acks.push({ name: ack, returnType: 'bool', comment: 'acknowledge the interrupt (clear its flag); true = it was ours' });
+            const events = (conn.events || []).length > 0 ? conn.events : ['Event'];
+            body = `if (Hw::${ack}()) {                               // it was ours\n` +
+                   events.map((e: string) => `    IsrCtx::post(${machine}::${e}{});\n`).join('') + `}\n`;
+        } else {
+            continue;
+        }
+        if (several) {
+            const pending = `${irq}_${slug(target)}_pending`;
+            acks.push({ name: pending, returnType: 'bool', comment: `the interrupt was raised for ${target.kind === 'commands' ? 'the PC commands' : target.name} (a shared interrupt)` });
+            handler += `        if (Hw::${pending}()) {\n` + body.split('\n').filter(Boolean).map(l => `            ${l}\n`).join('') + `        }\n`;
+        } else {
+            handler += body.split('\n').filter(Boolean).map(l => `        ${l}\n`).join('');
+        }
     }
-    const first = conns[0];
-    const target = first ? byId(first.to) : undefined;
-    if (first && first.kind === 'stream' && target) {
-        return { returnType: 'size_t', includes: [moduleFileName(target.name)],   // the ring's template, named below
-                 handler: `        IsrCtx::template stream<${target.name}>(Hw::${ack}());   // where the DMA has written up to\n` };
+    if (acks.length === 0) {
+        acks.push({ name: `${irq}_ack`, returnType: 'bool', comment: 'acknowledge the interrupt (clear its flag); true = it was ours' });
+        handler = `        if (Hw::${irq}_ack()) {\n            // IsrCtx::post(...), IsrCtx::push(...): draw an arrow from this module in the diagram\n        }\n`;
     }
-    if (first && first.kind === 'item' && target) {
-        const item = first.item || target.item || 'uint32_t';
-        return { returnType: isBuiltinItemType(item) ? item : `App::${item}`, includes: isBuiltinItemType(item) ? [] : [moduleFileName(target.name)],
-                 handler: `        IsrCtx::push(Hw::${ack}());                       // the item, to ${target.name}\n` };
-    }
-    if (first && first.kind === 'event' && target && target.kind === 'actor') {
-        const machine = (models.find(m => m.file === target.model) || { name: target.name }).name;
-        const event = (first.events || [])[0] || 'Event';
-        return { returnType: 'bool', includes: [`${machine.toLowerCase()}_events.hpp`],
-                 handler: `        if (Hw::${ack}()) {                               // it was ours\n` +
-                          `            IsrCtx::post(${machine}::${event}{});\n        }\n` };
-    }
-    return { returnType: 'bool', includes: [], handler: `        if (Hw::${ack}()) {\n            // IsrCtx::post(...), IsrCtx::push(...)\n        }\n` };
+    return { acks, handler, includes: [...new Set(includes)] };
 }
 
 // The requirements a new module starts with: for an interrupt module, its interrupt and acknowledge function
@@ -881,17 +963,18 @@ export function generateModuleRequirementsStub(app: any, c: any, models: AppMode
     const kind = c.kind === 'interrupt' ? 'interrupt' : c.kind === 'periodic' ? 'periodic' : 'service';
     let out = generateCppHwRequirementsStub(c.name, kind);
     if (c.kind === 'interrupt' && c.irq) {
-        const ack = interruptAck(app, c, models);
+        const { acks } = interruptAck(app, c, models);
         out = out.replace(/struct HwRequirements \{\n[\s\S]*?\n\};/,
             `struct HwRequirements {\n` +
             `    struct Irq {\n        static const int ${c.irq};   // the board: struct Irq { static constexpr IRQn_Type ${c.irq} = ...; };\n    };\n` +
-            `    static ${ack.returnType} ${c.irq}_ack();   // acknowledge the interrupt (clear its flag)` +
-            (ack.returnType === 'bool' ? '; true = it was ours' : ack.returnType === 'size_t' ? ' and return the DMA write position' : ' and return the item') +
-            `\n};`);
+            acks.map(a => `    static ${a.returnType} ${a.name}();   // ${a.comment}\n`).join('') +
+            `};`);
         if (!/#include <cstddef>/.test(out)) out = out.replace('#include <cstdint>\n', '#include <cstddef>\n#include <cstdint>\n');
-        // an item type of the application's (declared by the service it goes to): named here, defined there
-        const custom = /^App::(\w+)$/.exec(ack.returnType);
-        if (custom) out = out.replace(`namespace ${c.name} {`, `namespace App { struct ${custom[1]}; }   // declared in the service's module file\n\nnamespace ${c.name} {`);
+        // item types of the application's (declared by the services they go to): named here, defined there
+        for (const a of acks) {
+            const custom = /^App::(\w+)$/.exec(a.returnType);
+            if (custom) out = out.replace(`namespace ${c.name} {`, `namespace App { struct ${custom[1]}; }   // declared in the service's module file\n\nnamespace ${c.name} {`);
+        }
     }
     return out;
 }
@@ -1228,6 +1311,8 @@ export interface AppProblem {
 }
 
 const COMPOSITE_KINDS = ['application', 'subsystem'];
+// Built-in services shown in the diagram (not modules of the code): the command service, fed by interrupt modules
+const BUILTIN_KINDS = ['commands'];
 const SERVICE_KINDS = ['spsc', 'mpsc', 'dma'];
 
 // What the provider found on disk for the Target's paths (targetPaths): exists, and the linker script's text
@@ -1263,6 +1348,7 @@ export function checkAppModel(app: any, models: AppModelInfo[], files?: TargetFi
     const modelUsers = new Map<string, string[]>();
     for (const c of components) {
         const where = { component: c.id };
+        if (BUILTIN_KINDS.includes(c.kind)) continue;   // the built-in Commands box: no code, no name of its own
         if (!/^[A-Za-z_]\w*$/.test(String(c.name || ''))) error(`"${c.name}" is not a C++ identifier`, where);
         // The application's own name is not a module of the code: it may equal its main actor's (Timebomb)
         if (c.kind !== 'application') {
@@ -1287,9 +1373,6 @@ export function checkAppModel(app: any, models: AppModelInfo[], files?: TargetFi
         }
         if (c.kind === 'periodic' && !(Number(c.period_ms) > 0)) error(`${c.name}: the period must be at least 1 ms`, where);
         if (c.kind === 'interrupt') {
-            if (c.commands && !features.commands) {
-                error(`Interrupt ${c.name} feeds the PC commands, but Commands (FA_TRACE_COMMANDS) is off`, where);
-            }
             if (!c.irq) warning(`Interrupt ${c.name}: no interrupt chosen (the board's Irq:: name)`, where);
             const maxSyscall = Number(settings.MaxSyscallPriority ?? 5);
             if (Number(c.pri) < maxSyscall) {
@@ -1351,8 +1434,11 @@ export function checkAppModel(app: any, models: AppModelInfo[], files?: TargetFi
             if (conn.item && to.item && conn.item !== to.item) {
                 error(`${from.name} → ${to.name}: pushes ${conn.item}, but ${to.name} takes ${to.item}`, where);
             }
+        } else if (conn.kind === 'stream' && to.kind === 'commands') {
+            if (from.kind !== 'interrupt') error(`${from.name} → PC commands: reception progress is reported by interrupt modules`, where);
+            if (!features.commands) error(`${from.name} → PC commands: Commands (FA_TRACE_COMMANDS) is off`, where);
         } else if (conn.kind === 'stream') {
-            if (to.kind !== 'dma') { error(`${from.name} → ${to.name}: a DMA stream goes to a DMA ring service`, where); continue; }
+            if (to.kind !== 'dma') { error(`${from.name} → ${to.name}: a DMA stream goes to a DMA ring service (or the PC commands)`, where); continue; }
             if (from.kind !== 'interrupt') warning(`${from.name} → ${to.name}: DMA progress is normally reported by an interrupt module`, where);
         }
     }
@@ -1384,6 +1470,14 @@ export function checkAppModel(app: any, models: AppModelInfo[], files?: TargetFi
             error(`Target: the linker script ${ld} has no .noinit section: the health monitor keeps its fault record there ` +
                   'across resets (add: .noinit (NOLOAD) : { *(.noinit*) } > RAM)');
         }
+    }
+
+    // The PC commands: fed by the receive interrupts of the command UART
+    const commandBoxes = components.filter(x => x.kind === 'commands');
+    if (commandBoxes.length > 1) error('More than one PC commands box: the command service is built in once', { component: commandBoxes[1].id });
+    if (features.commands && commandBoxes.length > 0 && !connections.some(x => x.to === commandBoxes[0].id)) {
+        warning('Nothing feeds the PC commands: draw a DMA stream from the command UART\'s receive interrupts (e.g. DMA and idle line) ' +
+                'to the PC commands box', { component: commandBoxes[0].id });
     }
 
     // Actors nothing posts to (they may still run on their own timers)
@@ -1427,6 +1521,41 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     // Writes the tool-owned application files (generateAppFiles) next to the model; refused while it has errors
+    // Application files named after the application (before 0.0.9: timebomb_config.hpp, ...): removed (they are
+    // generated: recognised by their banner), and the user's includes of them rewritten to the fixed names
+    private async migrateLegacyAppFiles(folderUri: vscode.Uri): Promise<string> {
+        const fixed = new Set(Object.values({ a: appFileName(null, 'config.hpp'), b: appFileName(null, 'app.hpp'), c: appFileName(null, 'app.cpp'),
+                                              d: appFileName(null, 'main.cpp'), e: appFileName(null, 'app_hw_contract.hpp') }));
+        const entries = await vscode.workspace.fs.readDirectory(folderUri);
+        const legacy: string[] = [];
+        for (const [name, type] of entries) {
+            if (type !== vscode.FileType.File || fixed.has(name) || !LEGACY_APP_FILE.test(name)) continue;
+            const text = await readFileIfExists(vscode.Uri.joinPath(folderUri, name));
+            if (text !== undefined && LEGACY_APP_BANNERS.some(b => text.includes(b))) legacy.push(name);
+        }
+        if (legacy.length === 0) return '';
+        const rewritten: string[] = [];
+        const sources: vscode.Uri[] = entries.filter(([n, t]) => t === vscode.FileType.File && /\.(hpp|h|cpp|c)$/.test(n) && !legacy.includes(n))
+                                             .map(([n]) => vscode.Uri.joinPath(folderUri, n));
+        if (await fileExists(vscode.Uri.joinPath(folderUri, 'tests'))) {
+            for (const [n, t] of await vscode.workspace.fs.readDirectory(vscode.Uri.joinPath(folderUri, 'tests'))) {
+                if (t === vscode.FileType.File && /\.(hpp|cpp)$/.test(n)) sources.push(vscode.Uri.joinPath(folderUri, 'tests', n));
+            }
+        }
+        for (const uri of sources) {
+            const text = await readFileIfExists(uri);
+            if (text === undefined) continue;
+            const updated = rewriteLegacyAppIncludes(text, legacy);
+            if (updated !== text) {
+                await vscode.workspace.fs.writeFile(uri, stringToUint8Array(updated));
+                rewritten.push(uri.path.split('/').pop()!);
+            }
+        }
+        for (const name of legacy) await vscode.workspace.fs.delete(vscode.Uri.joinPath(folderUri, name));
+        return ` The application's files now have fixed names (app_config.hpp, app.hpp, app.cpp, app_main.cpp): removed ${legacy.join(', ')}` +
+               (rewritten.length > 0 ? `; includes updated in ${rewritten.join(', ')}.` : '.');
+    }
+
     // The Target's files as the checks need them: whether each exists, and the linker script's text
     private async targetFiles(app: any, folderUri: vscode.Uri): Promise<TargetFiles> {
         const files: TargetFiles = {};
@@ -1487,6 +1616,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             vscode.window.showErrorMessage(`❌ Export failed: the application model is not valid JSON (${e.message})`);
             return;
         }
+        if (await editJsonDocument(document.uri, a => normalizeAppModel(a))) app = JSON.parse(document.getText());
         const errors = checkAppModel(app, models, await this.targetFiles(app, folderUri)).filter(p => p.severity === 'error');
         if (errors.length > 0) {
             vscode.window.showErrorMessage(`❌ Export refused: ${errors.length} error(s) in the application, e.g. "${errors[0]!.message}". ` +
@@ -1547,6 +1677,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             }
         }
         const { sources, missingActors } = await this.requirementSources(app, folderUri, models);
+        const migrationNote = await this.migrateLegacyAppFiles(folderUri);
         const files = generateAppFiles(app, models, sources.map(s => s.owner));
         for (const [file, content] of Object.entries(files)) {
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, file), stringToUint8Array(content));
@@ -1603,7 +1734,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}` +
             (exported.length > 0 ? `, and the state machines ${exported.join(', ')}.` : '.') +
             (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') +
-            (refreshed.length > 0 ? ` Updated from the diagram (not edited yet): ${refreshed.join(', ')}.` : '') + boardNote + firmwareNote + completionNote +
+            (refreshed.length > 0 ? ` Updated from the diagram (not edited yet): ${refreshed.join(', ')}.` : '') + boardNote + firmwareNote + completionNote + migrationNote +
             (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
     }
 
@@ -1612,7 +1743,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         const sources: RequirementSource[] = [];
         const missingActors: string[] = [];
         for (const c of (app.components || []) as any[]) {
-            if (c.kind === 'application' || c.kind === 'subsystem') continue;
+            if (c.kind === 'application' || c.kind === 'subsystem' || BUILTIN_KINDS.includes(c.kind)) continue;
             const owner = c.kind === 'actor' ? (models.find(m => m.file === c.model) || { name: c.name }).name : c.name;
             const content = await readFileIfExists(vscode.Uri.joinPath(folderUri, hwRequirementsFile(owner.toLowerCase())));
             if (content !== undefined) {
@@ -1727,6 +1858,8 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
             edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), JSON.stringify(defaultAppModel(name), null, 2));
             await vscode.workspace.applyEdit(edit);
         }
+        // the Commands box while Commands is on; a pre-0.0.9 commands checkbox becomes a stream arrow into it
+        await editJsonDocument(document.uri, a => normalizeAppModel(a));
 
         const mediaUri = vscode.Uri.joinPath(this.context.extensionUri, 'media');
         const html = uint8ArrayToString(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(mediaUri, 'app.html')));
@@ -2975,10 +3108,10 @@ export function generateCppBlueprintString(jsonText: string): string {
 }
 
 // The actor's default task settings. Inside an application model the application generates them from the
-// diagram (<app>_app.hpp defines FA_APP_MANAGED), so this block only applies to actors used on their own.
+// diagram (app.hpp defines FA_APP_MANAGED), so this block only applies to actors used on their own.
 export function actorTraitsBlock(machineName: string): string {
     return `// ==========================================================================\n` +
-           `// DEFAULT ACTOR TRAITS: used when no application model sets them (FA_APP_MANAGED, <app>_app.hpp)\n` +
+           `// DEFAULT ACTOR TRAITS: used when no application model sets them (FA_APP_MANAGED, app.hpp)\n` +
            `// ==========================================================================\n` +
            `#ifndef FA_APP_MANAGED\n` +
            `namespace Fa {\n\n` +
@@ -3002,7 +3135,7 @@ function wrapActorTraitsBlock(content: string, machineName: string): string {
     if (start < 0 || closing < 0) return content;
     if (content.slice(Math.max(0, start - 200), start).includes('#ifndef FA_APP_MANAGED')) return content;
     const end = closing + '} // namespace Fa'.length;
-    return content.slice(0, start) + '#ifndef FA_APP_MANAGED   // the application model sets the task (<app>_app.hpp)\n' +
+    return content.slice(0, start) + '#ifndef FA_APP_MANAGED   // the application model sets the task (app.hpp)\n' +
            content.slice(start, end) + '\n#endif // FA_APP_MANAGED' + content.slice(end);
 }
 

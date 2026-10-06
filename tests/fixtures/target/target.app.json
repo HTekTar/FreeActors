@@ -11,21 +11,148 @@
       "startup": "startup.c",
       "sources": [],
       "includes": [],
-      "defines": ["GENERIC_BOARD=1"],
+      "defines": [
+        "GENERIC_BOARD=1"
+      ],
       "flash": "openocd -f board/generic.cfg -c \"program {elf} verify reset exit\""
     }
   },
-  "features": { "trace": true, "commands": true, "health": true, "debug_commands": true },
+  "features": {
+    "trace": true,
+    "commands": true,
+    "health": true,
+    "debug_commands": true
+  },
   "settings": {},
   "components": [
-    { "id": "APP", "kind": "application", "name": "Bomb", "x": 40, "y": 40, "width": 980, "height": 600 },
-    { "id": "C_1", "kind": "periodic", "name": "ButtonPoller", "parent": "APP", "period_ms": 5, "priority": 3, "stack": 128, "x": 70, "y": 110, "width": 250, "height": 96 },
-    { "id": "C_2", "kind": "actor", "name": "Bomb", "parent": "APP", "priority": 2, "queue": 8, "stack": 128, "x": 340, "y": 110, "width": 250, "height": 96 },
-    { "id": "C_3", "kind": "subsystem", "name": "Commands", "parent": "APP", "x": 70, "y": 230, "width": 560, "height": 160 },
-    { "id": "C_4", "kind": "interrupt", "name": "CmdRxDma", "parent": "C_3", "irq": "command_rx_dma", "pri": 6, "commands": true, "x": 100, "y": 290, "width": 250, "height": 96 },
-    { "id": "C_5", "kind": "interrupt", "name": "CmdRxUart", "parent": "C_3", "irq": "command_rx_uart", "pri": 6, "commands": true, "x": 370, "y": 290, "width": 250, "height": 96 }
+    {
+      "id": "APP",
+      "kind": "application",
+      "name": "Bomb",
+      "x": 40,
+      "y": 40,
+      "width": 980,
+      "height": 600
+    },
+    {
+      "id": "C_1",
+      "kind": "periodic",
+      "name": "ButtonPoller",
+      "parent": "APP",
+      "period_ms": 5,
+      "priority": 3,
+      "stack": 128,
+      "x": 70,
+      "y": 110,
+      "width": 250,
+      "height": 96
+    },
+    {
+      "id": "C_2",
+      "kind": "actor",
+      "name": "Bomb",
+      "parent": "APP",
+      "priority": 2,
+      "queue": 8,
+      "stack": 128,
+      "x": 340,
+      "y": 110,
+      "width": 250,
+      "height": 96
+    },
+    {
+      "id": "C_3",
+      "kind": "subsystem",
+      "name": "Commands",
+      "parent": "APP",
+      "x": 70,
+      "y": 230,
+      "width": 560,
+      "height": 160
+    },
+    {
+      "id": "C_4",
+      "kind": "interrupt",
+      "name": "CmdRxDma",
+      "parent": "C_3",
+      "irq": "command_rx_dma",
+      "pri": 6,
+      "x": 100,
+      "y": 290,
+      "width": 250,
+      "height": 96
+    },
+    {
+      "id": "C_5",
+      "kind": "interrupt",
+      "name": "CmdRxUart",
+      "parent": "C_3",
+      "irq": "command_rx_uart",
+      "pri": 6,
+      "x": 370,
+      "y": 290,
+      "width": 250,
+      "height": 96
+    },
+    {
+      "id": "COMMANDS",
+      "kind": "commands",
+      "name": "PC commands",
+      "parent": "APP",
+      "x": 700,
+      "y": 290,
+      "width": 250,
+      "height": 96
+    },
+    {
+      "id": "C_6",
+      "kind": "interrupt",
+      "name": "Shared",
+      "parent": "APP",
+      "irq": "shared",
+      "pri": 7,
+      "x": 700,
+      "y": 420,
+      "width": 250,
+      "height": 96
+    }
   ],
   "connections": [
-    { "id": "L_1", "from": "C_1", "to": "C_2", "kind": "event", "events": ["ButtonPressed"] }
+    {
+      "id": "L_1",
+      "from": "C_1",
+      "to": "C_2",
+      "kind": "event",
+      "events": [
+        "ButtonPressed"
+      ]
+    },
+    {
+      "id": "L_2",
+      "from": "C_4",
+      "to": "COMMANDS",
+      "kind": "stream"
+    },
+    {
+      "id": "L_3",
+      "from": "C_5",
+      "to": "COMMANDS",
+      "kind": "stream"
+    },
+    {
+      "id": "L_4",
+      "from": "C_6",
+      "to": "C_2",
+      "kind": "event",
+      "events": [
+        "ButtonPressed"
+      ]
+    },
+    {
+      "id": "L_5",
+      "from": "C_6",
+      "to": "COMMANDS",
+      "kind": "stream"
+    }
   ]
 }

@@ -58,10 +58,38 @@ const exists = (f) => fs.existsSync(path.join(dir, f));
           JSON.parse(appDoc.getText()).components.find(c => c.id === 'C_2').model === 'Timebomb.hsm.json', { hsm, errors: log.error });
     check('... and exports it with the application: actor, events, requirements, tests, app files, framework',
           ['timebomb_actor.hpp', 'timebomb_events.hpp', 'timebomb_hw_requirements.hpp', 'tests/timebomb_actor_test.cpp',
-           'buttonpoller_module.hpp', 'timebomb_app.hpp', 'timebomb_main.cpp', 'freeactors/fa_app.hpp', 'CMakeLists.txt',
+           'buttonpoller_module.hpp', 'app.hpp', 'app_main.cpp', 'freeactors/fa_app.hpp', 'CMakeLists.txt',
            '.clangd', '.vscode/settings.json']
               .every(exists) && /struct ButtonPressed/.test(read('timebomb_events.hpp')) && log.error.length === 0,
           { errors: log.error, info: log.info });
+
+    // ---- A pre-0.0.9 interrupt with the commands checkbox becomes a stream arrow into the PC commands box ----
+    {
+        const legacyDir = path.join(dir, 'legacy');
+        fs.mkdirSync(legacyDir, { recursive: true });
+        fs.writeFileSync(path.join(legacyDir, 'Old.app.json'), JSON.stringify({ name: 'Old', board: {}, features: { trace: true, commands: true }, settings: {},
+            components: [{ id: 'APP', kind: 'application', name: 'Old', x: 40, y: 40, width: 980, height: 600 },
+                         { id: 'C_1', kind: 'interrupt', name: 'Rx', parent: 'APP', irq: 'rx', pri: 6, commands: true, x: 70, y: 110, width: 250, height: 96 }],
+            connections: [] }, null, 2));
+        const oldDoc = await fake.workspace.openTextDocument(fake.Uri.file(path.join(legacyDir, 'Old.app.json')));
+        await appEditor.resolveCustomTextEditor(oldDoc, fake.test.panel(), {});
+        const migrated = JSON.parse(oldDoc.getText());
+        check('a pre-0.0.9 commands checkbox becomes a stream arrow into the PC commands box (opened in the editor)',
+              migrated.components.some(c => c.kind === 'commands' && c.id === 'COMMANDS') && !migrated.components.find(c => c.id === 'C_1').commands &&
+              migrated.connections.some(x => x.from === 'C_1' && x.to === 'COMMANDS' && x.kind === 'stream'), migrated);
+    }
+
+    // ---- Application files named after the application (before 0.0.9): migrated once to the fixed names ----
+    fs.writeFileSync(path.join(dir, 'timebomb_config.hpp'), '// AUTO-GENERATED APPLICATION CONFIGURATION - DO NOT HAND-EDIT\n');
+    fs.writeFileSync(path.join(dir, 'timebomb_main.cpp'), "// AUTO-GENERATED - DO NOT HAND-EDIT. The firmware's entry point\n");
+    fs.writeFileSync(path.join(dir, 'mine_main.cpp'), '// my own file\n');
+    fs.writeFileSync(path.join(dir, 'buttonpoller_module.hpp'), read('buttonpoller_module.hpp').replace('#include "app_config.hpp"', '#include "timebomb_config.hpp"'));
+    log.info.length = 0;
+    await appPanel.send({ type: 'exportApplication' });
+    check('legacy application files (named after the application) are removed and the includes of them rewritten; other files kept',
+          !exists('timebomb_config.hpp') && !exists('timebomb_main.cpp') && exists('mine_main.cpp') && exists('app_config.hpp') &&
+          read('buttonpoller_module.hpp').includes('#include "app_config.hpp"') &&
+          log.info.some(m => m.includes('fixed names') && m.includes('buttonpoller_module.hpp')), log.info);
 
     // ---- Starter files follow the diagram until edited: an interrupt exported before its properties were set ----
     const withIrq = JSON.parse(appDoc.getText());
@@ -70,9 +98,11 @@ const exists = (f) => fs.existsSync(path.join(dir, f));
     await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(withIrq, null, 2) });
     await appPanel.send({ type: 'exportApplication' });
     const before = read('cmdrx_module.hpp');
-    withIrq.components.find(c => c.id === 'C_9').irq = 'cmd_rx';
-    withIrq.components.find(c => c.id === 'C_9').commands = true;
-    await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(withIrq, null, 2) });
+    const boxed = JSON.parse(appDoc.getText());   // export added the PC commands box (Commands is on)
+    boxed.components.find(c => c.id === 'C_9').irq = 'cmd_rx';
+    boxed.connections.push({ id: 'L_90', from: 'C_9', to: 'COMMANDS', kind: 'stream' });
+    await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(boxed, null, 2) });
+    Object.assign(withIrq, boxed);
     log.info.length = 0;
     await appPanel.send({ type: 'exportApplication' });
     check('an untouched starter file follows the diagram: properties set after the first export reach the module and its requirements',
@@ -86,7 +116,9 @@ const exists = (f) => fs.existsSync(path.join(dir, f));
     check('... and once edited it is the user\'s: never rewritten', read('cmdrx_module.hpp').includes('static void handler() {   // mine'),
           read('cmdrx_module.hpp'));
     const cleaned = JSON.parse(appDoc.getText());
-    cleaned.components = cleaned.components.filter(c => c.id !== 'C_9');
+    cleaned.components = cleaned.components.filter(c => c.id !== 'C_9' && c.id !== 'COMMANDS');
+    cleaned.connections = cleaned.connections.filter(x => x.from !== 'C_9');
+    cleaned.features = {};
     await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(cleaned, null, 2) });
 
     // ---- Events typed in the application become signals of the machine ----

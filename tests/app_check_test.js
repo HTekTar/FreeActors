@@ -98,8 +98,17 @@ expectWithFiles('a linker script without the .noinit section the health monitor 
 expectWithFiles('a source file of the Target that does not exist (a warning: the SDK may come later)',
                 withTarget({ core: 'cortex-m4f', linker_script: 'board.ld', sources: ['sdk/hal.c'] }),
                 { 'board.ld': { exists: true, content: '.noinit (NOLOAD) : {}' }, 'sdk/hal.c': { exists: false } }, 'Target: sdk/hal.c not found', 'warning');
-expect('an interrupt feeding the PC commands while Commands is off',
-       variant(a => { a.features.commands = false; a.features.debug_commands = false; comp(a, 'CommandRxDma').commands = true; }),
-       'feeds the PC commands, but Commands (FA_TRACE_COMMANDS) is off', 'C_4');
+const withBox = (change) => variant(a => {
+    a.components.push({ id: 'COMMANDS', kind: 'commands', name: 'PC commands', parent: 'APP', x: 0, y: 0, width: 250, height: 96 });
+    change(a);
+});
+expect('a stream into the PC commands while Commands is off', withBox(a => {
+    a.features.commands = false; a.features.debug_commands = false;
+    a.connections.push({ id: 'L_9', from: 'C_4', to: 'COMMANDS', kind: 'stream' });
+}), 'Commands (FA_TRACE_COMMANDS) is off', 'L_9');
+expect('a stream into the PC commands not from an interrupt module', withBox(a => {
+    a.connections.push({ id: 'L_9', from: 'C_1', to: 'COMMANDS', kind: 'stream' });
+}), 'reception progress is reported by interrupt modules', 'L_9');
+expect('the PC commands with nothing feeding them (a warning)', withBox(() => {}), 'Nothing feeds the PC commands', 'COMMANDS', 'warning');
 
 process.exit(failures === 0 ? 0 : 1);
