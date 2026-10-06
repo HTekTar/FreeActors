@@ -129,6 +129,26 @@ namespace Fa{
         template <typename M>
         static void trace(TraceKind /*kind*/, uint16_t /*id*/) {}
     };
+
+#ifdef FA_IDE
+    // Seen only by the IDE (clangd defines FA_IDE through the generated .clangd), never compiled: what a module's
+    // Ctx and an interrupt module's IsrCtx offer, as concrete types, so the editor completes Ctx:: and IsrCtx::
+    // (in the module, Ctx is a template parameter, which an IDE cannot look into)
+    namespace ide {
+        struct Context {   // periodic modules and services (Application::AppContext)
+            template <typename E> static void post(E const& event);       // to the actor accepting E
+            template <typename T> static bool mpsc_push(T const& item);   // to the MPSC service owning T
+            template <typename T> static bool spsc_push(T const& item);   // to the SPSC service owning T (its only producer)
+        };
+        struct IsrContext {   // interrupt modules (only what an interrupt may do)
+            template <typename E> static void post(E const& event);       // to the actor accepting E
+            template <typename T> static bool push(T const& item);        // to the SPSC or MPSC service owning T
+            template <template <typename, typename> class S>
+            static void stream(size_t position);                          // DMA ring service S: written up to position
+            static void command_rx(size_t position);                      // the PC commands' receive DMA: written up to position
+        };
+    }
+#endif
 }
 
 #endif

@@ -81,6 +81,12 @@ struct Context {
         return App::mpsc_push(item);
     }
 
+    // To the SPSC service owning T (exactly one, and this task its only producer)
+    template <typename T>
+    static bool spsc_push(T const& item) {
+        return App::spsc_push(item);
+    }
+
     template <typename M>
     static void trace(TraceKind kind, uint16_t id) {
         App::trace_record(kind, App::template sender_id<M>, id);

@@ -247,6 +247,13 @@ app_generation_checks() {
             echo "FAIL  app generation: $f does not compile (log: tests/build/app/${f%.cpp}.log)"; grep -m 5 error "$app/${f%.cpp}.log"; status=1
         fi
     done
+    # The IDE's view (FA_IDE, as clangd sees it): every module file parses with Ctx / IsrCtx as the concrete stand-ins
+    local ide_ok=1
+    for f in "$app"/*_module.hpp; do
+        arm-none-eabi-g++ "${flags[@]}" -DFA_IDE -fsyntax-only -x c++ "$f" 2>> "$app/ide.log" || ide_ok=0
+    done
+    if [ $ide_ok = 1 ]; then echo "PASS  app generation: every module file parses as the IDE sees it (FA_IDE: Hw, Ctx, IsrCtx concrete)"
+    else echo "FAIL  app generation: a module file in the IDE's view (log: tests/build/app/ide.log)"; grep -m 5 error "$app/ide.log"; status=1; fi
     # The board blueprint: generated from the requirements, the same application must compile against it as is
     node "$ROOT/tests/board_test.js" "$app" || status=1
     if arm-none-eabi-g++ "${flags[@]}" -I"$app/on_board" -c "$app/on_board/app.cpp" -o "$app/on_board/app.o" 2> "$app/on_board/app.log"; then

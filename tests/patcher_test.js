@@ -74,4 +74,31 @@ fs.writeFileSync(path.join(path.dirname(outPath), 'timebomb_events.hpp'), ev);
 const list = ext.generateCppEventListString(jsonText, ev);
 check('events: the event list pins the hand-added field', list.includes('sizeof(Timebomb::ButtonPressed) == 1'));
 fs.writeFileSync(path.join(path.dirname(outPath), 'timebomb_event_list.hpp'), list);
+
+// Module files written before the IDE saw Ctx: the template parameter becomes CtxPolicy and the IDE block chooses
+// Ctx (Fa::ide::Context), so Ctx:: completes; the user's code is kept; an interrupt module's IsrCtx likewise
+const oldModule = `namespace App {
+
+template <typename HwPolicy, typename Ctx>
+struct ButtonPoller : Fa::TimeServiceInterface<ButtonPoller<HwPolicy, Ctx>, AppConfig::ButtonPoller::period_ms> {
+#ifdef FA_IDE
+    using Hw = ::ButtonPoller::HwRequirements;   // seen only by the IDE: completion of what this module requires
+#else
+    using Hw = HwPolicy;
+#endif
+    static void task() noexcept { if (Hw::read_button()) Ctx::post(Timebomb::ButtonPressed{}); }   // mine
+};
+}`;
+const patchedModule = ext.patchModuleContext(oldModule, 'ButtonPoller');
+check('module: Ctx becomes CtxPolicy, the IDE block chooses Fa::ide::Context, the code is kept',
+      patchedModule.includes('template <typename HwPolicy, typename CtxPolicy>\nstruct ButtonPoller : Fa::TimeServiceInterface<ButtonPoller<HwPolicy, CtxPolicy>,') &&
+      /#ifdef FA_IDE\n    using Hw = ::ButtonPoller::HwRequirements;[^\n]*\n    using Ctx = Fa::ide::Context;[^\n]*\n#else\n    using Hw = HwPolicy;\n    using Ctx = CtxPolicy;\n#endif/.test(patchedModule) &&
+      patchedModule.includes('Ctx::post(Timebomb::ButtonPressed{}); }   // mine'));
+check('module: patching again changes nothing', ext.patchModuleContext(patchedModule, 'ButtonPoller') === patchedModule);
+const oldIsr = oldModule.replace(/ButtonPoller/g, 'Tap').replace(/typename Ctx>/, 'typename IsrCtx>').replace('Tap<HwPolicy, Ctx>', 'Tap<HwPolicy, IsrCtx>')
+                        .replace('Fa::TimeServiceInterface<Tap<HwPolicy, IsrCtx>, AppConfig::Tap::period_ms>', 'Fa::InterruptInterface<Tap<HwPolicy, IsrCtx>>');
+const patchedIsr = ext.patchModuleContext(oldIsr, 'Tap');
+check('module: an interrupt module\'s IsrCtx likewise (Fa::ide::IsrContext)',
+      patchedIsr.includes('struct Tap : Fa::InterruptInterface<Tap<HwPolicy, IsrCtxPolicy>>') &&
+      patchedIsr.includes('    using IsrCtx = Fa::ide::IsrContext;') && patchedIsr.includes('    using IsrCtx = IsrCtxPolicy;'));
 process.exit(failures === 0 ? 0 : 1);

@@ -714,6 +714,27 @@ export function isUntouchedStub(content: string): boolean {
     return fnv1a(content.slice(0, at)) === hash;
 }
 
+// A module file written before the IDE saw Ctx (template <typename HwPolicy, typename Ctx>): the template parameter
+// becomes CtxPolicy (IsrCtxPolicy) and the IDE block chooses Ctx, so Ctx:: completes; the user's code is untouched
+// (it keeps calling Ctx::post ...). Returns the content unchanged if there is nothing to do.
+export function patchModuleContext(content: string, name: string): string {
+    for (const ctx of ['Ctx', 'IsrCtx']) {
+        const head = `template <typename HwPolicy, typename ${ctx}>\nstruct ${name} `;
+        if (!content.includes(head)) continue;
+        const ideLine = `    using Hw = ::${name}::HwRequirements;`;
+        const hwLine = `    using Hw = HwPolicy;\n`;
+        const ide = content.indexOf(ideLine);
+        if (ide < 0 || content.indexOf(hwLine, ide) < 0) return content;   // not the generated block: leave it alone
+        let out = content.replace(head, `template <typename HwPolicy, typename ${ctx}Policy>\nstruct ${name} `)
+                         .split(`${name}<HwPolicy, ${ctx}>`).join(`${name}<HwPolicy, ${ctx}Policy>`);
+        const ideEnd = out.indexOf('\n', out.indexOf(ideLine)) + 1;
+        out = out.slice(0, ideEnd) + `    using ${ctx} = Fa::ide::${ctx === 'Ctx' ? 'Context' : 'IsrContext'};      // ... and of what ${ctx}:: offers\n` + out.slice(ideEnd);
+        const hw = out.indexOf(hwLine, out.indexOf(ideLine)) + hwLine.length;
+        return out.slice(0, hw) + `    using ${ctx} = ${ctx}Policy;\n` + out.slice(hw);
+    }
+    return content;
+}
+
 // The user-owned file of a periodic module, interrupt module or service (its template App::<Name>)
 export const moduleFileName = (name: string) => `${String(name).toLowerCase()}_module.hpp`;
 
@@ -980,9 +1001,13 @@ export function generateModuleRequirementsStub(app: any, c: any, models: AppMode
 }
 
 // The module's API block: Hw for the board, and under FA_IDE (clangd only) its requirements for completion
-function moduleApiBlock(name: string): string {
+// The module's view of the board (Hw) and of the application (Ctx, or IsrCtx in an interrupt module). For the IDE
+// (FA_IDE, clangd only) both are concrete types, so Hw:: and Ctx:: complete; the compiler sees the template's
+function moduleApiBlock(name: string, isr = false): string {
+    const ctx = isr ? 'IsrCtx' : 'Ctx';
     return `#ifdef FA_IDE\n    using Hw = ::${name}::HwRequirements;   // seen only by the IDE: completion of what this module requires\n` +
-           `#else\n    using Hw = HwPolicy;\n#endif\n` +
+           `    using ${ctx} = Fa::ide::${isr ? 'IsrContext' : 'Context'};      // ... and of what ${ctx}:: offers\n` +
+           `#else\n    using Hw = HwPolicy;\n    using ${ctx} = ${ctx}Policy;\n#endif\n` +
            `    static_assert(::${name}::HwContract<HwPolicy>::verify());   // the board provides what this module requires\n`;
 }
 
@@ -1030,8 +1055,8 @@ export function generateModuleSkeleton(app: any, c: any, models: AppModelInfo[])
     out += `\nnamespace App {\n\n`;
 
     if (c.kind === 'periodic') {
-        out += `template <typename HwPolicy, typename Ctx>\n`;
-        out += `struct ${c.name} : Fa::TimeServiceInterface<${c.name}<HwPolicy, Ctx>, AppConfig::${c.name}::period_ms> {\n`;
+        out += `template <typename HwPolicy, typename CtxPolicy>\n`;
+        out += `struct ${c.name} : Fa::TimeServiceInterface<${c.name}<HwPolicy, CtxPolicy>, AppConfig::${c.name}::period_ms> {\n`;
         out += moduleApiBlock(c.name) + `\n`;
         out += `    // Runs every AppConfig::${c.name}::period_ms milliseconds, in this module's own task\n`;
         out += `    static void task() noexcept {\n`;
@@ -1039,9 +1064,9 @@ export function generateModuleSkeleton(app: any, c: any, models: AppModelInfo[])
         out += `    }\n`;
         out += `\nprivate:\n    // State kept between iterations, e.g.: static inline bool last = false;\n`;
     } else if (c.kind === 'interrupt') {
-        out += `template <typename HwPolicy, typename IsrCtx>\n`;
-        out += `struct ${c.name} : Fa::InterruptInterface<${c.name}<HwPolicy, IsrCtx>> {\n`;
-        out += moduleApiBlock(c.name) + `\n`;
+        out += `template <typename HwPolicy, typename IsrCtxPolicy>\n`;
+        out += `struct ${c.name} : Fa::InterruptInterface<${c.name}<HwPolicy, IsrCtxPolicy>> {\n`;
+        out += moduleApiBlock(c.name, true) + `\n`;
         out += `    static constexpr auto IRQNum = Hw::Irq::${c.irq || 'irq'};          // which interrupt: the board's\n`;
         out += `    static constexpr uint32_t PRI = AppConfig::${c.name}::pri;   // its priority: from the diagram\n\n`;
         out += `    // Runs in the interrupt: keep it short. IsrCtx offers only what an interrupt may do (post, push, stream).\n`;
@@ -1055,11 +1080,11 @@ export function generateModuleSkeleton(app: any, c: any, models: AppModelInfo[])
             out += `// Items are copied into the buffer (and may come from interrupts): keep them small and plain.\n`;
             out += `struct ${element} {\n    // e.g. uint32_t code = 0;\n};\n\n`;
         }
-        out += `template <typename HwPolicy, typename Ctx>\n`;
-        out += `struct ${c.name} : Fa::${base}<${c.name}<HwPolicy, Ctx>, ${element}, AppConfig::${c.name}::size> {\n`;
+        out += `template <typename HwPolicy, typename CtxPolicy>\n`;
+        out += `struct ${c.name} : Fa::${base}<${c.name}<HwPolicy, CtxPolicy>, ${element}, AppConfig::${c.name}::size> {\n`;
         out += moduleApiBlock(c.name) + `\n`;
         if (c.kind === 'dma') {
-            out += `    using Base = Fa::${base}<${c.name}<HwPolicy, Ctx>, ${element}, AppConfig::${c.name}::size>;\n\n`;
+            out += `    using Base = Fa::${base}<${c.name}<HwPolicy, CtxPolicy>, ${element}, AppConfig::${c.name}::size>;\n\n`;
             out += `    // Once, in this service's task, before data flows: start the board's circular DMA into Base::buffer()\n`;
             out += `    static void on_start() noexcept {\n        // e.g. Hw::${String(c.name).toLowerCase()}_start(Base::buffer(), Base::size);\n    }\n\n`;
             out += `    // Data the DMA wrote, in place (at most two spans per wake-up: the ring wraps)\n`;
@@ -1648,6 +1673,7 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         }
         await copyFrameworkFilesToWorkspace(this.context, folderUri);   // also without actors: modules need it
         const refreshed: string[] = [];   // starter files not yet edited, rewritten from the diagram
+        const patchedModules: string[] = [];   // your module files, given the IDE's view of Ctx (your code untouched)
         // Modules: requirements and module file created once (yours); contract and TestBsp regenerated
         for (const c of (app.components || []) as any[]) {
             if (!['periodic', 'interrupt', 'spsc', 'mpsc', 'dma'].includes(c.kind)) continue;
@@ -1668,6 +1694,13 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                                                 stringToUint8Array(generateCppTestBspString(c.name, requirements)));
             const moduleUri = vscode.Uri.joinPath(folderUri, moduleFileName(c.name));
             const existingModule = await readFileIfExists(moduleUri);
+            if (existingModule !== undefined && !isUntouchedStub(existingModule)) {
+                const patched = patchModuleContext(existingModule, c.name);
+                if (patched !== existingModule) {
+                    await vscode.workspace.fs.writeFile(moduleUri, stringToUint8Array(patched));
+                    patchedModules.push(moduleFileName(c.name));
+                }
+            }
             if (existingModule === undefined || isUntouchedStub(existingModule)) {
                 const fresh = withStubMarker(generateModuleSkeleton(app, c, models));
                 if (fresh !== existingModule) {
@@ -1734,7 +1767,8 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}` +
             (exported.length > 0 ? `, and the state machines ${exported.join(', ')}.` : '.') +
             (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') +
-            (refreshed.length > 0 ? ` Updated from the diagram (not edited yet): ${refreshed.join(', ')}.` : '') + boardNote + firmwareNote + completionNote + migrationNote +
+            (refreshed.length > 0 ? ` Updated from the diagram (not edited yet): ${refreshed.join(', ')}.` : '') +
+            (patchedModules.length > 0 ? ` Ctx:: now completes in ${patchedModules.join(', ')} (your code unchanged).` : '') + boardNote + firmwareNote + completionNote + migrationNote +
             (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
     }
 
