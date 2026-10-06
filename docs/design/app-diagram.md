@@ -110,7 +110,7 @@ Not yet: rate and queue-size warnings (they need a rate on each connection).
 | `<app>_app.hpp` | tool | includes; `AppTraits` from features and settings; `ActorTraits` / `TimeServiceTraits` specialisations from the box properties; `using Application = Fa::Application<AppTraits, ...>` in diagram order |
 | `<app>_app.cpp` | tool | `vApplicationTickHook`, `vApplicationGetIdleTaskMemory`, `vApplicationStackOverflowHook` (calls an optional board hook), `app_start()` |
 | `app_api.h` | tool | **C API** for code outside FreeActors running in tasks (existing C code, SDK callbacks): `void app_post_button_pressed(void);`, `void app_post_temperature(int16_t celsius);` |
-| `<module>_module.hpp` | user, created once | a periodic module, service or interrupt module: the generated shell (template header, `post`/`IsrCtx`, `Hw`, `FA_IDE` block as for actors) with an empty `task()` / `consume_batch()` / `handler()` to fill in |
+| `<module>_module.hpp` | user, created once (rewritten from the diagram while unedited: a fingerprint line marks a starter file) | a periodic module, service or interrupt module: the generated shell (template header, `post`/`IsrCtx`, `Hw`, `FA_IDE` block as for actors) with an empty `task()` / `consume_batch()` / `handler()` to fill in |
 | `<app>_on_init.cpp` | user, created once (optional) | `void app_on_init()`: code outside FreeActors started before the scheduler (legacy C tasks, an SDK's stack) |
 | `main.cpp` (firmware) | tool | `int main() { app_start(); }` |
 

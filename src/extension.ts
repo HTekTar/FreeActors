@@ -402,11 +402,18 @@ export function generateFirmwareCMake(app: any): string {
     out += `    message(FATAL_ERROR "FreeRTOS kernel not found at '\${FREERTOS_KERNEL_PATH}': set it in the application's Target, or FREERTOS_KERNEL_PATH")\n`;
     out += `endif()\n`;
     out += `set(FA_FREERTOS_PORT \${FREERTOS_KERNEL_PATH}/portable/GCC/${core.port})   # ${core.label}\n\n`;
+    // The Target's files: one not there yet (an SDK still to download) is reported, not fatal, so the project
+    // configures and the editor's completion works meanwhile; the build then stops at what is missing
+    const targetFiles = [...list(t.sources), ...((t.startup || '').trim() ? [t.startup!] : [])].map(cmakePath);
+    out += `set(FA_TARGET_SOURCES)\nset(FA_TARGET_MISSING)\n`;
+    out += `foreach(file\n${targetFiles.map(f => `        ${f}\n`).join('')}    )\n`;
+    out += `    if(EXISTS "\${file}")\n        list(APPEND FA_TARGET_SOURCES "\${file}")\n    else()\n        list(APPEND FA_TARGET_MISSING "\${file}")\n    endif()\nendforeach()\n`;
+    out += `if(FA_TARGET_MISSING)\n    list(JOIN FA_TARGET_MISSING "\\n  " missing)\n`;
+    out += `    message(WARNING "The application's Target names files that do not exist (yet), the build will fail until they do:\\n  \${missing}")\nendif()\n\n`;
     out += `add_executable(${name}\n`;
     out += `    ${appFileName(app, 'main.cpp')}                           # generated (Export Application)\n`;
     out += `    ${appFileName(app, 'app.cpp')}\n`;
-    for (const s of list(t.sources)) out += `    ${cmakePath(s)}\n`;
-    if ((t.startup || '').trim()) out += `    ${cmakePath(t.startup!)}\n`;
+    out += `    \${FA_TARGET_SOURCES}                                # the Target's sources and startup file\n`;
     for (const k of ['tasks.c', 'queue.c', 'list.c']) out += `    \${FREERTOS_KERNEL_PATH}/${k}\n`;
     for (const k of core.portSources) out += `    \${FA_FREERTOS_PORT}/${k}\n`;
     out += `)\nset_target_properties(${name} PROPERTIES SUFFIX ".elf")\n\n`;
@@ -424,6 +431,8 @@ export function generateFirmwareCMake(app: any): string {
     out += `target_link_options(${name} PRIVATE\n    \${FA_MCU_FLAGS}\n`;
     if ((t.linker_script || '').trim()) out += `    -T${cmakePath(t.linker_script!)}\n`;
     out += `    --specs=nano.specs --specs=nosys.specs\n    -Wl,--gc-sections\n    -Wl,-Map=\${CMAKE_CURRENT_BINARY_DIR}/${name}.map\n    -Wl,--print-memory-usage\n)\n\n`;
+    out += `# Code completion (clangd): the firmware's compile commands at the project root, where clangd finds them\n`;
+    out += `file(CREATE_LINK \${CMAKE_BINARY_DIR}/compile_commands.json \${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json SYMBOLIC)\n\n`;
     out += `add_custom_command(TARGET ${name} POST_BUILD\n`;
     out += `    COMMAND \${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${name}> \${CMAKE_CURRENT_BINARY_DIR}/${name}.bin\n`;
     out += `    COMMAND \${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${name}> \${CMAKE_CURRENT_BINARY_DIR}/${name}.hex\n`;
@@ -658,6 +667,31 @@ const TASK_KINDS = ['periodic', 'spsc', 'mpsc', 'dma'];      // modules with a t
 
 export const appFileName = (app: any, suffix: string) =>
     `${String(app.name || 'App').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase()}_${suffix}`;
+// ---- Starter files that follow the diagram until edited ----------------------------------------------------
+// A starter file Export Application creates (a module, its requirements) ends with a fingerprint of its content.
+// While the file is unchanged, export rewrites it from the diagram (a property set after the first export reaches
+// it); once edited, the fingerprint no longer matches and the file is the user's, never touched again.
+const STUB_MARKER = '// FreeActors starter file: export keeps it in step with the diagram until you edit it. fa-stub:';
+
+function fnv1a(text: string): string {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h.toString(16).padStart(8, '0');
+}
+
+export function withStubMarker(content: string): string {
+    const body = content.endsWith('\n') ? content : content + '\n';
+    return `${body}${STUB_MARKER}${fnv1a(body)}\n`;
+}
+
+// True if the file is a starter file nobody has edited (its fingerprint matches its content)
+export function isUntouchedStub(content: string): boolean {
+    const at = content.lastIndexOf(STUB_MARKER);
+    if (at < 0) return false;
+    const hash = content.slice(at + STUB_MARKER.length).trim();
+    return fnv1a(content.slice(0, at)) === hash;
+}
+
 // The user-owned file of a periodic module, interrupt module or service (its template App::<Name>)
 export const moduleFileName = (name: string) => `${String(name).toLowerCase()}_module.hpp`;
 
@@ -1470,36 +1504,46 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         await addSentSignalsToModels(folderUri, app, models);
         models = await this.modelsIn(folderUri);
         const exported: string[] = [];
+        let completionNote = '';
         for (const c of ((app.components || []) as any[]).filter(c => c.kind === 'actor' && c.model)) {
             const uri = vscode.Uri.joinPath(folderUri, c.model);
             try {
                 const result = await exportStateMachine(this.context, folderUri, (await vscode.workspace.openTextDocument(uri)).getText());
                 exported.push(result.name);
+                if (result.completion) completionNote = result.completion;
             } catch (e: any) {
                 vscode.window.showErrorMessage(`❌ Export of ${c.model} failed: ${e.message}`);
                 return;
             }
         }
         await copyFrameworkFilesToWorkspace(this.context, folderUri);   // also without actors: modules need it
+        const refreshed: string[] = [];   // starter files not yet edited, rewritten from the diagram
         // Modules: requirements and module file created once (yours); contract and TestBsp regenerated
         for (const c of (app.components || []) as any[]) {
             if (!['periodic', 'interrupt', 'spsc', 'mpsc', 'dma'].includes(c.kind)) continue;
             const lower = String(c.name).toLowerCase();
             const reqUri = vscode.Uri.joinPath(folderUri, hwRequirementsFile(lower));
             let requirements = await readFileIfExists(reqUri);
-            if (requirements === undefined) {
-                requirements = generateModuleRequirementsStub(app, c, models);
-                await vscode.workspace.fs.writeFile(reqUri, stringToUint8Array(requirements));
-                created.push(hwRequirementsFile(lower));
+            if (requirements === undefined || isUntouchedStub(requirements)) {
+                const fresh = withStubMarker(generateModuleRequirementsStub(app, c, models));
+                if (fresh !== requirements) {
+                    (requirements === undefined ? created : refreshed).push(hwRequirementsFile(lower));
+                    requirements = fresh;
+                    await vscode.workspace.fs.writeFile(reqUri, stringToUint8Array(requirements));
+                }
             }
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_hw_contract.hpp`),
                                                 stringToUint8Array(generateCpHwContractString(c.name, requirements)));
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folderUri, `${lower}_test_bsp.hpp`),
                                                 stringToUint8Array(generateCppTestBspString(c.name, requirements)));
             const moduleUri = vscode.Uri.joinPath(folderUri, moduleFileName(c.name));
-            if (!(await fileExists(moduleUri))) {
-                await vscode.workspace.fs.writeFile(moduleUri, stringToUint8Array(generateModuleSkeleton(app, c, models)));
-                created.push(moduleFileName(c.name));
+            const existingModule = await readFileIfExists(moduleUri);
+            if (existingModule === undefined || isUntouchedStub(existingModule)) {
+                const fresh = withStubMarker(generateModuleSkeleton(app, c, models));
+                if (fresh !== existingModule) {
+                    (existingModule === undefined ? created : refreshed).push(moduleFileName(c.name));
+                    await vscode.workspace.fs.writeFile(moduleUri, stringToUint8Array(fresh));
+                }
             }
         }
         const { sources, missingActors } = await this.requirementSources(app, folderUri, models);
@@ -1520,6 +1564,12 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
                     if (!ours) { firmwareNote += ' CMakePresets.json is yours, so it was left as is: it needs a "firmware" preset with the toolchain file cmake/arm-none-eabi.cmake.'; continue; }
                 }
                 await vscode.workspace.fs.writeFile(uri, stringToUint8Array(content));
+            }
+            const gitignore = vscode.Uri.joinPath(folderUri, '.gitignore');
+            if (!(await fileExists(gitignore))) {
+                await vscode.workspace.fs.writeFile(gitignore, stringToUint8Array(
+                    '# Build output (CMake presets: host -> build/, firmware -> build-fw/)\n/build/\n/build-fw/\n\n' +
+                    '# clangd: a link to build-fw/compile_commands.json (machine-specific paths)\n/compile_commands.json\n'));
             }
             const userConfig = vscode.Uri.joinPath(folderUri, FREERTOS_USER_CONFIG_FILENAME);
             if (!(await fileExists(userConfig))) {
@@ -1552,7 +1602,8 @@ class FreeActorsAppEditorProvider implements vscode.CustomTextEditorProvider {
         }
         vscode.window.showInformationMessage(`🚀 Application exported: ${Object.keys(files).join(', ')}` +
             (exported.length > 0 ? `, and the state machines ${exported.join(', ')}.` : '.') +
-            (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') + boardNote + firmwareNote +
+            (created.length > 0 ? ` Created for you to fill in: ${created.join(', ')}.` : '') +
+            (refreshed.length > 0 ? ` Updated from the diagram (not edited yet): ${refreshed.join(', ')}.` : '') + boardNote + firmwareNote + completionNote +
             (missingActors.length > 0 ? ` Export these state machines too (their actor files are missing): ${missingActors.join(', ')}.` : ''));
     }
 
@@ -3140,6 +3191,24 @@ export function generateActorApiBlock(): string {
 
 // clangd configuration for an exported project (created once): FA_IDE for completion, nothing for the compiler
 export const CLANGD_FILENAME = '.clangd';
+export const VSCODE_SETTINGS_FILENAME = '.vscode/settings.json';
+
+// The project's VS Code settings for clangd (created once): clangd asks the real compilers for their standard
+// headers (without it, clangd may pick another GCC's headers and miss <cstdint>); it finds the compile commands
+// in build/ (cmake --preset host) by itself
+export function generateVscodeSettingsString(): string {
+    return `{\n` +
+        `    // C++ completion with clangd (created by FreeActors; yours to edit). clangd reads the firmware's compile\n` +
+        `    // commands (compile_commands.json, linked by cmake --preset firmware), else the host build's (build/,\n` +
+        `    // cmake --preset host), and asks the compilers in them (g++, arm-none-eabi-g++) for their standard headers.\n` +
+        `    // The Microsoft C/C++ extension's IntelliSense should be off:\n` +
+        `    // "C_Cpp.intelliSenseEngine": "disabled" (clangd offers to do it).\n` +
+        `    "clangd.arguments": [\n` +
+        `        "--query-driver=**/c++,**/*g++*,**/*gcc*",\n` +
+        `        "--header-insertion=never"\n` +
+        `    ]\n` +
+        `}\n`;
+}
 export function generateClangdConfigString(): string {
     return `# clangd only (never the compiler): FA_IDE gives FreeActors actors concrete declarations for completion\n` +
            `CompileFlags:\n` +
@@ -3646,7 +3715,7 @@ export function defaultHsmModel(name: string, signals: string[]): object {
     };
 }
 
-export interface StateMachineExport { name: string; message: string; hint?: string; }
+export interface StateMachineExport { name: string; message: string; hint?: string; completion?: string; }
 
 // Export of one state machine (the HSM editor's Export, and Export Application for every actor): the tool-owned
 // files rewritten, the user-owned ones created once or patched. Throws on an invalid model, before writing anything.
@@ -3716,6 +3785,17 @@ async function exportStateMachine(context: vscode.ExtensionContext, folderUri: v
     if (!(await fileExists(at('main.cpp')))) await write('main.cpp', generateCppCliSimulatorString(jsonText));
     if (!(await fileExists(at('CMakeLists.txt')))) await write('CMakeLists.txt', generateCMakeListsString(jsonText));
     if (!(await fileExists(at(CLANGD_FILENAME)))) await write(CLANGD_FILENAME, generateClangdConfigString());
+    // clangd's settings: created if missing; an existing file without them gets a hint (it is JSON with comments: not edited)
+    const settings = await readFileIfExists(at(VSCODE_SETTINGS_FILENAME));
+    let completionNote = '';
+    if (settings === undefined) {
+        await vscode.workspace.fs.createDirectory(at('.vscode'));
+        await write(VSCODE_SETTINGS_FILENAME, generateVscodeSettingsString());
+        completionNote = ' Code completion (clangd): configure once, cmake --preset firmware (or --preset host).';
+    } else if (!settings.includes('query-driver')) {
+        completionNote = ' Code completion (clangd): add to .vscode/settings.json "clangd.arguments": ["--query-driver=**/c++,**/*g++*,**/*gcc*"], ' +
+                         'and configure once (cmake --preset firmware, or --preset host).';
+    }
 
     // Host tests: the sources are created once (user-owned); the CMake include is tool-owned
     const testsDirUri = at('tests');
@@ -3753,7 +3833,10 @@ async function exportStateMachine(context: vscode.ExtensionContext, folderUri: v
     } else {
         message = `🔄 Synchronized '${blueprintFilename}' and '${hwContractFilename}'. Custom code untouched.${eventsNote}${renamedNote}`;
     }
-    return hint === undefined ? { name: hsmName, message } : { name: hsmName, message, hint };
+    message += completionNote;
+    const result: StateMachineExport = hint === undefined ? { name: hsmName, message } : { name: hsmName, message, hint };
+    if (completionNote) result.completion = completionNote;
+    return result;
 }
 
 class FreeActorsEditorProvider implements vscode.CustomTextEditorProvider {

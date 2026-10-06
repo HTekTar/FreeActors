@@ -58,9 +58,36 @@ const exists = (f) => fs.existsSync(path.join(dir, f));
           JSON.parse(appDoc.getText()).components.find(c => c.id === 'C_2').model === 'Timebomb.hsm.json', { hsm, errors: log.error });
     check('... and exports it with the application: actor, events, requirements, tests, app files, framework',
           ['timebomb_actor.hpp', 'timebomb_events.hpp', 'timebomb_hw_requirements.hpp', 'tests/timebomb_actor_test.cpp',
-           'buttonpoller_module.hpp', 'timebomb_app.hpp', 'timebomb_main.cpp', 'freeactors/fa_app.hpp', 'CMakeLists.txt']
+           'buttonpoller_module.hpp', 'timebomb_app.hpp', 'timebomb_main.cpp', 'freeactors/fa_app.hpp', 'CMakeLists.txt',
+           '.clangd', '.vscode/settings.json']
               .every(exists) && /struct ButtonPressed/.test(read('timebomb_events.hpp')) && log.error.length === 0,
           { errors: log.error, info: log.info });
+
+    // ---- Starter files follow the diagram until edited: an interrupt exported before its properties were set ----
+    const withIrq = JSON.parse(appDoc.getText());
+    withIrq.features = { trace: true, commands: true };
+    withIrq.components.push({ id: 'C_9', kind: 'interrupt', name: 'CmdRx', parent: 'APP', irq: '', pri: 6, x: 0, y: 400, width: 250, height: 96 });
+    await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(withIrq, null, 2) });
+    await appPanel.send({ type: 'exportApplication' });
+    const before = read('cmdrx_module.hpp');
+    withIrq.components.find(c => c.id === 'C_9').irq = 'cmd_rx';
+    withIrq.components.find(c => c.id === 'C_9').commands = true;
+    await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(withIrq, null, 2) });
+    log.info.length = 0;
+    await appPanel.send({ type: 'exportApplication' });
+    check('an untouched starter file follows the diagram: properties set after the first export reach the module and its requirements',
+          /Irq::irq\b/.test(before) && /IsrCtx::command_rx\(Hw::cmd_rx_ack\(\)\)/.test(read('cmdrx_module.hpp')) &&
+          /static size_t cmd_rx_ack\(\);/.test(read('cmdrx_hw_requirements.hpp')) &&
+          log.info.some(m => m.includes('Updated from the diagram (not edited yet): cmdrx_hw_requirements.hpp, cmdrx_module.hpp')), log.info);
+    fs.writeFileSync(path.join(dir, 'cmdrx_module.hpp'), read('cmdrx_module.hpp').replace('static void handler() {', 'static void handler() {   // mine'));
+    withIrq.components.find(c => c.id === 'C_9').pri = 7;
+    await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(withIrq, null, 2) });
+    await appPanel.send({ type: 'exportApplication' });
+    check('... and once edited it is the user\'s: never rewritten', read('cmdrx_module.hpp').includes('static void handler() {   // mine'),
+          read('cmdrx_module.hpp'));
+    const cleaned = JSON.parse(appDoc.getText());
+    cleaned.components = cleaned.components.filter(c => c.id !== 'C_9');
+    await appPanel.send({ type: 'documentEdit', jsonText: JSON.stringify(cleaned, null, 2) });
 
     // ---- Events typed in the application become signals of the machine ----
     const app2 = JSON.parse(appDoc.getText());

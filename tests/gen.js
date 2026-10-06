@@ -74,6 +74,7 @@ if (args[0] === '--project') {
         'main.cpp': ext.generateCppCliSimulatorString(jsonText),
         'CMakeLists.txt': ext.generateCMakeListsString(jsonText),
         [ext.CLANGD_FILENAME]: ext.generateClangdConfigString(),
+        [ext.VSCODE_SETTINGS_FILENAME]: ext.generateVscodeSettingsString(),
         [ext.TESTS_CMAKE_FILENAME]: ext.generateTestsCMakeString(jsonText),
         [`tests/${lowerName}_model_test.cpp`]: ext.generateCppModelTestStub(jsonText),
         [`tests/${lowerName}_actor_test.cpp`]: ext.generateCppActorTestStub(jsonText),
